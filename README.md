@@ -1,7 +1,7 @@
 # Fase 2: Backend de Addon Stremio no Galaxy A71 (Comet + Real-Debrid)
 
 *Início da Fase: 29/10/2026*  
-*Última atualização: 29/10/2026, 15:38 (horário de Brasília)*
+*Última atualização: 29/10/2026, 17:29 (horário de Brasília)*
 
 > **🤖 Para outra IA continuar daqui:** leia a **Seção 0** inteira antes de rodar qualquer comando. Ela descreve o estado real verificado no aparelho, o que já está pronto e o comando exato do próximo passo.  
 > O contexto completo da Fase 1 (rede `192.168.3.0/24`, IP fixo `192.168.3.44`, DNS `a71.lan`, AdGuard Home, ADB Wi-Fi permanente e regras de `su -c`) está em `README adguard contexto.md`.
@@ -39,7 +39,9 @@
   * **Reboot validado:** A71 reiniciado com sucesso via ADB. Boot completado em 68 s; HTTPS online em 95 s após comando de reboot (27 s após `sys.boot_completed`).
   * **Processos ativos e supervisionados:** AdGuard Home intacto (DNS respondendo), 1 watchdog Comet (PID 3648), 1 Comet (`python -m comet.main`, PID 3656), 1 Caddy (`caddy run`, PID 3664).
 * **Página `/configure` traduzida para PT-BR:** Template com explicações detalhadas em `comet-ui/index.html` aplicado em `/data/debian/opt/comet/comet/templates/index.html` (backup único em `index.html.orig`).
-* **Patch "PT-BR primeiro" aplicado no Comet (`PTBR_FIRST=True`):** Detecção ampliada de PT-BR (trackers BR, marcadores de título e grupos `PTBR_RELEASE_GROUPS`), ordenação de streams PT-BR no topo agrupados por resolução (preservando PT-BR no corte de `maxResultsPerResolution`) e rótulo visual `🇧🇷 PT-BR`. Salvo em `comet-patches/ptbr-first.patch`. **Nota:** após `git pull` do Comet, reaplicar `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`.
+* **Patch "PT-BR primeiro" aplicado no Comet (`PTBR_FIRST=True`):** Detecção ampliada de PT-BR (trackers BR, marcadores de título e grupos `PTBR_RELEASE_GROUPS`), ordenação de streams PT-BR no topo agrupados por resolução (preservando PT-BR no corte de `maxResultsPerResolution`) e rótulo visual `🇧🇷 PT-BR`. Salvo em `comet-patches/ptbr-first.patch`.
+* **Correção `magnet_error` no Real-Debrid (mesmo patch + `DOWNLOAD_GENERIC_TRACKERS=True`):** hashes vindos do Torrentio/StremThru chegam sem trackers; sem eles o RD não achava peers e recusava o magnet ("provider is currently unavailable" no Stremio). Agora `comet/debrid/stremthru.py` usa os 20 trackers públicos de `ngosang/trackerslist` quando o torrent não tem trackers próprios. **Nota:** após `git pull` do Comet, reaplicar `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`.
+* **StremThru self-hosted local (`v0.105.4`):** A instância pública (`stremthru.13377001.xyz`) dava `TimeoutError` / `magnet_error` ao adicionar torrents não cacheados no Real-Debrid (`POST /v0/store/magnets`). Compilado do código-fonte oficial (`MunifTanjim/stremthru` tag `0.105.4` com Go `1.26.10` `linux/arm64`, já que as releases não publicam binários pré-compilados) em `/usr/local/bin/stremthru` (`chmod 755`, no chroot), escutando apenas em `127.0.0.1:8080`, dados em `/var/lib/stremthru` (chroot), log em `/data/comet/stremthru.log` e RSS de ~60,6 MB (`62.084 KB`). No `.env` do Comet foi adicionado `STREMTHRU_URL=http://127.0.0.1:8080` (mantendo `STREMTHRU_SCRAPE_URL` público apenas para scraping).
 
 ### Checklist de progresso
 - [x] Conferir ADB (`192.168.3.44:5555`), root, internet do A71, espaço e RAM
@@ -66,11 +68,12 @@
 | `scripts/setup_comet.sh` | `/data/debian/root/setup_comet.sh` | ✅ Executado c/ sucesso | Instalou Python 3.13, GCC, Rust, `uv`, clonou Comet em `/opt/comet` e rodou `uv sync` (log em `/data/comet/setup.log`) |
 | `scripts/watchdog.sh` | `/data/comet/watchdog.sh` | ✅ Ativo (`755`) | Supervisiona a cada 30 s Comet (`comet.main`) e Caddy (`caddy run`); religa se caírem e limita `comet.log` e `caddy.log` a 5 MB |
 | `scripts/comet.sh` | `/data/adb/service.d/comet.sh` | ✅ Instalado (`755`) | Script de boot Magisk (`sleep 45` + sobe `/data/comet/watchdog.sh`) |
-| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
+| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True`, `DOWNLOAD_GENERIC_TRACKERS=True`, `STREMTHRU_URL=http://127.0.0.1:8080` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
+| *(compilado no chroot)* | `/data/debian/usr/local/bin/stremthru` | ✅ Ativo (`755`) | StremThru `v0.105.4` (`arm64`, compilado da tag `0.105.4`) em `127.0.0.1:8080` para operações de store Real-Debrid; dados em `/data/debian/var/lib/stremthru` e log em `/data/comet/stremthru.log` |
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python "PT-BR primeiro" (detecção PT-BR, ordenação `PTBR_FIRST` e rótulo `🇧🇷 PT-BR`) |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python "PT-BR primeiro" (detecção PT-BR, ordenação `PTBR_FIRST`, rótulo `🇧🇷 PT-BR` e trackers genéricos nos magnets sem trackers) |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**

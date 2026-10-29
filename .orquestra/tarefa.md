@@ -1,52 +1,52 @@
-# Tarefa: Comet "PT-BR primeiro" — detecção melhor, ordenação e rótulo 🇧🇷
+# Tarefa: (1) esconder torrents bloqueados pelo RD (451) e (2) Prowlarr local com indexadores BR
 
-Contexto: PowerShell em `C:\Users\Vendel\Desktop\Projetos\a71\STREMIO`. Comandos no A71: `.\scripts\a71.ps1 '<cmd>'` (root Android) / `.\scripts\a71.ps1 -Chroot '<cmd>'` (Debian). O Comet está em `/opt/comet` (chroot), é um repositório git limpo (exceto `comet/templates/index.html`, traduzido). Use o `.venv/bin/python` do Comet. O watchdog religa o Comet em até 30 s após `pkill -f "python -m comet.main"`.
+Contexto: PowerShell em `C:\Users\Vendel\Desktop\Projetos\a71\STREMIO`. Comandos no A71: `.\scripts\a71.ps1 '<cmd>'` (root Android) / `.\scripts\a71.ps1 -Chroot '<cmd>'` (Debian). Comet em `/opt/comet` (git; já tem patch local — veja `git -C /opt/comet diff --stat`). StremThru local em `127.0.0.1:8080`. Leia README Seção 0 e "Pegadinhas". Reinício do Comet: `pkill -f "python -m comet.main"` (watchdog religa em ≤30 s).
 
-## Objetivo do usuário
-Na lista de streams do Stremio (addon Comet A71), vir PRIMEIRO todo o conteúdo PT-BR agrupado por resolução: **4K PT-BR → 1080p PT-BR → 720p PT-BR → (demais resoluções PT-BR)**, e DEPOIS todo o resto na ordem normal do Comet. E identificar visualmente os PT-BR.
+---
+## PARTE 1 — Esconder torrents com 451 (infringing_file)
 
-## Diagnóstico já feito pelo orquestrador (não refaça, use)
-- O ranking vem de `comet/services/ranking.py` (`rank_worker` → RTN `sort_torrents`, que agrupa por resolução e ordena por rank). Preferred=pt dá só +10000 e REMUX em inglês passa disso → dublado fica em ~#42.
-- A detecção de idioma: RTN `parse()` + "smart language detection" em `comet/services/filtering.py` (`filter_worker`, ~linha 307–360, adiciona idioma via alias de título). Ex.: `Devoradores de Estrelas 2026 WEB-DL 1080p ... DUAL 5.1` (tracker `Torrentio|Comando`/`Torrentio|BluDV`) é detectado como pt; `Project.Hail.Mary.2026.1080p.iT.WEB-DL...DUAL-BiOMA` NÃO é.
-- Depois do ranking, o Comet separa cached/uncached ao montar a resposta (veja `comet/services/media_search.py`, `sortCachedUncachedTogether`). A ordenação final PT-BR precisa ser aplicada no ponto em que a lista FINAL de streams é montada, para não ser desfeita depois.
+Diagnóstico: ao dar play num torrent não cacheado, `comet/debrid/stremthru.py` (`generate_download_link` → `_post_store_json` em `/magnets`) recebe do StremThru HTTP 451, `code: "UNAVAILABLE_FOR_LEGAL_REASONS"`, `upstream_cause` `{"error":"infringing_file","error_code":35}`. O RD bloqueou aquele hash. Esses itens continuam aparecendo na lista e o usuário perde cliques.
 
-## Passo A — Detecção PT-BR (em `filter_worker`, após a smart detection, antes do ranking)
-Marque `'pt'` em `parsed.languages` (se ainda não tiver) quando:
-1. O tracker/fonte do torrent contiver (case-insensitive) `Comando`, `BluDV`, `MicoLeaoDublado`; OU
-2. O título contiver `dublado`, `dub[ .-]?pt`, `nacional`, `pt-?br`, `portugu[eê]s`, `\bpor\b` (só junto de `dual`/`audio`); OU
-3. O título tiver `dual` E terminar/contiver um release group BR da lista configurável `PTBR_RELEASE_GROUPS` (env, CSV; default: `BiOMA,C76,WOLVERDONFILMES,COMANDO,BLUDV,VACATORRENT,LAPUMiA,TBS,SF`).
-NÃO marque pt se o título indicar latino/espanhol (`\blat\b`, `latino`, `castellano`, `\besp\b`, `spanish`) sem um marcador PT explícito do item 2.
-Descubra no código como o tracker chega no `filter_worker` (campo do dict do torrent) — não suponha.
+Implemente (mudança mínima):
+1. Tabela SQLite nova `debrid_blocked_hashes(debrid_service TEXT, info_hash TEXT, reason TEXT, blocked_at INTEGER, PRIMARY KEY(debrid_service, info_hash))`, criada no mesmo mecanismo que o Comet usa para criar/migrar as outras tabelas (descubra qual; não crie à mão fora dele).
+2. Quando `/magnets` retornar 451/`UNAVAILABLE_FOR_LEGAL_REASONS`, gravar `(service, hash, "infringing_file", now)` (upsert). Logar `🚫 RD bloqueou (451) <hash> <nome>`. Manter o vídeo de status atual para esse clique.
+3. Na montagem da lista de streams (`comet/api/endpoints/stream.py`), NÃO emitir streams debrid daquele serviço para hashes bloqueados (consulta única por request, em lote). Modo torrent/P2P não é afetado.
+4. Nova setting `HIDE_DEBRID_BLOCKED: bool = True` (models.py) controlando o item 3.
+5. Não toque em nada de cached/availability além do necessário.
 
-## Passo B — Ordenação PT-BR primeiro
-Nova setting `PTBR_FIRST: bool = True` (em `comet/core/models.py`, junto das outras settings; defina também no `.env`).
-No ponto onde a lista final de streams é montada: particionar de forma ESTÁVEL em grupo PT (idiomas contêm `pt`) e resto. Grupo PT ordenado por resolução (2160p, 1440p, 1080p, 720p, 576p, 480p, 360p, 240p, unknown); dentro de cada resolução, cached antes de uncached, mantendo a ordem de rank original. O resto fica exatamente como o Comet já ordenaria. Respeitar `maxResultsPerResolution` como hoje (não deve cortar PT-BR por causa dos outros — se o corte acontece antes, garanta que PT-BR não seja descartado em favor de não-PT; explique no relatório o que fez).
+Validação da Parte 1 (sem usar a chave RD do usuário):
+- Inserir manualmente na tabela um hash conhecido de `tt12042730` (ex.: o 1º PT-BR da lista atual) para `realdebrid`, e provar que o filtro funciona: chame `/stream` com uma config b64 que tenha `debridServices:[{"service":"realdebrid","apiKey":"teste"}]` e `cachedOnly:false` e verifique que aquele hash some (o Comet pode mostrar erro de chave inválida — isso é aceitável; se impedir o teste, teste a função de filtro isoladamente em Python). Depois REMOVA o registro de teste.
+- `py_compile` de todos os arquivos alterados.
 
-## Passo C — Rótulo visual
-Para streams PT, prefixe o campo `name` do stream (coluna esquerda no Stremio) com `🇧🇷 PT-BR` + quebra de linha, mantendo o resto do name original. Não altere `description` nem `url`/`behaviorHints`.
+---
+## PARTE 2 — Prowlarr local com indexadores brasileiros
 
-## Passo D — .env, patch e reaplicação
-- Adicione `PTBR_FIRST=True` em `config\.env` (LF) e no `/data/debian/opt/comet/.env` (mesmo método do README, chmod 600). Não adicione `PTBR_RELEASE_GROUPS` (usar o default).
-- `python -m py_compile` em todos os .py alterados. Reinicie o Comet.
-- Salve o patch das mudanças Python (exclua `comet/templates/index.html`) em `comet-patches\ptbr-first.patch` no PC (via `git -C /opt/comet diff -- comet/ ':!comet/templates/index.html'`, copiando por `/data/local/tmp` + `adb pull`, apagando o tmp). LF.
-- Crie `scripts\deploy_patches.ps1` (curto, comentado em PT): envia o patch, faz `git -C /opt/comet apply --check` e `apply` (pulando se já aplicado: `git apply --reverse --check`), e reinicia o Comet.
+Objetivo: mais fontes de releases DUBLADOS/DUAL PT-BR. O Comet já tem scraper nativo `prowlarr` (`SCRAPE_PROWLARR`, `PROWLARR_URL`, e a variável de API key — confira os nomes exatos em `comet/core/models.py` e `comet/scrapers/prowlarr.py`/`services/indexer_manager.py`).
 
-## Passo E — Validar (sem Real-Debrid; config de teste em modo torrent)
-Gere a config base64 de `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0,"languages":{"preferred":["pt"],"allowed":["pt","en","ja"]}}` e chame `http://192.168.3.44:8000/<b64>/stream/movie/tt12042730.json` (Devoradores de Estrelas) e `tt22084616`:
-- Os primeiros itens devem ser todos 🇧🇷 PT-BR, em blocos 2160p → 1080p → 720p; o primeiro não-PT só depois do último PT.
-- Liste no relatório os 8 primeiros `name`+arquivo e a posição do primeiro não-PT.
-- Confirme que nenhum título com `Lat`/`latino` virou PT.
-- Repita com `maxResultsPerResolution: 5` e confirme que PT-BR continua presente.
-- Teste também um episódio: `series/tt0121955:1:1`.
-- `https://a71comet.duckdns.org/manifest.json` OK.
+1. Instale o **Prowlarr** (versão estável, `linux-core-arm64`) no chroot em `/opt/prowlarr`, dados em `/var/lib/prowlarr`. Instale dependências que ele exigir (ex.: `libicu`, `sqlite3`). Bind **somente** `127.0.0.1:9696` (config.xml: `BindAddress`=127.0.0.1, `AuthenticationMethod`/`AuthenticationRequired` adequados para uso local). Log em `/data/comet/prowlarr.log`.
+2. Pela API do Prowlarr (`/api/v1/indexer/schema`), liste TODOS os indexadores públicos com idioma `pt`/`pt-BR` ou sites brasileiros conhecidos (ex.: Comando, BluDV, Torrent dos Filmes, VacaTorrent, ApacheTorrent, RedeTorrent, LAPUMiA, Filmes Torrent, StarckFilmes, BaixaFilmes, Wolverdon, ThePirataFilmes, BeTor — use o que existir). Adicione cada um e rode o teste (`/api/v1/indexer/test`). Mantenha **só os que passam**. NÃO instale FlareSolverr (pesado demais); indexadores que exigem Cloudflare bypass ficam de fora — liste-os no relatório.
+3. Adicione também 2–3 indexadores públicos gerais confiáveis que passem no teste (ex.: 1337x se passar, TheRARBG, Knaben, EZTV, YTS) — só se não forem redundantes com o Torrentio; justifique.
+4. Ligue no Comet: `SCRAPE_PROWLARR=live`, URL `http://127.0.0.1:9696`, API key e IDs de indexadores conforme o Comet exige. Atualize `config\.env` (LF, preserve o resto) e o `.env` no A71 (método do README, chmod 600). **A API key do Prowlarr não pode aparecer em README, `.orquestra/` nem na resposta final.**
+5. Verifique que o Comet busca títulos em português para o Prowlarr (log `Indexer titles`, `INDEXER_LANGUAGES=["pt","en"]` já existe). Ex.: `tt12042730` deve buscar "Devoradores de Estrelas".
 
-## Passo F — README
-Seção 0 + "Mapa de arquivos": patch PT-BR primeiro, `comet-patches/ptbr-first.patch`, `scripts/deploy_patches.ps1`, `PTBR_FIRST`. Nota: após `git pull` do Comet, reaplicar `deploy_ui.ps1` e `deploy_patches.ps1`. Mudanças mínimas.
+Validação da Parte 2 (modo torrent, sem RD): config b64 `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`:
+- `tt12042730` e `tt22084616`: conte streams `🇧🇷 PT-BR` ANTES (anote da lista atual) e DEPOIS do Prowlarr; quantos vieram com fonte Prowlarr (campo 🔎 na description); liste até 8 títulos PT-BR novos.
+- Um título PT-BR mais antigo, ex. `tt0110357` (O Rei Leão 1994): quantos PT-BR.
+- Tempo total da busca (primeira busca, sem cache) — não pode passar de ~30 s; se passar, ajuste timeouts/indexadores e explique.
+- RSS do Prowlarr e do Comet; RAM livre do A71 (`free -m`).
+
+---
+## Watchdog
+NÃO edite `scripts/watchdog.sh`. No relatório, dê o comando de start do Prowlarr em UMA linha no padrão de `start_stremthru` (via `"$BASE/chroot.sh" -c '... exec ...'`, log `>> "$BASE/prowlarr.log"`) e um padrão `pgrep -f` único (teste no Toybox do Android). Deixe o Prowlarr rodando ao final.
+
+## Patch e README
+- Regenere `comet-patches\ptbr-first.patch` com TODO o diff Python atual (`git -C /opt/comet diff -- comet/ ':!comet/templates/index.html'`, via `/data/local/tmp` + `adb pull`, LF, apague temporários).
+- README Seção 0 + "Mapa de arquivos": filtro 451 (`HIDE_DEBRID_BLOCKED`), Prowlarr (versão, porta local, indexadores ativos, os que ficaram de fora e por quê). Mudanças mínimas.
 
 ## Regras
-- Não altere `scripts/` existentes, `comet-ui/`, Caddy, watchdog, AdGuard.
-- Mudanças no Comet mínimas e localizadas; nada de refatorar.
-- Se o comportamento pedido for impossível em algum ponto, faça o mais próximo e EXPLIQUE no relatório.
+- Não altere `scripts/`, `comet-ui/`, Caddy, StremThru, AdGuard.
+- Não exponha Prowlarr na LAN nem no Caddy. Não imprima chaves.
+- NÃO tente contornar o bloqueio 451 do Real-Debrid (nada de alterar hashes/magnets para enganar o RD). A Parte 2 é só ampliar fontes legítimas de busca.
 
-## Resposta final (máx. 12 linhas)
-Arquivos do Comet alterados (e onde aplicou a ordenação), como o tracker chega ao filtro, os 8 primeiros resultados de tt12042730, posição do primeiro não-PT, resultado com maxResults=5, falsos positivos encontrados, pendências.
+## Resposta final (máx. 14 linhas)
+P1: arquivos alterados, onde grava/filtra, resultado do teste. P2: versão do Prowlarr, indexadores ativos (nomes), excluídos (e motivo), PT-BR antes→depois em tt12042730/tt22084616/tt0110357, tempo de busca, RSS e RAM livre, comando de start + pgrep, pendências.

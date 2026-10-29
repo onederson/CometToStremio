@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # Comet - watchdog (/data/comet/watchdog.sh)
-# Sobe o Comet e o Caddy (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
+# Sobe o StremThru, o Comet e o Caddy (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
 
 BASE=/data/comet
 LOG=$BASE/watchdog.log
@@ -41,10 +41,22 @@ cap_log() {
   fi
 }
 
+# StremThru local (127.0.0.1:8080): ponte Comet -> Real-Debrid. A instancia publica
+# falhava ao adicionar magnets nao cacheados ("provider is currently unavailable").
+start_stremthru() {
+  nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /var/lib/stremthru && STREMTHRU_ENV=prod STREMTHRU_LISTEN_ADDR=127.0.0.1:8080 STREMTHRU_PORT=8080 STREMTHRU_BASE_URL=http://127.0.0.1:8080 STREMTHRU_DATA_DIR=/var/lib/stremthru STREMTHRU_DATABASE_URI="sqlite:///var/lib/stremthru/stremthru.db?max_conns=2" STREMTHRU_STORE_TUNNEL="*:false" STREMTHRU_FEATURE=torz exec /usr/local/bin/stremthru' \
+    >> "$STREMTHRU_OUT" 2>&1 < /dev/null &
+}
+
 CADDY_OUT=$BASE/caddy.log
+STREMTHRU_OUT=$BASE/stremthru.log
 
 log "watchdog iniciado (pid $$)"
 while true; do
+  if ! pgrep -f '^/usr/local/bin/stremthru$' > /dev/null; then
+    log "StremThru nao esta rodando, iniciando"
+    start_stremthru
+  fi
   if ! pgrep -f 'python -m comet.main' > /dev/null; then
     log "Comet nao esta rodando, iniciando"
     start_comet
@@ -55,6 +67,7 @@ while true; do
   fi
   cap_log "$OUT"
   cap_log "$CADDY_OUT"
+  cap_log "$STREMTHRU_OUT"
   sleep 30
 done
 

@@ -1,5 +1,5 @@
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..0cbe1d2 100644
+index 94f56ae..d0557cc 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -33,6 +33,19 @@ RESOLUTION_TO_DIMENSIONS = {
@@ -128,7 +128,7 @@ index 94f56ae..0cbe1d2 100644
      )
      ranked_info_hashes = (
          selected_info_hashes
-@@ -411,9 +439,13 @@ async def stream(
+@@ -411,9 +439,16 @@ async def stream(
  
      added_hashes = set()
  
@@ -140,10 +140,13 @@ index 94f56ae..0cbe1d2 100644
 +        res_rank = _PTBR_RESOLUTION_ORDER.get(
 +            str(getattr(rtn_data, "resolution", "")).lower(), 8
 +        )
++        # Sem seeders conhecidos (ex.: hashes do StremThru) o RD costuma
++        # responder "Invalid Magnet": esses vao para o fim do bloco PT-BR.
++        seed_key = -torrent["seeders"] if torrent["seeders"] else 1
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -463,6 +495,8 @@ async def stream(
+@@ -463,6 +498,8 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -152,7 +155,7 @@ index 94f56ae..0cbe1d2 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -488,10 +522,17 @@ async def stream(
+@@ -488,10 +525,18 @@ async def stream(
              if is_cached:
                  added_hashes.add(info_hash)
  
@@ -162,6 +165,7 @@ index 94f56ae..0cbe1d2 100644
 +                res_rank,
 +                0 if is_cached else 1,
 +                rank_idx,
++                seed_key,
 +            )
              if sort_mixed or is_cached:
 -                cached_results.append(the_stream)
@@ -172,7 +176,7 @@ index 94f56ae..0cbe1d2 100644
  
          if enable_torrent:
              if deduplicate_streams and info_hash in added_hashes:
-@@ -515,6 +556,8 @@ async def stream(
+@@ -515,6 +560,8 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -181,12 +185,12 @@ index 94f56ae..0cbe1d2 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -533,12 +576,22 @@ async def stream(
+@@ -533,12 +580,22 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
 -            cached_results.append(the_stream)
-+            cached_results.append((the_stream, is_pt, res_rank, 1, rank_idx))
++            cached_results.append((the_stream, is_pt, res_rank, 1, rank_idx, seed_key))
  
 -    if sort_mixed:
 -        final_streams = cached_results
@@ -196,7 +200,7 @@ index 94f56ae..0cbe1d2 100644
 +    if settings.PTBR_FIRST:
 +        pt_entries = [entry for entry in ordered_entries if entry[1]]
 +        other_entries = [entry for entry in ordered_entries if not entry[1]]
-+        pt_entries.sort(key=lambda entry: (entry[2], entry[3], entry[4]))
++        pt_entries.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
 +        final_streams = (
 +            notice_streams
 +            + [entry[0] for entry in pt_entries]
@@ -223,6 +227,32 @@ index 835a975..0e45c38 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
+diff --git a/comet/debrid/stremthru.py b/comet/debrid/stremthru.py
+index 90a2aa5..3c3f893 100644
+--- a/comet/debrid/stremthru.py
++++ b/comet/debrid/stremthru.py
+@@ -12,6 +12,7 @@ from comet.metadata.episode_index import EpisodeIndexService
+ from comet.services.debrid_cache import schedule_cache_availability
+ from comet.services.filtering import exact_alias_match
+ from comet.services.torrent_manager import torrent_update_queue
++from comet.services.trackers import trackers as generic_trackers
+ from comet.utils.parsing import (
+     ensure_multi_language,
+     is_video,
+@@ -426,9 +427,10 @@ class StremThru:
+         try:
+             magnet_uri = f"magnet:?xt=urn:btih:{hash}&dn={quote(torrent_name)}"
+ 
+-            if sources:
+-                for source in sources:
+-                    magnet_uri += f"&tr={quote(source, safe='')}"
++            # Sem trackers (ex.: hashes do Torrentio/StremThru), o Real-Debrid
++            # nao acha peers e responde magnet_error: usa a lista generica.
++            for source in sources or generic_trackers[:20]:
++                magnet_uri += f"&tr={quote(source, safe='')}"
+ 
+             magnet = await self._post_store_json(
+                 f"/magnets?client_ip={self.client_ip}",
 diff --git a/comet/services/debrid.py b/comet/services/debrid.py
 index 819551b..23202e1 100644
 --- a/comet/services/debrid.py
