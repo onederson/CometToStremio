@@ -1,0 +1,1714 @@
+<!doctype html>
+<html class="sl-theme-dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+    />
+    <meta content="Comet" property="og:title" />
+    <meta
+      content="O add-on mais rápido de busca de torrents e Debrid para o Stremio."
+      property="og:description"
+    />
+    <meta content="https://comet.feels.legal" property="og:url" />
+    <meta
+      content="https://raw.githubusercontent.com/g0ldyy/comet/refs/heads/main/comet/assets/icon.png"
+      property="og:image"
+    />
+    <meta content="#6b6ef8" data-react-helmet="true" name="theme-color" />
+
+    <title>Comet - Configurar Add-on para Stremio (PT-BR)</title>
+    <link
+      id="favicon"
+      rel="icon"
+      type="image/x-icon"
+      href="https://raw.githubusercontent.com/g0ldyy/comet/refs/heads/main/comet/assets/icon.png"
+    />
+
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css"
+    />
+    <script
+      type="module"
+      src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"
+    ></script>
+
+    <style>
+      :not(:defined) {
+        visibility: hidden;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        margin: 0;
+        background: radial-gradient(
+          ellipse at bottom,
+          #25292c 0%,
+          #0c0d13 100%
+        );
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          "Helvetica Neue",
+          "Noto Sans",
+          "Liberation Sans",
+          Arial,
+          sans-serif,
+          "Apple Color Emoji",
+          "Segoe UI Emoji",
+          "Segoe UI Symbol",
+          "Noto Color Emoji";
+        font-size: 1rem;
+        font-weight: 400;
+      }
+
+      ::-webkit-scrollbar {
+        overflow: hidden;
+      }
+
+      .header {
+        text-align: center;
+        width: 40%;
+        margin-bottom: 20px;
+        margin-top: 50px;
+      }
+
+      .comet-text {
+        font-size: calc(1.375rem + 1.5vw);
+        font-weight: 500;
+        margin-bottom: 0;
+      }
+
+      .emoji {
+        width: 1em;
+        height: 1em;
+        vertical-align: middle;
+      }
+
+      .form-container {
+        background-color: #1a1d20;
+        padding: 2rem;
+        border-radius: 0.375rem;
+        box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        width: 80vw;
+        max-width: 950px;
+        margin-bottom: 50px;
+      }
+
+      .form-item {
+        margin-bottom: 0.75rem;
+      }
+
+      sl-details {
+        margin-bottom: 0.75rem;
+      }
+
+      .centered-item {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .stars {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 120%;
+        transform: rotate(-45deg);
+        z-index: -1;
+      }
+
+      .star {
+        --star-color: var(--primary-color);
+        --star-tail-length: 6em;
+        --star-tail-height: 2px;
+        --star-width: calc(var(--star-tail-length) / 6);
+        --fall-duration: 9s;
+        --tail-fade-duration: var(--fall-duration);
+        position: absolute;
+        top: var(--top-offset);
+        left: 0;
+        width: var(--star-tail-length);
+        height: var(--star-tail-height);
+        color: var(--star-color);
+        background: linear-gradient(45deg, currentColor, transparent);
+        border-radius: 50%;
+        filter: drop-shadow(0 0 6px currentColor);
+        transform: translate3d(104em, 0, 0);
+        animation:
+          fall var(--fall-duration) var(--fall-delay) linear infinite,
+          tail-fade var(--tail-fade-duration) var(--fall-delay) ease-out
+            infinite;
+      }
+
+      @media screen and (max-width: 750px) {
+        .star {
+          animation: fall var(--fall-duration) var(--fall-delay) linear infinite;
+        }
+      }
+
+      .star::before,
+      .star::after {
+        position: absolute;
+        content: "";
+        top: 0;
+        left: calc(var(--star-width) / -2);
+        width: var(--star-width);
+        height: 100%;
+        background: linear-gradient(
+          45deg,
+          transparent,
+          currentColor,
+          transparent
+        );
+        border-radius: inherit;
+        animation: blink 2s linear infinite;
+      }
+
+      .star::before {
+        transform: rotate(45deg);
+      }
+
+      .star::after {
+        transform: rotate(-45deg);
+      }
+
+      @keyframes fall {
+        to {
+          transform: translate3d(-30em, 0, 0);
+        }
+      }
+
+      @keyframes tail-fade {
+        0%,
+        50% {
+          width: var(--star-tail-length);
+          opacity: 1;
+        }
+
+        70%,
+        80% {
+          width: 0;
+          opacity: 0.4;
+        }
+
+        100% {
+          width: 0;
+          opacity: 0;
+        }
+      }
+
+      @keyframes blink {
+        50% {
+          opacity: 0.6;
+        }
+      }
+
+      /* Custom Styles */
+      .form-item label {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+        font-weight: 500;
+      }
+
+      #apiKeyLink,
+      #referralLink {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        color: white;
+        padding: 4px 10px;
+        border-radius: 12px;
+        text-decoration: none;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin-left: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+        line-height: normal;
+        height: auto;
+      }
+
+      #apiKeyLink:hover,
+      #referralLink:hover {
+        background: rgba(255, 255, 255, 0.2);
+        border-color: rgba(255, 255, 255, 0.4);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+      }
+
+      #apiKeyLink:empty,
+      #referralLink:empty {
+        display: none;
+      }
+
+      .discord-btn::part(base) {
+        background-color: #5865f2;
+        border-color: #5865f2;
+        color: white;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+      }
+
+      .discord-btn::part(base):hover {
+        background-color: #4752c4;
+        border-color: #4752c4;
+      }
+
+      .heart-button {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        width: 45px;
+        height: 45px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        padding: 0;
+      }
+
+      .heart-button:hover {
+        background: rgba(255, 255, 255, 0.2);
+        transform: scale(1.1);
+      }
+
+      .heart-button sl-icon {
+        color: #ff4757;
+        font-size: 1.4rem;
+        display: flex;
+      }
+
+      @keyframes heartbeat {
+        0% {
+          transform: scale(1);
+        }
+
+        14% {
+          transform: scale(1.1);
+        }
+
+        28% {
+          transform: scale(1);
+        }
+
+        42% {
+          transform: scale(1.1);
+        }
+
+        70% {
+          transform: scale(1);
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="stars"></div>
+
+    <script>
+      let hasTouchScreen = false;
+      if ("maxTouchPoints" in navigator) {
+        hasTouchScreen = navigator.maxTouchPoints > 0;
+      } else if ("msMaxTouchPoints" in navigator) {
+        hasTouchScreen = navigator.msMaxTouchPoints > 0;
+      } else {
+        const mQ = matchMedia?.("(pointer:coarse)");
+        if (mQ?.media === "(pointer:coarse)") {
+          hasTouchScreen = !!mQ.matches;
+        } else if ("orientation" in window) {
+          hasTouchScreen = true;
+        } else {
+          const UA = navigator.userAgent;
+          hasTouchScreen =
+            /\b(BlackBerry|webOS|iPhone|IEMobile)\b/i.test(UA) ||
+            /\b(Android|Windows Phone|iPad|iPod)\b/i.test(UA);
+        }
+      }
+
+      if (!hasTouchScreen) {
+        document.addEventListener("DOMContentLoaded", function () {
+          const starsContainer = document.querySelector(".stars");
+          const starCount = 30;
+
+          for (let i = 0; i < starCount; i++) {
+            const star = document.createElement("div");
+            star.classList.add("star");
+
+            const randomTopOffset = Math.random() * 100;
+            const randomLeftOffset = 80 + Math.random() * 40;
+            const randomTailLength = 5 + Math.random() * 2.5;
+            const randomFallDuration = 6 + Math.random() * 6;
+
+            star.style.setProperty("--top-offset", `${randomTopOffset}vh`);
+            star.style.setProperty(
+              "--star-tail-length",
+              `${randomTailLength}em`,
+            );
+            star.style.setProperty("--fall-duration", `${randomFallDuration}s`);
+            star.style.setProperty("--fall-delay", "0s");
+            star.style.transform = `translate3d(${randomLeftOffset}em, 0, 0)`;
+
+            starsContainer.appendChild(star);
+          }
+        });
+      }
+    </script>
+    <div class="header">
+      <div
+        style="
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 15px;
+          margin-bottom: 10px;
+          height: 50px;
+        "
+      >
+        <p
+          class="comet-text"
+          style="margin: 0; display: flex; align-items: center; line-height: 1"
+        >
+          <img
+            class="emoji"
+            src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f4ab/512.gif"
+            style="margin-right: 10px"
+          />
+          Comet
+        </p>
+        <sl-button
+          href="https://discord.com/invite/UJEqpT42nb"
+          target="_blank"
+          size="small"
+          pill
+          class="discord-btn"
+          style="display: flex; align-items: center"
+        >
+          <sl-icon
+            slot="prefix"
+            name="discord"
+            style="font-size: 1rem"
+          ></sl-icon>
+          Discord
+        </sl-button>
+      </div>
+      {{CUSTOM_HEADER_HTML|safe}}
+    </div>
+
+    <div class="form-container">
+      <p
+        style="
+          margin: 0 0 1rem 0;
+          color: var(--sl-color-neutral-600);
+          font-size: 0.9rem;
+          line-height: 1.5;
+        "
+      >
+        Defina abaixo a qualidade de vídeo, os limites de tamanho, a sua conta
+        <strong>Real-Debrid</strong> e a preferência por áudio em
+        <strong>Português</strong>. Quando terminar, clique em
+        <strong>Instalar no Stremio</strong> (ou <strong>Copiar Link</strong>)
+        no rodapé da página.
+      </p>
+
+      <div class="form-item">
+        <sl-select
+          id="resolutions"
+          multiple
+          clearable
+          label="Resoluções de Vídeo"
+          placeholder="Selecione as resoluções desejadas"
+          help-text="Define quais qualidades de imagem podem aparecer na busca; resoluções desmarcadas são ocultadas da lista no Stremio. A opção 'Desconhecida' inclui torrents que não informam a resolução no título. Recomendação: mantenha 4K UHD (2160p), Full HD (1080p) e HD (720p), desmarcando resoluções baixas como 480p, 360p e 240p."
+        >
+          <sl-option value="r2160p">4K UHD - 2160p</sl-option>
+          <sl-option value="r1440p">QHD - 1440p</sl-option>
+          <sl-option value="r1080p">Full HD - 1080p</sl-option>
+          <sl-option value="r720p">HD - 720p</sl-option>
+          <sl-option value="r576p">SD - 576p</sl-option>
+          <sl-option value="r480p">SD - 480p</sl-option>
+          <sl-option value="r360p">Baixa (LD) - 360p</sl-option>
+          <sl-option value="r240p">Baixa (LD) - 240p</sl-option>
+          <sl-option value="unknown">Desconhecida</sl-option>
+        </sl-select>
+      </div>
+
+      <div class="form-item">
+        <sl-input
+          id="maxResultsPerResolution"
+          type="number"
+          min="0"
+          value="0"
+          label="Máximo de Resultados por Resolução"
+          placeholder="Digite o limite por resolução (0 = sem limite)"
+          help-text="Limita quantos links de cada resolução (4K, 1080p, 720p etc.) aparecem no Stremio, escolhendo primeiro os mais bem pontuados e já em cache. O valor 0 desativa o limite e mostra todas as opções encontradas. Recomendação: deixe 0 para não esconder versões dubladas/dual áudio, ou use entre 5 e 10 para uma lista mais enxuta."
+        ></sl-input>
+      </div>
+
+      <div class="form-item">
+        <sl-input
+          id="maxSize"
+          type="number"
+          min="0"
+          value="0"
+          label="Tamanho Máximo do Arquivo (GB)"
+          placeholder="Digite o tamanho máximo em gigabytes (0 = sem limite)"
+          help-text="Oculta no Stremio os torrents maiores que o valor informado em GB, evitando arquivos muito pesados (como BluRay Remux de 50–80 GB) que podem travar no Wi-Fi da TV. O valor 0 aceita arquivos de qualquer tamanho. Recomendação: deixe 0 em conexões rápidas via cabo, ou use entre 15 e 30 GB para Smart TVs e celulares."
+        ></sl-input>
+      </div>
+
+      <div
+        class="form-item"
+        {%
+        if
+        not
+        proxyDebridStream
+        %}style="display: none"
+        {%
+        endif
+        %}
+      >
+        <sl-input
+          id="debridStreamProxyPassword"
+          label="Senha do Proxy de Stream Debrid"
+          placeholder="Digite a senha do proxy"
+          help-text="Quando habilitado no servidor, faz o vídeo passar pelo servidor do Comet antes de chegar ao Stremio, permitindo usar o mesmo serviço Debrid em IPs diferentes ao mesmo tempo. Se a senha estiver incorreta, um aviso aparecerá nos resultados e o proxy não será usado. Na mesma rede residencial (mesmo Wi-Fi), não é necessário."
+        ></sl-input>
+      </div>
+
+      <sl-details id="debridServicesDetails" summary="Serviços Debrid" open>
+        <p
+          style="
+            margin: 0 0 1rem 0;
+            color: var(--sl-color-neutral-600);
+            font-size: 0.9rem;
+            line-height: 1.5;
+          "
+        >
+          Adicione aqui sua conta <strong>Real-Debrid</strong> (ou outro serviço
+          Debrid) para reproduzir torrents em alta velocidade direto dos
+          servidores do serviço, sem depender de seeders. Caso use mais de um
+          serviço, arraste pelo ícone lateral para definir a ordem de
+          prioridade.
+        </p>
+
+        <div id="debridServicesContainer"></div>
+
+        <sl-button
+          id="addDebridService"
+          variant="default"
+          size="small"
+          style="margin-bottom: 1rem"
+        >
+          <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+          Adicionar Serviço Debrid
+        </sl-button>
+
+        <sl-divider></sl-divider>
+
+        {% if not disableTorrentStreams %}
+        <sl-checkbox
+          id="enableTorrent"
+          checked
+          help-text="Exibe também links diretos de torrent/magnet (🧲 P2P) junto com os resultados do Debrid, fazendo o seu aparelho baixar diretamente de outros usuários. Ao adicionar o primeiro serviço Debrid, esta opção é desmarcada automaticamente. Recomendação para quem usa Real-Debrid: deixe desmarcado para evitar lentidão e travamentos na TV."
+          >Ativar Modo Torrent (P2P)</sl-checkbox
+        >
+        {% endif %}
+
+        <sl-checkbox
+          id="deduplicateStreams"
+          help-text="Quando ativado, exibe apenas um link para cada torrent caso você use mais de um serviço Debrid ao mesmo tempo (ou Debrid + Modo Torrent), mantendo o primeiro serviço da lista que já tiver o arquivo em cache. Quando desativado, mostra o mesmo torrent repetido em cada serviço. Recomendação: ative se configurar mais de um serviço; usando só o Real-Debrid, a lista já não duplica."
+          >Remover Links Duplicados entre Serviços</sl-checkbox
+        >
+
+        <sl-checkbox
+          id="scrapeDebridAccountTorrents"
+          help-text="Busca também os torrents que você adicionou manualmente na biblioteca da sua conta Debrid e os inclui prontos para assistir no Stremio (exibindo um item 'Comet Sync' quando necessário atualizar). Muito útil quando você envia manualmente um magnet dublado raro no site do Real-Debrid. Recomendação: ative se costuma adicionar torrents manualmente na sua conta."
+          >Buscar Torrents da Minha Conta Debrid</sl-checkbox
+        >
+      </sl-details>
+
+      <style>
+        .debrid-service-entry {
+          display: grid;
+          grid-template-columns: 1fr 2fr auto;
+          gap: 0.75rem;
+          align-items: center;
+          padding: 0.75rem;
+          background: rgba(255, 255, 255, 0.03);
+          border-radius: 0.5rem;
+          margin-bottom: 0.5rem;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          transition: border-color 0.2s ease;
+        }
+
+        .debrid-service-entry:hover {
+          border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .debrid-service-entry.dragging {
+          opacity: 0.5;
+          border-color: var(--sl-color-primary-600);
+        }
+
+        .debrid-service-entry .service-links {
+          display: flex;
+          gap: 0.5rem;
+          margin-top: 0.25rem;
+        }
+
+        .debrid-service-entry .service-link {
+          font-size: 0.7rem;
+          color: var(--sl-color-primary-600);
+          text-decoration: none;
+        }
+
+        .debrid-service-entry .service-link:hover {
+          text-decoration: underline;
+        }
+
+        .debrid-service-entry .api-key-wrapper {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .debrid-service-entry .remove-btn {
+          color: var(--sl-color-danger-600);
+        }
+
+        .debrid-service-entry .drag-handle {
+          cursor: grab;
+          color: var(--sl-color-neutral-400);
+          margin-right: 0.5rem;
+        }
+
+        .debrid-service-entry .service-header {
+          display: flex;
+          align-items: center;
+        }
+
+        @media (max-width: 600px) {
+          .debrid-service-entry {
+            grid-template-columns: 1fr;
+          }
+        }
+      </style>
+
+      <script>
+        const DEBRID_SERVICES = {
+          realdebrid: {
+            name: "Real-Debrid",
+            apiKeyUrl: "https://real-debrid.com/apitoken",
+            referralUrl: "http://real-debrid.com/?id=16161532",
+            helpText: "Cole seu token privado do Real-Debrid (clique em 'Obter chave de API' abaixo para copiar). Libera reprodução imediata dos links em cache no Stremio."
+          },
+          torbox: {
+            name: "TorBox",
+            apiKeyUrl: "https://torbox.app/settings",
+            referralUrl: "https://torbox.app/subscription?referral=1ffb2238-1c5f-402e-a2ce-3d7a86c52d02",
+            helpText: "Formato: chave de API privada da sua conta TorBox (use 'Obter chave de API' abaixo)."
+          },
+          alldebrid: {
+            name: "All-Debrid",
+            apiKeyUrl: "https://alldebrid.com/apikeys",
+            referralUrl: null,
+            helpText: "Formato: chave de API privada da sua conta All-Debrid (use 'Obter chave de API' abaixo)."
+          },
+          debridlink: {
+            name: "Debrid-Link",
+            apiKeyUrl: "https://debrid-link.com/webapp/apikey",
+            referralUrl: "https://debrid-link.fr/id/G7mli",
+            helpText: "Formato: chave de API privada da sua conta Debrid-Link (use 'Obter chave de API' abaixo)."
+          },
+          premiumize: {
+            name: "Premiumize",
+            apiKeyUrl: "https://premiumize.me/account",
+            referralUrl: null,
+            helpText: "Formato: chave de API privada da sua conta Premiumize (use 'Obter chave de API' abaixo)."
+          },
+          debrider: {
+            name: "Debrider",
+            apiKeyUrl: "https://debrider.app/dashboard/account",
+            referralUrl: null,
+            helpText: "Formato: chave de API privada da sua conta Debrider (use 'Obter chave de API' abaixo)."
+          },
+          easydebrid: {
+            name: "EasyDebrid",
+            apiKeyUrl: "https://paradise-cloud.com/products/easydebrid",
+            referralUrl: null,
+            helpText: "Formato: chave de API privada da sua conta EasyDebrid (use 'Obter chave de API' abaixo)."
+          },
+          offcloud: {
+            name: "Offcloud",
+            apiKeyUrl: "https://offcloud.com/#/account",
+            referralUrl: null,
+            helpText: "Formato: chave de API privada da sua conta Offcloud (use 'Obter chave de API' abaixo)."
+          },
+          pikpak: {
+            name: "PikPak",
+            apiKeyUrl: "https://mypikpak.com",
+            referralUrl: null,
+            helpText: "Formato: `email:senha` da sua conta PikPak."
+          }
+        };
+
+        const torrentDisabled = {{ 'true' if disableTorrentStreams else 'false' }};
+        window.disableTorrentStreams = torrentDisabled;
+
+        let debridServiceCounter = 0;
+        let torrentModeAutoDisabled = false;
+
+        function maybeAutoDisableTorrentModeOnFirstDebridService() {
+          if (torrentModeAutoDisabled) {
+            return;
+          }
+
+          const enableTorrentEl = document.getElementById("enableTorrent");
+          if (!enableTorrentEl) {
+            torrentModeAutoDisabled = true;
+            return;
+          }
+
+          if (enableTorrentEl.checked) {
+            enableTorrentEl.checked = false;
+          }
+
+          torrentModeAutoDisabled = true;
+        }
+
+        function createDebridServiceEntry(service = "", apiKey = "", applyAutoDisable = true) {
+          const container = document.getElementById("debridServicesContainer");
+          const hadNoEntries = container.querySelectorAll(".debrid-service-entry").length === 0;
+          const entryId = debridServiceCounter++;
+
+          const entry = document.createElement("div");
+          entry.className = "debrid-service-entry";
+          entry.dataset.entryId = entryId;
+          entry.draggable = true;
+
+          // Build service options
+          let serviceOptions = Object.entries(DEBRID_SERVICES).map(([key, info]) =>
+            `<sl-option value="${key}">${info.name}</sl-option>`
+          ).join("");
+
+          entry.innerHTML = `
+            <div class="service-header">
+              <sl-icon class="drag-handle" name="grip-vertical" title="Arraste para alterar a prioridade"></sl-icon>
+              <sl-select
+                class="debrid-service-select"
+                value="${service}"
+                placeholder="Selecione o serviço"
+                help-text="Provedor Debrid (recomendado: Real-Debrid)."
+                size="small"
+                hoist
+              >
+                ${serviceOptions}
+              </sl-select>
+            </div>
+            <div class="api-key-wrapper">
+              <sl-input
+                class="debrid-api-key"
+                value="${apiKey}"
+                placeholder="Digite a chave de API"
+                help-text="Escolha o serviço ao lado e cole sua chave de API privada para liberar os streams em cache no Stremio."
+                size="small"
+                type="password"
+                password-toggle
+              ></sl-input>
+              <div class="service-links"></div>
+            </div>
+            <sl-icon-button class="remove-btn" name="trash" label="Remover serviço" title="Remover serviço"></sl-icon-button>
+          `;
+
+          // Add event listeners
+          const select = entry.querySelector(".debrid-service-select");
+          const apiKeyInput = entry.querySelector(".debrid-api-key");
+          const linksContainer = entry.querySelector(".service-links");
+          const removeBtn = entry.querySelector(".remove-btn");
+
+          select.addEventListener("sl-change", () => {
+            updateServiceLinks(select.value, linksContainer, apiKeyInput);
+          });
+
+          removeBtn.addEventListener("click", () => {
+            entry.remove();
+          });
+
+          // Drag and drop
+          entry.addEventListener("dragstart", (e) => {
+            entry.classList.add("dragging");
+            e.dataTransfer.effectAllowed = "move";
+          });
+
+          entry.addEventListener("dragend", () => {
+            entry.classList.remove("dragging");
+          });
+
+          entry.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            const dragging = container.querySelector(".dragging");
+            if (dragging && dragging !== entry) {
+              const rect = entry.getBoundingClientRect();
+              const midY = rect.top + rect.height / 2;
+              if (e.clientY < midY) {
+                container.insertBefore(dragging, entry);
+              } else {
+                container.insertBefore(dragging, entry.nextSibling);
+              }
+            }
+          });
+
+          container.appendChild(entry);
+
+          if (applyAutoDisable && hadNoEntries) {
+            maybeAutoDisableTorrentModeOnFirstDebridService();
+          }
+
+          // Initialize links if service is pre-selected
+          if (service) {
+            updateServiceLinks(service, linksContainer, apiKeyInput);
+          }
+
+          return entry;
+        }
+
+        function updateServiceLinks(service, linksContainer, apiKeyInput) {
+          const info = DEBRID_SERVICES[service];
+          linksContainer.innerHTML = "";
+
+          if (info) {
+            apiKeyInput.helpText = info.helpText;
+
+            if (info.referralUrl) {
+              const referralLink = document.createElement("a");
+              referralLink.className = "service-link";
+              referralLink.href = info.referralUrl;
+              referralLink.target = "_blank";
+              referralLink.textContent = "Criar conta";
+              linksContainer.appendChild(referralLink);
+            }
+
+            if (info.apiKeyUrl) {
+              const apiLink = document.createElement("a");
+              apiLink.className = "service-link";
+              apiLink.href = info.apiKeyUrl;
+              apiLink.target = "_blank";
+              apiLink.textContent = "Obter chave de API";
+              linksContainer.appendChild(apiLink);
+            }
+          }
+        }
+
+        function getDebridServices() {
+          const container = document.getElementById("debridServicesContainer");
+          const entries = container.querySelectorAll(".debrid-service-entry");
+          const services = [];
+
+          entries.forEach(entry => {
+            const service = entry.querySelector(".debrid-service-select").value;
+            const apiKey = entry.querySelector(".debrid-api-key").value;
+
+            if (service && apiKey) {
+              services.push({ service, apiKey });
+            }
+          });
+
+          return services;
+        }
+
+        function populateDebridServices(services) {
+          const container = document.getElementById("debridServicesContainer");
+          container.innerHTML = "";
+          debridServiceCounter = 0;
+          torrentModeAutoDisabled = Boolean(services && services.length > 0);
+
+          if (services && services.length > 0) {
+            services.forEach(entry => {
+              createDebridServiceEntry(entry.service, entry.apiKey, false);
+            });
+          }
+        }
+
+        // Initialize add button
+        const addBtn = document.getElementById("addDebridService");
+        addBtn.addEventListener("click", () => {
+          createDebridServiceEntry();
+        });
+      </script>
+
+      <sl-details summary="Configurações de Idioma">
+        <p
+          style="
+            margin: 0 0 1rem 0;
+            color: var(--sl-color-neutral-600);
+            font-size: 0.9rem;
+            line-height: 1.5;
+          "
+        >
+          Ajuste como o Comet filtra e prioriza os idiomas dos torrents. Para
+          assistir dublado ou em dual áudio PT-BR sem esconder opções legendadas
+          quando não houver dublagem, coloque <strong>Português</strong> em
+          <em>Idiomas Preferidos</em>, selecione <strong>Português</strong> e
+          <strong>Inglês</strong> em <em>Idiomas Permitidos</em>, e deixe
+          <em>Idiomas Obrigatórios</em> vazio.
+        </p>
+
+        <div class="form-item">
+          <sl-select
+            id="languages_required"
+            multiple
+            clearable
+            label="Idiomas Obrigatórios"
+            placeholder="Selecione os idiomas obrigatórios"
+            help-text="Exige que o título do torrent indique explicitamente pelo menos um destes idiomas, ocultando todos os demais do Stremio. Atenção: muitos lançamentos em inglês não escrevem o idioma no nome do arquivo e também serão ocultados. Recomendação: deixe vazio para manter opções legendadas quando não existir dublado, ou selecione Português apenas se quiser ver somente arquivos dublados/dual áudio."
+          ></sl-select>
+        </div>
+
+        <div class="form-item">
+          <sl-select
+            id="languages_allowed"
+            multiple
+            clearable
+            label="Idiomas Permitidos"
+            placeholder="Selecione os idiomas sempre permitidos"
+            help-text="Garante que torrents com qualquer um destes idiomas sejam sempre aceitos no Stremio, mesmo que o mesmo arquivo também contenha outros idiomas marcados em 'Idiomas Excluídos' (comum em arquivos Multi-Áudio). Recomendação: selecione Português e Inglês para aceitar tanto lançamentos dublados/dual áudio quanto originais para assistir com legenda."
+          ></sl-select>
+        </div>
+
+        <div class="form-item">
+          <sl-select
+            id="languages_excluded"
+            multiple
+            clearable
+            label="Idiomas Excluídos"
+            placeholder="Selecione os idiomas que deseja ocultar"
+            help-text="Remove dos resultados do Stremio os torrents cujo título contenha qualquer um destes idiomas (por exemplo, dublagens em russo ou hindi), exceto quando o arquivo também trouxer um dos seus 'Idiomas Permitidos'. Recomendação: deixe vazio ou marque apenas idiomas estrangeiros indesejados."
+          ></sl-select>
+        </div>
+
+        <div class="form-item">
+          <sl-select
+            id="languages_preferred"
+            multiple
+            clearable
+            label="Idiomas Preferidos"
+            placeholder="Selecione os idiomas para priorizar no topo"
+            help-text="Adiciona um bônus alto de pontuação aos torrents com estes idiomas, colocando-os sempre no topo da lista do Stremio sem esconder os demais resultados quando não houver versão dublada. Recomendação: selecione Português (e opcionalmente Multi) para que links dublados e dual áudio PT-BR apareçam sempre primeiro."
+          ></sl-select>
+        </div>
+
+        <div class="form-item">
+          <sl-checkbox
+            id="allowEnglishInLanguages"
+            help-text="Trata o Inglês como idioma permitido nas regras de exclusão, evitando que torrents identificados com áudio em inglês sejam bloqueados mesmo se contiverem outro idioma excluído (não ignora 'Idiomas Obrigatórios'). Recomendação: opcional se Inglês já estiver em 'Idiomas Permitidos'; marque para garantir que releases em inglês não sejam barrados por exclusões."
+            >Permitir Inglês Mesmo Quando Excluído</sl-checkbox
+          >
+          <sl-checkbox
+            id="removeUnknownLanguages"
+            help-text="Oculta do Stremio todos os torrents que não informam nenhum idioma reconhecível no nome do arquivo. Como a grande maioria dos lançamentos originais em inglês não traz tag de idioma no título, ativar isto remove quase todas as opções para assistir legendado. Recomendação: deixe desmarcado."
+            >Remover Torrents com Idioma Desconhecido</sl-checkbox
+          >
+        </div>
+      </sl-details>
+
+      <sl-details summary="Configurações Avançadas">
+        <p
+          style="
+            margin: 0 0 1rem 0;
+            color: var(--sl-color-neutral-600);
+            font-size: 0.9rem;
+            line-height: 1.5;
+          "
+        >
+          Controle a exibição de links em cache, a limpeza automática de
+          arquivos ruins e as informações mostradas em cada resultado no
+          Stremio. Com Real-Debrid, recomenda-se ativar
+          <strong>Mostrar Somente em Cache</strong> e manter
+          <strong>Remover Arquivos Ruins (Lixo)</strong> sempre marcado.
+        </p>
+
+        <div class="form-item">
+          <sl-input
+            id="rankThreshold"
+            type="number"
+            value="-10000000000"
+            label="Pontuação Mínima de Qualidade (Rank)"
+            placeholder="Digite a pontuação mínima aceita"
+            help-text="Exclui torrents cuja pontuação interna de qualidade calculada pelo Comet fique abaixo deste número (notas altas premiam boa qualidade e idiomas preferidos; notas negativas penalizam baixa qualidade). Recomendação: mantenha o padrão (-10000000000) para não ocultar releases dublados válidos por causa da nota."
+          ></sl-input>
+          <sl-checkbox
+            id="cachedOnly"
+            help-text="Exibe no Stremio apenas links que já estão baixados em cache nos servidores do seu serviço Debrid (marcados com ⚡), ocultando torrents fora de cache (⬇️) que precisariam ser baixados antes. Recomendação para Real-Debrid: deixe ativado para reprodução instantânea ao clicar."
+            >Mostrar Somente em Cache</sl-checkbox
+          >
+          <sl-checkbox
+            id="sortCachedUncachedTogether"
+            help-text="Desativa a separação padrão que agrupa todos os links instantâneos em cache (⚡) no topo da lista, misturando resultados em cache e fora de cache apenas pela nota de qualidade e idioma. Recomendação: deixe desmarcado para que os links imediatos do Real-Debrid fiquem sempre em primeiro lugar."
+            >Misturar Links em Cache e Fora de Cache na Ordenação</sl-checkbox
+          >
+          <sl-checkbox
+            checked
+            id="removeTrash"
+            help-text="Remove gravações precárias de cinema e arquivos indesejados (conteúdo adulto, CAM, Telesync, Telecine, Screener, R5, PDTV e Clean Audio). Importante: no código do Comet, desmarcar esta opção também desativa a aplicação dos seus filtros de resolução, idioma e pontuação mínima — mantenha sempre ativado."
+            >Remover Arquivos Ruins (Lixo)</sl-checkbox
+          >
+          <sl-select
+            id="resultFormat"
+            multiple
+            label="Formato de Exibição dos Resultados"
+            placeholder="Selecione o que mostrar na descrição do link"
+            help-text="Define quais detalhes aparecem na descrição de cada link no Stremio (title = nome do arquivo, video_info = codec/HDR, audio_info = som/canais, quality_info = BluRay/WEB-DL/Remux, release_group = grupo, seeders = semeadores, size = tamanho, tracker = fonte, languages = bandeiras de idioma). Confira a prévia logo abaixo. Recomendação: mantenha todos selecionados para identificar tamanho, qualidade e bandeira de idioma PT-BR facilmente."
+            hoist
+            max-options-visible="10"
+          >
+          </sl-select>
+          <div id="resultFormatPreview" style="
+            margin-top: 0.6rem;
+            padding: 0.65rem 0.85rem;
+            background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 0.4rem;
+            font-family: monospace;
+            font-size: 0.78rem;
+            color: #c8ccd0;
+            white-space: pre;
+            line-height: 1.65;
+          "></div>
+        </div>
+      </sl-details>
+
+      <div class="centered-item">
+        <sl-button id="install" variant="neutral">Instalar no Stremio</sl-button>
+        <sl-alert id="installAlert" variant="neutral" duration="3000" closable>
+          <sl-icon slot="icon" name="clipboard2-check"></sl-icon>
+          <strong>Abrindo o Stremio para adicionar o add-on...</strong>
+        </sl-alert>
+
+        <sl-button id="copy-link" variant="neutral">Copiar Link</sl-button>
+        <sl-alert id="copyAlert" variant="neutral" duration="3000" closable>
+          <sl-icon slot="icon" name="clipboard2-check"></sl-icon>
+          <strong
+            >O link do add-on para o Stremio foi copiado automaticamente.</strong
+          >
+        </sl-alert>
+
+        <sl-button id="setup-kodi" variant="neutral">Configurar Kodi</sl-button>
+        <sl-alert id="kodiAlert" variant="success" duration="3000" closable>
+          <sl-icon slot="icon" name="check2-circle"></sl-icon>
+          <strong id="kodiAlertText">Configuração do Kodi concluída com sucesso.</strong>
+        </sl-alert>
+        <sl-alert id="kodiErrorAlert" variant="danger" duration="4000" closable>
+          <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+          <strong id="kodiErrorAlertText">Falha ao configurar o Kodi.</strong>
+        </sl-alert>
+
+        <script type="module">
+          const languagesEmojis = {{ languageEmojis | tojson }};
+          let defaultResultFormat = [];
+          const ALL_RESOLUTIONS = ["r2160p", "r1440p", "r1080p", "r720p", "r576p", "r480p", "r360p", "r240p", "unknown"];
+
+          (async () => {
+            await Promise.allSettled([
+              customElements.whenDefined("sl-button"),
+              customElements.whenDefined("sl-alert"),
+              customElements.whenDefined("sl-select"),
+              customElements.whenDefined("sl-input"),
+              customElements.whenDefined("sl-option"),
+              customElements.whenDefined("sl-icon"),
+              customElements.whenDefined("sl-checkbox")
+            ]);
+
+            const webConfig = {{ webConfig| tojson }};
+
+
+          const resolutionsSelect = document.getElementById("resolutions");
+          resolutionsSelect.value = ALL_RESOLUTIONS;
+
+          populateSelect("resultFormat", webConfig.resultFormat);
+          defaultResultFormat = webConfig.resultFormat;
+          const resultFormatSelect = document.getElementById("resultFormat");
+          resultFormatSelect.value = defaultResultFormat;
+
+          // Live preview for result format
+          function updateResultFormatPreview() {
+            const sel = document.getElementById("resultFormat");
+            const raw = sel.value;
+            const selected = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+            const hasAll = selected.includes("all");
+            const S = {
+              title:     "📄 Movie.Title.2024.1080p.BluRay.x264-GROUP",
+              video:     "📹 H.264 • HDR • 10bit",
+              audio:     "🔊 DDP5.1 • Atmos",
+              quality:   "⭐ BluRay",
+              group:     "🏷️ YTS",
+              seeders:   "👤 1234",
+              size:      "💾 12.5 GB",
+              tracker:   "🔎 Yggrasil",
+              languages: "🇬🇧/🇫🇷",
+            };
+            const c = {};
+            if (hasAll || selected.includes("title"))          c.title     = S.title;
+            if (hasAll || selected.includes("video_info"))      c.video     = S.video;
+            if (hasAll || selected.includes("audio_info"))      c.audio     = S.audio;
+            if (hasAll || selected.includes("quality_info"))    c.quality   = S.quality;
+            if (hasAll || selected.includes("release_group"))   c.group     = S.group;
+            if (hasAll || selected.includes("seeders"))         c.seeders   = S.seeders;
+            if (hasAll || selected.includes("size"))            c.size      = S.size;
+            if (hasAll || selected.includes("tracker"))         c.tracker   = S.tracker;
+            if (hasAll || selected.includes("languages"))       c.languages = S.languages;
+            const lines = [];
+            if (c.title) lines.push(c.title);
+            const va = [c.video, c.audio].filter(Boolean);
+            if (va.length) lines.push(va.join(" | "));
+            const qg = [c.quality, c.group].filter(Boolean);
+            if (qg.length) lines.push(qg.join(" | "));
+            const info = [c.seeders, c.size, c.tracker].filter(Boolean);
+            if (info.length) lines.push(info.join(" "));
+            if (c.languages) lines.push(c.languages);
+            document.getElementById("resultFormatPreview").textContent =
+              lines.length ? lines.join("\n") : "Nenhum item selecionado no formato de exibição";
+          }
+          resultFormatSelect.addEventListener("sl-change", updateResultFormatPreview);
+          updateResultFormatPreview();
+
+          // Populate language selects before restoring their selected values
+          populateSelect("languages_required", Object.keys(languagesEmojis));
+          populateSelect("languages_allowed", Object.keys(languagesEmojis));
+          populateSelect("languages_excluded", Object.keys(languagesEmojis));
+          populateSelect("languages_preferred", Object.keys(languagesEmojis));
+
+          // try populate the form from previous settings
+          try {
+            const settings = getSettingsFromUrl();
+            if (settings != null) {
+              populateFormFromSettings(settings, updateResultFormatPreview);
+            }
+          } catch (error) {
+            console.log("Failed to retrieve or parse settings from URL:", error);
+          }
+
+          document.body.classList.add("ready");
+          })();
+
+          function populateSelect(selectId, options) {
+            const selectElement = document.getElementById(selectId);
+
+            const languageNames = {
+              "multi": "Multi (Múltiplos idiomas)",
+              "en": "Inglês",
+              "ja": "Japonês",
+              "zh": "Chinês",
+              "ru": "Russo",
+              "ar": "Árabe",
+              "pt": "Português",
+              "es": "Espanhol",
+              "fr": "Francês",
+              "de": "Alemão",
+              "it": "Italiano",
+              "ko": "Coreano",
+              "hi": "Hindi",
+              "bn": "Bengali",
+              "pa": "Punjabi",
+              "mr": "Marati",
+              "gu": "Guzerate",
+              "ta": "Tâmil",
+              "te": "Telugo",
+              "kn": "Canarês",
+              "ml": "Malaiala",
+              "th": "Tailandês",
+              "vi": "Vietnamita",
+              "id": "Indonésio",
+              "tr": "Turco",
+              "he": "Hebraico",
+              "fa": "Persa",
+              "uk": "Ucraniano",
+              "el": "Grego",
+              "lt": "Lituano",
+              "lv": "Letão",
+              "et": "Estoniano",
+              "pl": "Polonês",
+              "cs": "Tcheco",
+              "sk": "Eslovaco",
+              "hu": "Húngaro",
+              "ro": "Romeno",
+              "bg": "Búlgaro",
+              "sr": "Sérvio",
+              "hr": "Croata",
+              "sl": "Esloveno",
+              "nl": "Holandês",
+              "da": "Dinamarquês",
+              "fi": "Finlandês",
+              "sv": "Sueco",
+              "no": "Norueguês",
+              "ms": "Malaio",
+              "la": "Espanhol Latino"
+            };
+
+            options.forEach(option => {
+              const optionElement = document.createElement("sl-option");
+              optionElement.value = option;
+
+              if (selectId.startsWith('languages')) {
+                const flag = languagesEmojis[option] || '';
+                const fullName = languageNames[option] || option;
+                optionElement.textContent = `${flag} ${fullName}`;
+              } else {
+                optionElement.textContent = option;
+              }
+
+              selectElement.appendChild(optionElement);
+            });
+          }
+
+          const installButton = document.querySelector("#install");
+          const installAlert = document.querySelector('#installAlert');
+          const copyLinkButton = document.querySelector("#copy-link");
+          const copyAlert = document.querySelector('#copyAlert');
+          const kodiSetupButton = document.querySelector("#setup-kodi");
+          const kodiAlert = document.querySelector("#kodiAlert");
+          const kodiAlertText = document.querySelector("#kodiAlertText");
+          const stremioApiPrefix = {{ (stremioApiPrefix or "") | tojson }};
+
+          function getSettings() {
+            const languages_required = Array.from(document.getElementById("languages_required").selectedOptions).map(option => option.value);
+            const languages_allowed = Array.from(document.getElementById("languages_allowed").selectedOptions).map(option => option.value);
+            const languages_excluded = Array.from(document.getElementById("languages_excluded").selectedOptions).map(option => option.value);
+            const languages_preferred = Array.from(document.getElementById("languages_preferred").selectedOptions).map(option => option.value);
+            const selectedResolutions = Array.from(document.getElementById("resolutions").selectedOptions).map(option => option.value);
+            const allResolutions = ALL_RESOLUTIONS;
+            const resolutions = allResolutions.reduce((obj, res) => {
+              // Only include resolutions that are NOT selected (disabled) as false
+              if (!selectedResolutions.includes(res)) {
+                obj[res] = false;
+              }
+              return obj;
+            }, {});
+            const rankThreshold = document.getElementById("rankThreshold").value;
+            const maxResultsPerResolution = document.getElementById("maxResultsPerResolution").value;
+            const maxSize = document.getElementById("maxSize").value;
+            const cachedOnly = document.getElementById("cachedOnly").checked;
+            const sortCachedUncachedTogether = document.getElementById("sortCachedUncachedTogether").checked;
+            const removeTrash = document.getElementById("removeTrash").checked;
+            const allowEnglishInLanguages = document.getElementById("allowEnglishInLanguages").checked;
+            const removeUnknownLanguages = document.getElementById("removeUnknownLanguages").checked;
+            const resultFormat = Array.from(document.getElementById("resultFormat").selectedOptions).map(option => option.value);
+            const debridStreamProxyPassword = document.getElementById("debridStreamProxyPassword").value;
+
+            const debridServices = getDebridServices();
+            const enableTorrentEl = document.getElementById("enableTorrent");
+            const enableTorrent = enableTorrentEl ? enableTorrentEl.checked : false;
+            const deduplicateStreamsEl = document.getElementById("deduplicateStreams");
+            const deduplicateStreams = deduplicateStreamsEl ? deduplicateStreamsEl.checked : false;
+            const scrapeDebridAccountTorrentsEl = document.getElementById("scrapeDebridAccountTorrents");
+            const scrapeDebridAccountTorrents = scrapeDebridAccountTorrentsEl ? scrapeDebridAccountTorrentsEl.checked : false;
+
+            const selectedResultFormat = resultFormat.length === defaultResultFormat.length && resultFormat.every((val, index) => val === defaultResultFormat[index]) ? ["all"] : resultFormat;
+
+            return {
+              maxResultsPerResolution: parseInt(maxResultsPerResolution),
+              maxSize: parseFloat(maxSize * 1073741824),
+              cachedOnly: cachedOnly,
+              sortCachedUncachedTogether: sortCachedUncachedTogether,
+              removeTrash: removeTrash,
+              resultFormat: selectedResultFormat,
+              debridServices: debridServices,
+              enableTorrent: enableTorrent,
+              deduplicateStreams: deduplicateStreams,
+              scrapeDebridAccountTorrents: scrapeDebridAccountTorrents,
+              debridStreamProxyPassword: debridStreamProxyPassword,
+              languages: {
+                required: languages_required,
+                allowed: languages_allowed,
+                exclude: languages_excluded,
+                preferred: languages_preferred
+              },
+              resolutions: resolutions,
+              options: {
+                remove_ranks_under: parseFloat(rankThreshold),
+                allow_english_in_languages: allowEnglishInLanguages,
+                remove_unknown_languages: removeUnknownLanguages
+              }
+            };
+          }
+
+          // Check if config matches all default values
+          // If so, use /manifest.json instead of /{b64config}/manifest.json for better CDN caching
+          function isDefaultConfig(settings) {
+            // For default: no debrid services and torrent mode enabled
+            if (settings.debridServices && settings.debridServices.length > 0) {
+              return false;
+            }
+
+            // enableTorrent must be true for default (torrent-only mode)
+            if (settings.enableTorrent !== true) {
+              return false;
+            }
+
+            // Check all filtering fields match defaults
+            // maxResultsPerResolution default is 0
+            if (settings.maxResultsPerResolution !== 0) {
+              return false;
+            }
+
+            // maxSize default is 0
+            if (settings.maxSize !== 0) {
+              return false;
+            }
+
+            // cachedOnly default is false
+            if (settings.cachedOnly !== false) {
+              return false;
+            }
+
+            // sortCachedUncachedTogether default is false
+            if (settings.sortCachedUncachedTogether !== false) {
+              return false;
+            }
+
+            // scrapeDebridAccountTorrents default is false
+            if (settings.scrapeDebridAccountTorrents === true) {
+              return false;
+            }
+
+            // removeTrash default is true
+            if (settings.removeTrash !== true) {
+              return false;
+            }
+
+            // debridStreamProxyPassword default is ""
+            if (settings.debridStreamProxyPassword && settings.debridStreamProxyPassword !== "") {
+              return false;
+            }
+
+            // resultFormat default is ["all"]
+            if (!settings.resultFormat ||
+                settings.resultFormat.length !== 1 ||
+                settings.resultFormat[0] !== "all") {
+              return false;
+            }
+
+            // resolutions: all should be enabled (no false values in the object)
+            // An empty object means all are enabled (default)
+            for (const [res, enabled] of Object.entries(settings.resolutions || {})) {
+              if (enabled === false) {
+                return false;
+              }
+            }
+
+            // languages: no excludes or preferences (empty arrays)
+            if (settings.languages) {
+              if (settings.languages.required && settings.languages.required.length > 0) {
+                return false;
+              }
+              if (settings.languages.allowed && settings.languages.allowed.length > 0) {
+                return false;
+              }
+              if (settings.languages.exclude && settings.languages.exclude.length > 0) {
+                return false;
+              }
+              if (settings.languages.preferred && settings.languages.preferred.length > 0) {
+                return false;
+              }
+            }
+
+            // options: check defaults
+            if (settings.options) {
+              // remove_ranks_under default is -10000000000
+              if (settings.options.remove_ranks_under !== -10000000000) {
+                return false;
+              }
+              // allow_english_in_languages default is false
+              if (settings.options.allow_english_in_languages !== false) {
+                return false;
+              }
+              // remove_unknown_languages default is false
+              if (settings.options.remove_unknown_languages !== false) {
+                return false;
+              }
+            }
+
+            return true;
+          }
+
+          // Generate the manifest URL - use /manifest.json for default configs
+          function getManifestUrl(settings, forInstall = false) {
+            const isDefault = isDefaultConfig(settings);
+            const host = window.location.host;
+
+            if (isDefault) {
+              // Default config: use public manifest URL (better CDN caching)
+              return forInstall
+                ? `stremio://${host}${stremioApiPrefix}/manifest.json`
+                : `${window.location.origin}${stremioApiPrefix}/manifest.json`;
+            } else {
+              // Custom config: use b64config in URL
+              const settingsString = btoa(JSON.stringify(settings));
+              return forInstall
+                ? `stremio://${host}${stremioApiPrefix}/${settingsString}/manifest.json`
+                : `${window.location.origin}${stremioApiPrefix}/${settingsString}/manifest.json`;
+            }
+          }
+
+          function getKodiManifestUrl(settings) {
+            if (isDefaultConfig(settings)) {
+              return `${window.location.origin}${stremioApiPrefix}/manifest.json`;
+            }
+            const settingsString = btoa(JSON.stringify(settings));
+            return `${window.location.origin}${stremioApiPrefix}/${settingsString}/manifest.json`;
+          }
+
+          copyLinkButton.addEventListener("click", () => {
+            const settings = getSettings();
+            const manifestUrl = getManifestUrl(settings, false);
+
+            const textArea = document.createElement("textarea");
+            textArea.value = manifestUrl;
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            document.execCommand("copy");
+            document.body.removeChild(textArea);
+
+            console.log(`Copied manifest URL: ${manifestUrl}`);
+
+            copyAlert.toast();
+          });
+
+          installButton.addEventListener("click", () => {
+            const settings = getSettings();
+            const manifestUrl = getManifestUrl(settings, true);
+            window.location.href = manifestUrl;
+            console.log(`Installing manifest URL: ${manifestUrl}`);
+            installAlert.toast();
+          });
+
+          async function setupKodiWithCode(rawCode) {
+            const code = rawCode.trim().toLowerCase();
+            if (!/^[0-9a-f]{8}$/.test(code)) {
+              showKodiError("O código de configuração do Kodi deve ter 8 caracteres hexadecimais (0-9 e a-f).");
+              return;
+            }
+
+            const settings = getSettings();
+            const manifestUrl = getKodiManifestUrl(settings);
+
+            const response = await fetch("/kodi/associate_manifest", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                code: code,
+                manifest_url: manifestUrl,
+              }),
+            });
+
+            if (!response.ok) {
+              let errorMessage = "Falha ao configurar o Kodi.";
+              try {
+                const errorData = await response.json();
+                if (errorData.detail) {
+                  errorMessage = errorData.detail;
+                }
+              } catch (error) {
+                console.error("Failed to parse Kodi setup error:", error);
+              }
+              showKodiError(errorMessage);
+              return;
+            }
+
+            kodiAlertText.textContent = "Configuração do Kodi concluída com sucesso.";
+            kodiAlert.toast();
+            return true;
+          }
+
+          function showKodiError(message) {
+            const errorAlert = document.getElementById("kodiErrorAlert");
+            const errorText = document.getElementById("kodiErrorAlertText");
+            errorText.textContent = message;
+            errorAlert.toast();
+          }
+
+          const kodiDialog = document.querySelector("#kodi-dialog");
+          const kodiConfirmBtn = document.querySelector("#kodi-confirm-btn");
+          const kodiCancelBtn = document.querySelector("#kodi-cancel-btn");
+          const kodiInput = document.querySelector("#kodi-code-input");
+
+          kodiSetupButton.addEventListener("click", () => {
+            const queryParams = new URLSearchParams(window.location.search);
+            const suggestedCode = queryParams.get("kodi_code") || "";
+            kodiInput.value = suggestedCode;
+            kodiDialog.show();
+          });
+
+          kodiConfirmBtn.addEventListener("click", async () => {
+            const code = kodiInput.value;
+            if (code) {
+              kodiConfirmBtn.loading = true;
+              try {
+                const success = await setupKodiWithCode(code);
+                if (success) {
+                  kodiDialog.hide();
+                }
+              } catch (error) {
+                console.error("Kodi setup error:", error);
+                showKodiError("Ocorreu um erro inesperado ao configurar o Kodi.");
+              } finally {
+                kodiConfirmBtn.loading = false;
+              }
+            } else {
+              showKodiError("Por favor, digite o código de configuração.");
+            }
+          });
+
+          kodiCancelBtn.addEventListener("click", () => kodiDialog.hide());
+
+          kodiInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+              kodiConfirmBtn.click();
+            }
+          });
+
+          function getSettingsFromUrl() {
+            const segments = window.location.pathname.split("/").filter(Boolean);
+            const configureIndex = segments.lastIndexOf("configure");
+            if (configureIndex <= 0) {
+              return null;
+            }
+
+            const settingsString = decodeURIComponent(segments[configureIndex - 1]);
+            if (!settingsString) {
+              return null;
+            }
+
+            try {
+              return JSON.parse(atob(settingsString));
+            } catch (_) {
+              return null;
+            }
+          }
+
+          function populateFormFromSettings(settings, updatePreview) {
+            if (settings.cachedOnly !== null)
+              document.getElementById("cachedOnly").checked = settings.cachedOnly;
+            if (settings.sortCachedUncachedTogether !== undefined && settings.sortCachedUncachedTogether !== null)
+              document.getElementById("sortCachedUncachedTogether").checked = settings.sortCachedUncachedTogether;
+            if (settings.removeTrash !== null)
+              document.getElementById("removeTrash").checked = settings.removeTrash;
+            if (settings.maxResultsPerResolution !== null)
+              document.getElementById("maxResultsPerResolution").value = settings.maxResultsPerResolution;
+            if (settings.maxSize !== null)
+              document.getElementById("maxSize").value = settings.maxSize / 1073741824;
+
+            // Handle multi-debrid format
+            if (settings.debridServices && settings.debridServices.length > 0) {
+              populateDebridServices(settings.debridServices);
+            }
+            // Handle legacy single-debrid format
+            else if (settings.debridService && settings.debridService !== "torrent") {
+              populateDebridServices([{
+                service: settings.debridService,
+                apiKey: settings.debridApiKey || ""
+              }]);
+            }
+
+            // Handle enableTorrent
+            const enableTorrentEl = document.getElementById("enableTorrent");
+            if (enableTorrentEl) {
+              if (settings.enableTorrent !== undefined) {
+                enableTorrentEl.checked = settings.enableTorrent;
+              } else if (settings.debridService === "torrent") {
+                // Legacy torrent-only mode
+                enableTorrentEl.checked = true;
+              }
+            }
+
+            // Handle deduplicateStreams
+            const deduplicateStreamsEl = document.getElementById("deduplicateStreams");
+            if (deduplicateStreamsEl && settings.deduplicateStreams !== undefined) {
+              deduplicateStreamsEl.checked = settings.deduplicateStreams;
+            }
+
+            const scrapeDebridAccountTorrentsEl = document.getElementById("scrapeDebridAccountTorrents");
+            if (scrapeDebridAccountTorrentsEl && settings.scrapeDebridAccountTorrents !== undefined) {
+              scrapeDebridAccountTorrentsEl.checked = settings.scrapeDebridAccountTorrents;
+            }
+
+            if (settings.debridStreamProxyPassword !== null)
+              document.getElementById("debridStreamProxyPassword").value = settings.debridStreamProxyPassword;
+            if (settings.resultFormat !== null && settings.resultFormat != "all")
+              document.getElementById("resultFormat").value = settings.resultFormat;
+            updatePreview();
+            if (settings.languages) {
+              if (settings.languages.required)
+                document.getElementById("languages_required").value = settings.languages.required;
+              if (settings.languages.allowed)
+                document.getElementById("languages_allowed").value = settings.languages.allowed;
+              if (settings.languages.exclude)
+                document.getElementById("languages_excluded").value = settings.languages.exclude;
+              if (settings.languages.preferred)
+                document.getElementById("languages_preferred").value = settings.languages.preferred;
+            }
+            if (settings.resolutions) {
+              const allResolutions = ALL_RESOLUTIONS;
+              const enabledResolutions = allResolutions.filter(res => settings.resolutions[res] !== false);
+              document.getElementById("resolutions").value = enabledResolutions;
+            }
+            if (settings.options?.remove_ranks_under !== undefined)
+              document.getElementById("rankThreshold").value = settings.options.remove_ranks_under;
+            if (settings.options?.allow_english_in_languages !== undefined)
+              document.getElementById("allowEnglishInLanguages").checked = settings.options.allow_english_in_languages;
+            if (settings.options?.remove_unknown_languages !== undefined)
+              document.getElementById("removeUnknownLanguages").checked = settings.options.remove_unknown_languages;
+          }
+        </script>
+      </div>
+    </div>
+
+    <div class="heart-button" id="support-trigger" title="Apoiar o projeto Comet">
+      <sl-icon name="heart-fill"></sl-icon>
+    </div>
+
+    <sl-dialog label="Configurar Kodi" id="kodi-dialog" style="--width: 500px">
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          gap: 1.2rem;
+          margin-top: -10px;
+        "
+      >
+        <p
+          style="
+            margin: 0;
+            color: var(--sl-color-neutral-600);
+            font-size: 0.95rem;
+            line-height: 1.6;
+          "
+        >
+          O Kodi é um reprodutor de mídia gratuito e de código aberto que
+          permite organizar e assistir aos seus conteúdos digitais. Ao
+          configurar o Comet no Kodi, você acessa seus torrents e serviços
+          Debrid diretamente pela interface dele.
+        </p>
+
+        <sl-button
+          href="https://github.com/g0ldyy/comet/blob/main/kodi/README.md"
+          target="_blank"
+          variant="default"
+          style="width: 100%"
+        >
+          <sl-icon slot="prefix" name="book"></sl-icon>
+          Guia de Configuração no Kodi
+        </sl-button>
+
+        <sl-divider></sl-divider>
+
+        <sl-input
+          id="kodi-code-input"
+          label="Código de Vinculação"
+          placeholder="ex.: 1a2b3c4d"
+          maxlength="8"
+          help-text="Digite o código hexadecimal de 8 caracteres exibido nas configurações do add-on Comet no Kodi (Configurar/Reconfigurar) para enviar sua configuração atual."
+          clearable
+        ></sl-input>
+      </div>
+      <sl-button slot="footer" variant="primary" id="kodi-confirm-btn">
+        Configurar
+      </sl-button>
+      <sl-button slot="footer" variant="neutral" id="kodi-cancel-btn">
+        Cancelar
+      </sl-button>
+    </sl-dialog>
+
+    <sl-dialog label="Apoiar o Comet" id="support-dialog" style="--width: 400px">
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          gap: 0.5rem;
+          margin-top: -15px;
+        "
+      >
+        <div
+          style="
+            font-size: 2.5rem;
+            animation: heartbeat 1.5s ease-in-out infinite;
+          "
+        >
+          ❤️
+        </div>
+        <h3 style="margin: 0">Apoie o Criador</h3>
+        <p
+          style="
+            color: var(--sl-color-neutral-500);
+            margin: 0;
+            font-size: 0.9rem;
+          "
+        >
+          O Comet é um projeto feito com dedicação, café e madrugadas em claro.
+          O seu apoio ajuda a manter o projeto ativo e recebendo atualizações!
+        </p>
+
+        <div
+          style="
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 100%;
+            margin-top: 10px;
+          "
+        >
+          <sl-button
+            href="https://github.com/sponsors/g0ldyy"
+            target="_blank"
+            outline
+            style="width: 100%"
+          >
+            <sl-icon slot="prefix" name="github"></sl-icon>
+            GitHub Sponsors
+          </sl-button>
+          <sl-button
+            href="https://ko-fi.com/g0ldyy"
+            target="_blank"
+            outline
+            style="width: 100%; --sl-color-primary-600: #ff5e5b"
+          >
+            <sl-icon slot="prefix" name="cup-hot"></sl-icon>
+            Ko-fi
+          </sl-button>
+        </div>
+      </div>
+    </sl-dialog>
+
+    <script>
+      const dialog = document.querySelector("#support-dialog");
+      const openButton = document.querySelector("#support-trigger");
+      openButton.addEventListener("click", () => dialog.show());
+    </script>
+  </body>
+</html>
