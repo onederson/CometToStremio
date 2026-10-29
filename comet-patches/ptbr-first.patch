@@ -1,0 +1,371 @@
+diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
+index 94f56ae..0cbe1d2 100644
+--- a/comet/api/endpoints/stream.py
++++ b/comet/api/endpoints/stream.py
+@@ -33,6 +33,19 @@ RESOLUTION_TO_DIMENSIONS = {
+     "240P": (240, 320),
+ }
+ 
++_PTBR_RESOLUTION_ORDER = {
++    "4k": 0,
++    "2160p": 0,
++    "1440p": 1,
++    "1080p": 2,
++    "720p": 3,
++    "576p": 4,
++    "480p": 5,
++    "360p": 6,
++    "240p": 7,
++    "unknown": 8,
++}
++
+ 
+ def _first_meta_value(value):
+     if isinstance(value, list):
+@@ -132,6 +145,7 @@ def _select_info_hashes_by_resolution(
+     max_results: int,
+     cached_only: bool,
+     prioritize_cached: bool,
++    ptbr_first: bool = False,
+ ):
+     if max_results <= 0:
+         return None
+@@ -153,27 +167,39 @@ def _select_info_hashes_by_resolution(
+             for info_hash in ranked_info_hashes
+         }
+ 
+-    if prioritize_cached:
+-        for info_hash in ranked_info_hashes:
+-            if not is_cached_by_hash[info_hash]:
+-                continue
+-            try_select(info_hash)
++    def select_group(hashes):
++        if prioritize_cached:
++            for info_hash in hashes:
++                if is_cached_by_hash[info_hash]:
++                    try_select(info_hash)
+ 
+-        if cached_only:
+-            return selected_info_hashes
++            if cached_only:
++                return
+ 
+-        for info_hash in ranked_info_hashes:
+-            if is_cached_by_hash[info_hash]:
++            for info_hash in hashes:
++                if not is_cached_by_hash[info_hash]:
++                    try_select(info_hash)
++            return
++
++        for info_hash in hashes:
++            if cached_only and not is_cached_by_hash[info_hash]:
+                 continue
+             try_select(info_hash)
+ 
+-        return selected_info_hashes
+-
+-    for info_hash in ranked_info_hashes:
+-        if cached_only and not is_cached_by_hash[info_hash]:
+-            continue
+-        try_select(info_hash)
++    if ptbr_first:
++        pt_hashes = []
++        other_hashes = []
++        for info_hash in ranked_info_hashes:
++            if "pt" in (getattr(torrents[info_hash]["parsed"], "languages", None) or ()):
++                pt_hashes.append(info_hash)
++            else:
++                other_hashes.append(info_hash)
++        select_group(pt_hashes)
++        select_group(other_hashes)
++        selected_set = set(selected_info_hashes)
++        return [h for h in ranked_info_hashes if h in selected_set]
+ 
++    select_group(ranked_info_hashes)
+     return selected_info_hashes
+ 
+ 
+@@ -329,7 +355,7 @@ async def stream(
+     debrid_errors = search_result.debrid_errors
+     sort_mixed = search_result.sort_mixed
+     torrents = search_result.torrents
+-    cached_results = [
++    notice_streams = [
+         {
+             "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
+             "description": error.display_message,
+@@ -337,6 +363,7 @@ async def stream(
+         }
+         for service, error in search_result.debrid_errors.items()
+     ]
++    cached_results = []
+     non_cached_results = []
+     debrid_stream_specs = [
+         (entry_index, entry["service"], get_debrid_extension(entry["service"]))
+@@ -348,7 +375,7 @@ async def stream(
+         and settings.PROXY_DEBRID_STREAM
+         and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
+     ):
+-        cached_results.append(
++        notice_streams.append(
+             {
+                 "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
+                 "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
+@@ -378,7 +405,7 @@ async def stream(
+ 
+     if search_result.show_account_sync_trigger:
+         for entry_index, _, debrid_extension in debrid_stream_specs:
+-            cached_results.append(
++            notice_streams.append(
+                 {
+                     "name": (
+                         f"[{debrid_extension}] Comet Sync"
+@@ -402,6 +429,7 @@ async def stream(
+             config["cachedOnly"] and debrid_entries and not enable_torrent
+         ),
+         prioritize_cached=bool(debrid_entries and not sort_mixed),
++        ptbr_first=bool(settings.PTBR_FIRST),
+     )
+     ranked_info_hashes = (
+         selected_info_hashes
+@@ -411,9 +439,13 @@ async def stream(
+ 
+     added_hashes = set()
+ 
+-    for info_hash in ranked_info_hashes:
++    for rank_idx, info_hash in enumerate(ranked_info_hashes):
+         torrent = torrents[info_hash]
+         rtn_data = torrent["parsed"]
++        is_pt = "pt" in (getattr(rtn_data, "languages", None) or ())
++        res_rank = _PTBR_RESOLUTION_ORDER.get(
++            str(getattr(rtn_data, "resolution", "")).lower(), 8
++        )
+         torrent_title = torrent["title"]
+         torrent_size = torrent["size"]
+         formatted_components = format_components(
+@@ -463,6 +495,8 @@ async def stream(
+                 seeders=torrent["seeders"],
+                 status="C" if is_cached else "U",
+             )
++            if is_pt:
++                stream_name = f"🇧🇷 PT-BR\n{stream_name}"
+ 
+             the_stream = {
+                 "name": stream_name,
+@@ -488,10 +522,17 @@ async def stream(
+             if is_cached:
+                 added_hashes.add(info_hash)
+ 
++            stream_entry = (
++                the_stream,
++                is_pt,
++                res_rank,
++                0 if is_cached else 1,
++                rank_idx,
++            )
+             if sort_mixed or is_cached:
+-                cached_results.append(the_stream)
++                cached_results.append(stream_entry)
+             else:
+-                non_cached_results.append(the_stream)
++                non_cached_results.append(stream_entry)
+ 
+         if enable_torrent:
+             if deduplicate_streams and info_hash in added_hashes:
+@@ -515,6 +556,8 @@ async def stream(
+                 seeders=torrent["seeders"],
+                 status="P2P",
+             )
++            if is_pt:
++                stream_name = f"🇧🇷 PT-BR\n{stream_name}"
+ 
+             the_stream = {
+                 "name": stream_name,
+@@ -533,12 +576,22 @@ async def stream(
+             if sources:
+                 the_stream["sources"] = sources
+ 
+-            cached_results.append(the_stream)
++            cached_results.append((the_stream, is_pt, res_rank, 1, rank_idx))
+ 
+-    if sort_mixed:
+-        final_streams = cached_results
++    ordered_entries = (
++        cached_results if sort_mixed else cached_results + non_cached_results
++    )
++    if settings.PTBR_FIRST:
++        pt_entries = [entry for entry in ordered_entries if entry[1]]
++        other_entries = [entry for entry in ordered_entries if not entry[1]]
++        pt_entries.sort(key=lambda entry: (entry[2], entry[3], entry[4]))
++        final_streams = (
++            notice_streams
++            + [entry[0] for entry in pt_entries]
++            + [entry[0] for entry in other_entries]
++        )
+     else:
+-        final_streams = cached_results + non_cached_results
++        final_streams = notice_streams + [entry[0] for entry in ordered_entries]
+ 
+     has_results = len(final_streams) > 0
+ 
+diff --git a/comet/core/models.py b/comet/core/models.py
+index 835a975..0e45c38 100644
+--- a/comet/core/models.py
++++ b/comet/core/models.py
+@@ -317,6 +317,10 @@ class AppSettings(ServerSettings):
+     HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
+     DOWNLOAD_GENERIC_TRACKERS: bool | None = False
+     SMART_LANGUAGE_DETECTION: bool | None = False
++    PTBR_FIRST: bool = True
++    PTBR_RELEASE_GROUPS: str = (
++        "BiOMA,C76,WOLVERDONFILMES,COMANDO,BLUDV,VACATORRENT,LAPUMiA,TBS,SF"
++    )
+ 
+     # CometNet P2P Network Configuration
+     COMETNET_ENABLED: bool | None = False
+diff --git a/comet/services/debrid.py b/comet/services/debrid.py
+index 819551b..23202e1 100644
+--- a/comet/services/debrid.py
++++ b/comet/services/debrid.py
+@@ -10,6 +10,7 @@ from comet.services.debrid_cache import (
+     get_cached_availability_any_service,
+     schedule_cache_availability,
+ )
++from comet.services.filtering import apply_ptbr_detection
+ from comet.utils.parsing import MediaScope, ensure_multi_language, load_cached_parsed
+ 
+ 
+@@ -72,6 +73,8 @@ class DebridService:
+         ):
+             DebridService._backfill_attr(merged, original, attr)
+ 
++        if "pt" in (original.languages or ()) and "pt" not in merged.languages:
++            merged.languages.append("pt")
+         ensure_multi_language(merged)
+         return merged
+ 
+@@ -92,6 +95,12 @@ class DebridService:
+         if parsed is not None:
+             merged_parsed = cls._merge_parsed(torrent.get("parsed"), parsed)
+             if merged_parsed is not None:
++                apply_ptbr_detection(
++                    merged_parsed,
++                    title or torrent.get("title") or "",
++                    torrent.get("tracker"),
++                )
++                ensure_multi_language(merged_parsed)
+                 update["parsed"] = merged_parsed
+ 
+         file_index = cls._coerce_file_index(file_index)
+diff --git a/comet/services/filtering.py b/comet/services/filtering.py
+index b844e5e..f7c3e9a 100644
+--- a/comet/services/filtering.py
++++ b/comet/services/filtering.py
+@@ -1,6 +1,7 @@
+ import re
+ from collections import OrderedDict, defaultdict
+ from collections.abc import Collection
++from functools import lru_cache
+ from threading import Event, Lock
+ 
+ from pydantic import ValidationError
+@@ -12,6 +13,70 @@ from comet.utils.languages import alias_language
+ from comet.utils.parsing import ensure_multi_language
+ 
+ _TITLE_MATCH_CACHE_MAX_ENTRIES = 65_536
++_PTBR_TRACKER_RE = re.compile(r"comando|bludv|micoleaodublado", re.IGNORECASE)
++_PTBR_TITLE_EXPLICIT_RE = re.compile(
++    r"dublado|(?<![a-z0-9])(?:dub[ ._-]?pt(?:[ ._-]?br)?|nacional|pt[ ._-]?br|portugu[eê]s)(?![a-z0-9])",
++    re.IGNORECASE,
++)
++_PTBR_POR_RE = re.compile(r"(?<![a-z0-9])por(?![a-z0-9])", re.IGNORECASE)
++_PTBR_DUAL_AUDIO_RE = re.compile(
++    r"(?<![a-z0-9])(?:dual|audio|áudio)(?![a-z0-9])", re.IGNORECASE
++)
++_PTBR_DUAL_RE = re.compile(r"(?<![a-z0-9])dual(?![a-z0-9])", re.IGNORECASE)
++_LAT_ES_RE = re.compile(
++    r"(?<![a-z0-9])(?:lat|latino|castellano|esp|spanish)(?![a-z0-9])",
++    re.IGNORECASE,
++)
++
++
++@lru_cache(maxsize=8)
++def _get_ptbr_groups_re(groups_csv: str) -> re.Pattern | None:
++    groups = [g.strip() for g in groups_csv.split(",") if g.strip()]
++    if not groups:
++        return None
++    pattern = "|".join(re.escape(g) for g in groups)
++    return re.compile(rf"(?<![a-z0-9])(?:{pattern})(?![a-z0-9])", re.IGNORECASE)
++
++
++def apply_ptbr_detection(
++    parsed, torrent_title: str, tracker: str | None = None
++) -> None:
++    if "pt" in parsed.languages:
++        return
++
++    por_text = torrent_title
++    if getattr(parsed, "parsed_title", None):
++        title_words = parsed.parsed_title.split()
++        if title_words:
++            por_text = re.sub(
++                r"\W+".join(re.escape(w) for w in title_words),
++                " ",
++                torrent_title,
++                count=1,
++                flags=re.IGNORECASE,
++            )
++
++    has_explicit_pt = bool(
++        _PTBR_TITLE_EXPLICIT_RE.search(torrent_title)
++        or (
++            _PTBR_POR_RE.search(por_text)
++            and _PTBR_DUAL_AUDIO_RE.search(torrent_title)
++        )
++    )
++    if not has_explicit_pt and _LAT_ES_RE.search(torrent_title):
++        return
++
++    is_pt = has_explicit_pt or bool(
++        tracker and _PTBR_TRACKER_RE.search(tracker)
++    )
++    if not is_pt and _PTBR_DUAL_RE.search(torrent_title):
++        groups_re = _get_ptbr_groups_re(settings.PTBR_RELEASE_GROUPS or "")
++        if groups_re is not None and groups_re.search(torrent_title):
++            is_pt = True
++
++    if is_pt:
++        _log_exclusion(f"🏷️ Added Language (PT-BR) | {torrent_title} | pt")
++        parsed.languages.append("pt")
+ 
+ if settings.RTN_FILTER_DEBUG:
+ 
+@@ -355,6 +420,7 @@ def filter_worker(
+                 )
+                 parsed.languages.append(language)
+ 
++        apply_ptbr_detection(parsed, torrent_title, torrent.get("tracker"))
+         ensure_multi_language(parsed)
+ 
+         if remove_adult_content and parsed.adult:
+diff --git a/comet/services/orchestration.py b/comet/services/orchestration.py
+index aa43646..a24dc2c 100644
+--- a/comet/services/orchestration.py
++++ b/comet/services/orchestration.py
+@@ -9,7 +9,7 @@ from comet.core.models import CometSettingsModel, database, settings
+ from comet.core.scrape import ScrapeContext
+ from comet.scrapers.manager import scraper_manager
+ from comet.scrapers.models import ScrapeRequest
+-from comet.services.filtering import filter_worker
++from comet.services.filtering import apply_ptbr_detection, filter_worker
+ from comet.services.ranking import rank_worker
+ from comet.services.torrent_manager import torrent_update_queue
+ from comet.utils.languages import select_indexer_titles
+@@ -244,6 +244,7 @@ class TorrentManager:
+                     f"Skipping torrent cache row with invalid parsed data: {row['info_hash']}"
+                 )
+                 continue
++            apply_ptbr_detection(parsed_data, row["title"], row["tracker"])
+             ensure_multi_language(parsed_data)
+ 
+             target_season = self.search_season

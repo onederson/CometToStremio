@@ -1,7 +1,7 @@
 # Fase 2: Backend de Addon Stremio no Galaxy A71 (Comet + Real-Debrid)
 
 *Início da Fase: 29/10/2026*  
-*Última atualização: 29/10/2026, 10:22 (horário de Brasília)*
+*Última atualização: 29/10/2026, 15:38 (horário de Brasília)*
 
 > **🤖 Para outra IA continuar daqui:** leia a **Seção 0** inteira antes de rodar qualquer comando. Ela descreve o estado real verificado no aparelho, o que já está pronto e o comando exato do próximo passo.  
 > O contexto completo da Fase 1 (rede `192.168.3.0/24`, IP fixo `192.168.3.44`, DNS `a71.lan`, AdGuard Home, ADB Wi-Fi permanente e regras de `su -c`) está em `README adguard contexto.md`.
@@ -38,7 +38,8 @@
   * O script de boot `comet.sh` foi instalado em `/data/adb/service.d/comet.sh` (`chmod 755`).
   * **Reboot validado:** A71 reiniciado com sucesso via ADB. Boot completado em 68 s; HTTPS online em 95 s após comando de reboot (27 s após `sys.boot_completed`).
   * **Processos ativos e supervisionados:** AdGuard Home intacto (DNS respondendo), 1 watchdog Comet (PID 3648), 1 Comet (`python -m comet.main`, PID 3656), 1 Caddy (`caddy run`, PID 3664).
-* **Página `/configure` traduzida para PT-BR:** Template com explicações detalhadas em `comet-ui/index.html` aplicado em `/data/debian/opt/comet/comet/templates/index.html` (backup único em `index.html.orig`). Após atualizar o Comet (`git pull`), verifique antes se o `index.html` original mudou upstream e reaplique com `.\scripts\deploy_ui.ps1`.
+* **Página `/configure` traduzida para PT-BR:** Template com explicações detalhadas em `comet-ui/index.html` aplicado em `/data/debian/opt/comet/comet/templates/index.html` (backup único em `index.html.orig`).
+* **Patch "PT-BR primeiro" aplicado no Comet (`PTBR_FIRST=True`):** Detecção ampliada de PT-BR (trackers BR, marcadores de título e grupos `PTBR_RELEASE_GROUPS`), ordenação de streams PT-BR no topo agrupados por resolução (preservando PT-BR no corte de `maxResultsPerResolution`) e rótulo visual `🇧🇷 PT-BR`. Salvo em `comet-patches/ptbr-first.patch`. **Nota:** após `git pull` do Comet, reaplicar `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`.
 
 ### Checklist de progresso
 - [x] Conferir ADB (`192.168.3.44:5555`), root, internet do A71, espaço e RAM
@@ -65,10 +66,12 @@
 | `scripts/setup_comet.sh` | `/data/debian/root/setup_comet.sh` | ✅ Executado c/ sucesso | Instalou Python 3.13, GCC, Rust, `uv`, clonou Comet em `/opt/comet` e rodou `uv sync` (log em `/data/comet/setup.log`) |
 | `scripts/watchdog.sh` | `/data/comet/watchdog.sh` | ✅ Ativo (`755`) | Supervisiona a cada 30 s Comet (`comet.main`) e Caddy (`caddy run`); religa se caírem e limita `comet.log` e `caddy.log` a 5 MB |
 | `scripts/comet.sh` | `/data/adb/service.d/comet.sh` | ✅ Instalado (`755`) | Script de boot Magisk (`sleep 45` + sobe `/data/comet/watchdog.sh`) |
-| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
+| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python "PT-BR primeiro" (detecção PT-BR, ordenação `PTBR_FIRST` e rótulo `🇧🇷 PT-BR`) |
+| `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**
 > 1. **Sempre use `.\scripts\a71.ps1`** para rodar comandos no A71 a partir do PowerShell. Ele grava um script temporário em UTF-8 LF e executa via `su -c`, evitando que o PowerShell engula aspas, `$` ou `|`.
