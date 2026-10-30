@@ -54,6 +54,9 @@
 * **Filtro de Arcos em Anime (`comet-patches/ptbr-first.patch`):** Rejeição automática de releases de anime que citam outro arco via mapeamento Kitsu/IMDb e detecção de títulos normalizados de arcos concorrentes (preservando séries com arco único como One Piece), inclusive em releases com número de temporada próprio do grupo.
 * **Busca ao vivo por episódio:** `primary_cached` só considera o cache válido se houver linha daquele episódio (packs salvos na busca de outro episódio não bastam), então cada episódio novo de uma série faz sua própria busca nas fontes.
 * **Proteção de memória e FlareSolverr:** Watchdog com proteção oom (-1000 para Comet, StremThru, Prowlarr, Caddy e AdGuard; 200 para o FlareSolverr), `am kill-all` abaixo de 600 MB disponíveis, limite de 1200 MB PSS no FlareSolverr, 4 apps do Android desativados (`scripts/android-apps.sh`). FlareSolverr v3.5.2 (127.0.0.1:8191) em arm64 com proxy no Prowlarr (tag `flaresolverr`). Indexadores gerais testados via FlareSolverr não trouxeram ganho e foram removidos (detalhes em `HANDOFF.md`, Seção 7).
+* **CAM no fim da lista (`DEMOTE_CAM=True`):** gravações de cinema (CAM/TS/TC/SCR) vão para o fim com o rótulo `🎦 CAM`, e a troca automática do 451 só as usa em último caso.
+* **Biblioteca do RD no Stremio:** addon Store do StremThru em `https://a71comet.duckdns.org:8443/stremio/store/configure` (Caddy `:8443` → `127.0.0.1:8080`).
+* **Fonte BRSites (`SCRAPE_BRSITES=live`):** scraper próprio de `filmestorrent.tv` e `apachetorrents.com` que pega todos os magnets de cada post (ex.: GoT T7E2 10 → 14 PT-BR).
 
 ### Checklist de progresso
 - [x] Conferir ADB (`192.168.3.44:5555`), root, internet do A71, espaço e RAM
@@ -69,8 +72,9 @@
 - [x] StremThru local, filtro 451, Prowlarr e correção de séries PT-BR (ver Seção 0 acima)
 - [x] Fallback P2P para 451, precheck/troca automática, anime absoluto e expansão de fontes (MediaFusion, Comet, Peerflix)
 - [x] Proteção de memória (oom + `am kill-all`), FlareSolverr e desativação de apps do Android
-- [ ] Teste do usuário no Stremio com RD (451/troca automática, anime, 2º episódio)
-- [ ] (Opcional) Definições Cardigann próprias para sites BR de dublado (ver `HANDOFF.md`, Seção 8)
+- [x] Teste do usuário no Stremio com RD (451/troca automática, anime, 2º episódio)
+- [x] CAM no fim da lista, addon Store (biblioteca do RD) e fonte BRSites
+- [ ] Usuário instalar o addon Store no Stremio
 
 ---
 
@@ -93,7 +97,7 @@
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (19 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix e melhorias no Prowlarr |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (20 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix, melhorias no Prowlarr, CAM no fim (`DEMOTE_CAM`) e scraper `BRSites` |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**

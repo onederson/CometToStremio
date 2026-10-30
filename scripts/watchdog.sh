@@ -129,7 +129,7 @@ cap_log() {
 # StremThru local (127.0.0.1:8080): ponte Comet -> Real-Debrid. A instancia publica
 # falhava ao adicionar magnets nao cacheados ("provider is currently unavailable").
 start_stremthru() {
-  nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /var/lib/stremthru && STREMTHRU_ENV=prod STREMTHRU_LISTEN_ADDR=127.0.0.1:8080 STREMTHRU_PORT=8080 STREMTHRU_BASE_URL=http://127.0.0.1:8080 STREMTHRU_DATA_DIR=/var/lib/stremthru STREMTHRU_DATABASE_URI="sqlite:///var/lib/stremthru/stremthru.db?max_conns=2" STREMTHRU_STORE_TUNNEL="*:false" STREMTHRU_FEATURE=torz exec /usr/local/bin/stremthru' \
+  nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /var/lib/stremthru && STREMTHRU_ENV=prod STREMTHRU_LISTEN_ADDR=127.0.0.1:8080 STREMTHRU_PORT=8080 STREMTHRU_BASE_URL=https://a71comet.duckdns.org:8443 STREMTHRU_DATA_DIR=/var/lib/stremthru STREMTHRU_DATABASE_URI="sqlite:///var/lib/stremthru/stremthru.db?max_conns=2" STREMTHRU_STORE_TUNNEL="*:false" STREMTHRU_FEATURE=torz,stremio_store exec /usr/local/bin/stremthru' \
     >> "$STREMTHRU_OUT" 2>&1 < /dev/null &
 }
 

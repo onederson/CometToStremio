@@ -1,139 +1,60 @@
-# Tarefa: proteger memória + FlareSolverr + indexadores BR
+# Tarefa: nova fonte do Comet para 2 sites BR de dublado (`BrSitesScraper`)
 
-São 3 etapas independentes. **Faça só a etapa pedida no comando.** Ao terminar a etapa, pare e responda.
+Medido em 30/10/2026: `filmestorrent.tv` e `apachetorrents.com` trazem torrents dublados que o Comet ainda não acha (ex.: GoT S07E02 `[1080p] [DUAL] filmestorrent.tv`; Transformers O Início `1080p.WEB-DL.DUAL.5.1`). Cada post desses sites tem **vários magnets** (um por qualidade/áudio). Por isso a fonte é um scraper Python dentro do Comet, e não um indexador do Prowlarr.
 
 ## Contexto
-- **Comandos no A71:**
-  - `.\scripts\a71.ps1 '<cmd>'` roda no Android (root).
-  - `.\scripts\a71.ps1 -Chroot '<cmd>'` roda no Debian em `/data/debian`.
-- **Arquivos enviados ao aparelho:**
-  - Use PowerShell com `adb push` para `/data/local/tmp`, depois mova.
-  - Os arquivos devem ficar em LF, nunca CRLF.
-- **Watchdog:**
-  - A cópia do repositório é `scripts/watchdog.sh`; a do aparelho é `/data/comet/watchdog.sh`. As duas precisam ficar idênticas (confira o MD5).
-  - Ele roda em `/system/bin/sh` (toybox, sem bash).
-- **Memória medida hoje:**
-  - Total 5,5 GB; disponível ~3,4 GB; swap de 2,7 GB.
-  - Comet ~210 MB + forkserver ~145 MB; Prowlarr ~356 MB; StremThru 88 MB; AdGuardHome 84 MB; Caddy 20 MB.
-- **Hoje todos os serviços estão com `oom_score_adj=-1000`, mas só por herança do Magisk.** Nenhum script define isso. Se o watchdog for reiniciado pelo `adb shell`, perde a proteção.
-- **PROIBIDO:**
-  - Alterar qualquer arquivo em `/data/adguard/` ou a configuração do AdGuard. Pode apenas escrever em `/proc/<pid>/oom_score_adj` do processo dele.
-  - Imprimir a chave do Prowlarr, a chave do RD ou o token do DuckDNS.
-  - Fazer commit.
+- Código do Comet: A71, chroot, `/opt/comet` (Android: `/data/debian/opt/comet`). Edite lá.
+- **Comandos:** `.\scripts\a71.ps1 '<cmd>'` (Android root) e `.\scripts\a71.ps1 -Chroot '<cmd>'` (Debian; `git` só existe aqui).
+- Enviar arquivo: `adb -s 192.168.3.44:5555 push <arq> /data/local/tmp/<nome>` (um por vez, nome completo), depois mova. Tudo em **LF**.
+- Os scrapers são descobertos sozinhos por `comet/scrapers/manager.py`: classe `XxxScraper(BaseScraper)` em `comet/scrapers/xxx.py` é ligada por `settings.SCRAPE_XXX`. Use **`comet/scrapers/peerflix.py`** como modelo (usa `impersonate = "chrome"` e `self.session`). Veja também como `SCRAPE_PEERFLIX` aparece em `comet/core/models.py` (lista na linha ~62 e campo na ~250) e repita para `SCRAPE_BRSITES`.
+- `ScrapeRequest` (`comet/scrapers/models.py`): `media_type`, `media_only_id`, `title`, `year`, `season`, `episode`, `query_titles` (inclui o título em português quando existe).
+- Retorno: lista de dicts `ScrapeResult` (`title`, `infoHash` hex minúsculo de 40 chars, `fileIndex` None, `seeders` None, `size` None, `tracker`, `sources` = lista de `tracker:...` do magnet).
+- **PROIBIDO:** imprimir chaves (RD, Prowlarr, DuckDNS; a chave do RD aparece nas URLs do `comet.log`, não mostre essas linhas), commit, mexer no AdGuard. **NÃO rode tarefas em segundo plano.**
 
----
+## O que fazer
 
-## Etapa 1: proteção de memória (só `scripts/watchdog.sh` + script novo)
+### 1. `comet/scrapers/brsites.py` → `class BrSitesScraper(BaseScraper)`, `impersonate = "chrome"`
+Sites (dict fixo no arquivo):
+| site | busca | tracker |
+|---|---|---|
+| `https://filmestorrent.tv` | `/?s=<consulta>` | `BRSites|FilmesTorrent` |
+| `https://apachetorrents.com` | `/index.php?busca=<consulta>` | `BRSites|ApacheTorrent` |
 
-### 1.1 Proteção explícita contra o killer de memória
-No watchdog, crie a função `protect()`, chamada a cada volta do loop. Ela escreve `-1000` em `/proc/<pid>/oom_score_adj` de:
-- Comet: `pgrep -f 'python -m comet.main'` e os filhos dele, incluindo o `multiprocessing.forkserver` de `/opt/comet/.venv`;
-- StremThru, Prowlarr e Caddy (os mesmos padrões de `pgrep` já usados no loop);
-- AdGuard: `pgrep -f '/data/adguard/AdGuardHome/AdGuardHome'`, e também o processo `/data/adguard/watchdog.sh`;
-- o próprio watchdog (`$$`).
+Fluxo por site (sites em paralelo com `asyncio.gather`):
+1. **Consultas:** cada título de `request.query_titles` (máx. 2), sem o ano e sem pontuação. Em série, não acrescente `SxxEyy` (os sites não acham assim).
+2. **Página de busca:** colete os links de posts do próprio domínio cujo slug contenha todas as palavras significativas do título normalizado (minúsculo, sem acento, palavras com 3+ letras; se o título só tiver palavras curtas, use todas). Ignore links de categoria/tag/page. Máximo **4 posts** por site.
+   - **Filme:** se `request.year` existir e o slug ou o texto do post tiver outro ano entre 1900 e 2099 diferente de `year` e `year±1`, descarte o post.
+3. **Post:** extraia todos os `magnet:?` (troque `&amp;` por `&`). `infoHash` = btih em hex minúsculo (se vier em base32 de 32 chars, converta). `title` = `dn` decodificado (`urllib.parse`), limpo:
+   - remova no começo `[ACESSE ...]` e prefixos de domínio como `HIDRATORRENTS.ORG..`, `VEMTORRENT.COM.`, `COMOEUBAIXO.COM.`, `VAMOSTORRENT.COM.` (regex `^\s*\[?ACESSE [^\]]*\]\s*` e `^(?:[A-Za-z0-9-]+\.(?:org|com|net|tv|to|biz))\.*\s*`, sem diferenciar maiúsculas);
+   - **mantenha** palavras como `DUBLADO`, `DUAL-AUDIO`, `LEGENDADO` (transforme `-DUBLADO-DUAL-AUDIO-.` em ` DUBLADO DUAL AUDIO `) para a detecção PT-BR funcionar;
+   - se o `dn` estiver vazio, use o título do post (`<h1>` ou `<title>`).
+   `sources` = os `tr=` do magnet, no formato `tracker:<url>`.
+4. Em série, **não** filtre por episódio aqui: o Comet já filtra depois. Mas descarte magnets cujo título claramente não é do seriado (o título limpo precisa conter a 1ª palavra significativa do título da série).
+5. Deduplique por `infoHash`.
+- **Tempo:** timeout de 8 s por requisição; o scraper inteiro não pode passar de **12 s** (`asyncio.wait_for`; se estourar, devolva o que já tiver). Erros: `log_scraper_error("BRSites", url, request.media_id, e)` e siga com o outro site.
+- Só para IMDb (`media_only_id` começando com `tt`); para kitsu/anime devolva `[]`.
 
-Regras:
-- Escreva só se o valor atual for diferente, para não gerar trabalho à toa.
-- Ignore erros: o processo pode ter morrido entre o `pgrep` e a escrita.
+### 2. Configuração
+- `comet/core/models.py`: `SCRAPE_BRSITES: bool | str = False` e acrescente `"SCRAPE_BRSITES"` na mesma lista em que está `"SCRAPE_PEERFLIX"`.
+- `config/.env` (PC) **e** `/data/debian/opt/comet/.env` (A71): acrescente `SCRAPE_BRSITES=live`. Os dois arquivos precisam ficar iguais (confira MD5) e em LF; no A71 mantenha `chmod 600`.
 
-### 1.2 Liberar memória matando coisas do Android
-- **Função `free_mem()`, a cada volta do loop:**
-  - Leia `MemAvailable` de `/proc/meminfo`.
-  - Se ficar abaixo de **600 MB**, rode `am kill-all`. Esse comando mata só processos de apps em segundo plano, nunca os nossos.
-  - Registre em log `memoria baixa (X MB), am kill-all`.
-  - Rode no máximo 1 vez a cada 5 min (guarde o horário em variável).
-- **Script novo `scripts/android-apps.sh`, com dois modos:**
-  - `disable`: roda `pm disable-user --user 0` em cada pacote abaixo. Ignore os que não existirem.
-  - `enable`: roda `pm enable` nos mesmos pacotes (reverte tudo).
-  - Pacotes: `io.chaldeaprjkt.gamespace`, `org.omnirom.omnijaws`, `com.android.settings.intelligence`, `com.android.emergency`.
-  - **NÃO incluir** `com.android.cellbroadcastreceiver*` (alertas da Defesa Civil), launcher, systemui, teclado, phone nem networkstack.
-- Copie o script para `/data/comet/android-apps.sh` e rode `disable` uma vez.
+### 3. Aplicar
+1. `py_compile` dos arquivos alterados.
+2. Reinicie o Comet: `.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`; espere o `manifest.json` voltar com loop de polling (sem `Start-Sleep`).
+3. Regenere o patch: no chroot `git -C /opt/comet add -N comet/scrapers/brsites.py` e depois `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /tmp/x.patch`; copie para `/data/local/tmp/x.patch`, `adb pull` para `comet-patches/ptbr-first.patch`, apague temporários com `unlink`. Zero `\r`.
 
-### 1.3 Aplicar
-1. Envie o watchdog e mate o watchdog antigo (o pid está em `/data/comet/watchdog.pid`). Os serviços continuam rodando.
-2. Suba o novo com `nohup /system/bin/sh /data/comet/watchdog.sh >/dev/null 2>&1 &` pelo `adb shell`, de propósito, para provar que a proteção não depende do Magisk.
+## Fora do escopo
+Qualquer outra mudança (detecção PT-BR, ordenação, outros scrapers, Prowlarr, watchdog, UI, README/HANDOFF).
 
-### Verificação da etapa 1
-- `cat /proc/<pid>/oom_score_adj` dá `-1000` para: Comet, forkserver, StremThru, Prowlarr, Caddy, AdGuardHome e os dois watchdogs. Mostre a lista (pid, valor, nome).
-- `pm list packages -d` mostra os 4 pacotes desativados.
-- Teste do `free_mem`:
-  1. Rode a função uma vez com o limite trocado temporariamente para 99999 MB.
-  2. Confirme a linha no `watchdog.log`.
-  3. Volte o limite para 600 MB.
-- Os MD5 de `scripts/watchdog.sh` e `/data/comet/watchdog.sh` batem.
-- `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/manifest.json` dá `200`.
+## Verificação (rode e mostre)
+Use um script Python no chroot (`/opt/comet/.venv/bin/python`, gravado em `/var/tmp/`, apagado no fim) que, para cada pedido, roda `DELETE FROM torrents WHERE media_id=?` em `/opt/comet/data/comet.db`, chama `http://127.0.0.1:8000/<b64>/stream/<tipo>/<id>.json` com o config `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}` e mostra: total, quantos com `🇧🇷` no `name`, tempo, e quantos streams têm `BRSites` no `description` (ou no `sources`/tracker; descubra onde o Comet mostra a fonte).
+Pedidos e o esperado (valores de antes entre parênteses):
+1. `movie/tt22084616` (total 671, PT-BR 21) → PT-BR **maior** que 21, tempo < 15 s.
+2. `series/tt0944947:7:2` (PT-BR 10) → PT-BR **maior** que 10, tempo < 30 s.
+3. `series/tt0944947:6:5` (PT-BR 16) → PT-BR **maior** que 16.
+4. `series/tt2861424:6:1` (PT-BR 3) → não pode cair.
+5. `movie/tt12042730` (PT-BR 17) → não pode cair.
+Falsos positivos: liste os títulos dos streams `BRSites` de cada pedido e confirme que todos são do filme/episódio certo (nenhum de outro filme/temporada aparecendo no lugar errado).
+Também: `.\scripts\a71.ps1 'grep -c "BRSites" /data/comet/comet.log'` sem erros em loop, e `MemAvailable` do A71 acima de 1,5 GB.
 
----
-
-## Etapa 2: FlareSolverr no chroot
-
-### 2.1 Instalação
-- **Pacotes do Debian:** `apt-get install -y chromium chromium-driver xvfb`.
-- **Código:**
-  - Clone o FlareSolverr na última tag estável do GitHub (`FlareSolverr/FlareSolverr`) em `/opt/flaresolverr`.
-  - Crie a venv `.venv` com Python 3.13 e rode `pip install -r requirements.txt`.
-- **arm64:** o FlareSolverr precisa usar o Chromium e o chromedriver do sistema (`/usr/bin/chromium`, `/usr/bin/chromedriver`).
-  - Se ele tentar baixar driver x86, resolva com a variável de ambiente ou o caminho que o próprio código aceita.
-  - Se não houver jeito por configuração, faça a menor mudança possível em `src/utils.py` e salve como `comet-patches/flaresolverr-arm64.patch`.
-- **Ambiente:** `HOST=127.0.0.1`, `PORT=8191`, `LOG_LEVEL=info`, `HEADLESS=true`, `TZ=America/Sao_Paulo`.
-
-### 2.2 Watchdog
-- Adicione `start_flaresolverr` no mesmo estilo dos outros: via `chroot.sh`, log em `/data/comet/flaresolverr.log` com `cap_log`.
-- O FlareSolverr é **descartável**:
-  - Em `protect()`, defina `oom_score_adj=200` para ele e todos os processos `chromium` filhos. Nunca `-1000`: se a memória acabar, ele morre antes dos nossos serviços.
-  - Limite de memória: some o RSS (`VmRSS`) do FlareSolverr e dos filhos `chromium`. Se passar de **900 MB**, mate o grupo inteiro e registre em log. O loop religa.
-- Envie e reinicie o watchdog como na etapa 1.
-
-### Verificação da etapa 2
-- `curl -s -X POST http://127.0.0.1:8191/v1 -H 'Content-Type: application/json' -d '{"cmd":"request.get","url":"https://nowsecure.nl","maxTimeout":60000}'` responde `"status": "ok"`. Mostre só `status`, `message` e o tempo.
-- RSS total do FlareSolverr + chromium parado e logo após o teste.
-- `oom_score_adj` dele = 200 e dos serviços continua -1000.
-- Os MD5 do watchdog batem.
-
----
-
-## Etapa 3: indexadores BR no Prowlarr
-
-A API do Prowlarr fica em `http://127.0.0.1:9696/api/v1`. Leia a chave de `/var/lib/prowlarr/config.xml` para uma variável, sem imprimir.
-
-1. **Proxy:** crie um proxy `FlareSolverr` (`POST /indexerProxy`) com host `http://127.0.0.1:8191/`, timeout de 60 s e tag `flaresolverr` (crie a tag se não existir).
-2. **Candidatos:**
-   - Em `GET /indexer/schema`, filtre os indexadores **públicos** com idioma `pt-BR` (ou descrição que indique Brasil).
-   - Liste nome e `definitionName`.
-3. **Para cada candidato:**
-   - Adicione com a tag `flaresolverr` e as categorias padrão.
-   - Rode `POST /indexer/test`.
-   - Mantenha só os que passarem; apague os que falharem.
-   - Registre o motivo de cada falha.
-4. **Busca de prova:**
-   - Para cada indexador mantido, faça `GET /search?query=Breaking%20Bad&indexerIds=<id>&type=search`.
-   - Registre o número de resultados e o tempo.
-   - Remova o indexador se demorar mais de 25 s (o Comet usa `INDEXER_MANAGER_TIMEOUT=30`) ou trouxer 0 resultados.
-5. **Comet:**
-   - Atualize `PROWLARR_INDEXERS` em `/opt/comet/.env` e em `config/.env`, com os IDs antigos (`1`, `2`, `3`) mais os novos.
-   - Reinicie o Comet (`pkill -f "python -m comet.main"`).
-
-### Verificação da etapa 3
-- Use a configuração de teste em modo torrent, sem RD: base64 de `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`.
-- Antes de cada pedido, apague do `data/comet.db` as linhas `torrents` daquele `media_id`.
-- Compare total e PT-BR (contando '🇧🇷' em name+description) com a referência:
-
-  | Pedido | Referência total / PT-BR |
-  |---|---|
-  | `movie/tt12042730` | 823 / 17 |
-  | `series/tt0903747:1:1` | 531 / 9 |
-  | `series/tt0944947:1:1` | 872 / 18 |
-  | `movie/tt22084616` | 672 / 20 |
-
-- PT-BR não pode cair. Tempo de série sem cache: até ~30 s.
-- Confira a olho 10 títulos novos marcados PT-BR (sem falsos positivos).
-
-### Documentação (só na etapa 3)
-- **`HANDOFF.md`:**
-  - Na tabela de componentes, corrija "~1 GB de RAM livre" para "~3,4 GB disponíveis".
-  - Acrescente FlareSolverr (127.0.0.1:8191) e os novos indexadores.
-  - Atualize a tabela de resultados.
-- **`README.md`:** 1 linha na Seção 0.
-
-## Resposta final (máx. 8 linhas)
-Etapa feita, arquivos alterados, resultado de cada verificação.
+Responda em no máximo 5 linhas: arquivos alterados e os números de cada pedido (antes → depois, tempo).

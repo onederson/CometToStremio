@@ -1,16 +1,18 @@
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
-index 35b1121..a21f3fd 100644
+index 35b1121..c0e91cf 100644
 --- a/comet/api/endpoints/playback.py
 +++ b/comet/api/endpoints/playback.py
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,9 @@
  import re
  import time
  from urllib.parse import urlsplit
 +from RTN import parse
++
++from comet.services.filtering import is_cam_release
  
  import mediaflow_proxy.utils.http_utils
  import orjson
-@@ -181,6 +182,179 @@ async def _cache_download_link_safely(**kwargs) -> None:
+@@ -181,6 +184,203 @@ async def _cache_download_link_safely(**kwargs) -> None:
          )
  
  
@@ -104,11 +106,14 @@ index 35b1121..a21f3fd 100644
 +
 +        c_res = ""
 +        c_langs = ()
++        is_cam = False
++        pj = None
 +        if row["parsed_json"]:
 +            try:
 +                pj = orjson.loads(row["parsed_json"])
 +                c_res = str(pj.get("resolution") or "").lower()
 +                c_langs = pj.get("languages") or ()
++                is_cam = is_cam_release(pj)
 +            except Exception:
 +                pass
 +        if not c_res:
@@ -116,6 +121,14 @@ index 35b1121..a21f3fd 100644
 +                parsed_c = parse(row["title"])
 +                c_res = str(getattr(parsed_c, "resolution", "") or "").lower()
 +                c_langs = getattr(parsed_c, "languages", ()) or ()
++                is_cam = is_cam_release(parsed_c)
++            except Exception:
++                pass
++        elif not is_cam:
++            try:
++                if not pj or not pj.get("quality"):
++                    parsed_c = parse(row["title"])
++                    is_cam = is_cam_release(parsed_c)
 +            except Exception:
 +                pass
 +
@@ -124,17 +137,30 @@ index 35b1121..a21f3fd 100644
 +        c_res_rank = _RES_PRIORITY.get(c_res, 99)
 +
 +        if orig_res and c_res == orig_res and is_pt:
-+            bucket1.append((row, -seeders))
++            bucket1.append((row, -seeders, is_cam))
 +        elif is_pt:
-+            bucket2.append((row, c_res_rank, -seeders))
++            bucket2.append((row, c_res_rank, -seeders, is_cam))
 +        elif orig_res and c_res == orig_res:
-+            bucket3.append((row, -seeders))
++            bucket3.append((row, -seeders, is_cam))
 +
 +    bucket1.sort(key=lambda x: x[1])
 +    bucket2.sort(key=lambda x: (x[1], x[2]))
 +    bucket3.sort(key=lambda x: x[1])
 +
-+    ordered_candidates = [x[0] for x in bucket1] + [x[0] for x in bucket2] + [x[0] for x in bucket3]
++    if settings.DEMOTE_CAM:
++        bons = (
++            [x[0] for x in bucket1 if not x[-1]]
++            + [x[0] for x in bucket2 if not x[-1]]
++            + [x[0] for x in bucket3 if not x[-1]]
++        )
++        cam = (
++            [x[0] for x in bucket1 if x[-1]]
++            + [x[0] for x in bucket2 if x[-1]]
++            + [x[0] for x in bucket3 if x[-1]]
++        )
++        ordered_candidates = bons + cam
++    else:
++        ordered_candidates = [x[0] for x in bucket1] + [x[0] for x in bucket2] + [x[0] for x in bucket3]
 +
 +    for candidate in ordered_candidates[:3]:
 +        cand_hash = str(candidate["info_hash"]).lower()
@@ -190,7 +216,7 @@ index 35b1121..a21f3fd 100644
  @router.get(
      "/{b64config}/playback/{hash}/{service_index}/{index}/{season}/{episode}",
      tags=["Stremio"],
-@@ -199,6 +373,7 @@ async def playback(
+@@ -199,6 +399,7 @@ async def playback(
      name: str = Query(),
      media_id: str | None = Query(default=None),
      media_type: str | None = Query(default=None),
@@ -198,7 +224,7 @@ index 35b1121..a21f3fd 100644
  ):
      config = config_check(b64config, strict_b64config=True)
      if not config:
-@@ -356,11 +531,34 @@ async def playback(
+@@ -356,11 +557,34 @@ async def playback(
                  aliases,
              )
          except DebridLinkGenerationError as error:
@@ -238,10 +264,10 @@ index 35b1121..a21f3fd 100644
          if not download_url:
              return build_status_video_response(
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..68231e5 100644
+index 94f56ae..d95e0e7 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
-@@ -4,10 +4,15 @@ from urllib.parse import quote
+@@ -4,10 +4,16 @@ from urllib.parse import quote
  from fastapi import APIRouter, BackgroundTasks, Request
  
  from comet.core.config_validation import config_check
@@ -255,10 +281,11 @@ index 94f56ae..68231e5 100644
  from comet.observability import metrics
  from comet.services.media_search import MediaSearchStatus, search_media
 +from comet.services.debrid_precheck import run_debrid_precheck
++from comet.services.filtering import is_cam_release
  from comet.services.trackers import trackers
  from comet.utils.cache import CachePolicies, cached_json_response
  from comet.utils.formatting import (
-@@ -33,6 +38,19 @@ RESOLUTION_TO_DIMENSIONS = {
+@@ -33,6 +39,19 @@ RESOLUTION_TO_DIMENSIONS = {
      "240P": (240, 320),
  }
  
@@ -278,7 +305,7 @@ index 94f56ae..68231e5 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -125,6 +143,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +144,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -316,15 +343,16 @@ index 94f56ae..68231e5 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +181,7 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +182,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
 +    ptbr_first: bool = False,
++    demote_cam: bool = False,
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +203,39 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +205,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -362,6 +390,42 @@ index 94f56ae..68231e5 100644
 -        if cached_only and not is_cached_by_hash[info_hash]:
 -            continue
 -        try_select(info_hash)
++    if demote_cam:
++        if ptbr_first:
++            pt_good = []
++            other_good = []
++            pt_cam = []
++            other_cam = []
++            for info_hash in ranked_info_hashes:
++                parsed = torrents[info_hash]["parsed"]
++                is_pt = "pt" in (getattr(parsed, "languages", None) or ())
++                is_cam = is_cam_release(parsed)
++                if is_pt and not is_cam:
++                    pt_good.append(info_hash)
++                elif not is_pt and not is_cam:
++                    other_good.append(info_hash)
++                elif is_pt and is_cam:
++                    pt_cam.append(info_hash)
++                else:
++                    other_cam.append(info_hash)
++            select_group(pt_good)
++            select_group(other_good)
++            select_group(pt_cam)
++            select_group(other_cam)
++        else:
++            good_hashes = []
++            cam_hashes = []
++            for info_hash in ranked_info_hashes:
++                parsed = torrents[info_hash]["parsed"]
++                if is_cam_release(parsed):
++                    cam_hashes.append(info_hash)
++                else:
++                    good_hashes.append(info_hash)
++            select_group(good_hashes)
++            select_group(cam_hashes)
++        selected_set = set(selected_info_hashes)
++        return [h for h in ranked_info_hashes if h in selected_set]
++
 +    if ptbr_first:
 +        pt_hashes = []
 +        other_hashes = []
@@ -379,7 +443,7 @@ index 94f56ae..68231e5 100644
      return selected_info_hashes
  
  
-@@ -329,7 +391,7 @@ async def stream(
+@@ -329,7 +429,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -388,7 +452,7 @@ index 94f56ae..68231e5 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +399,7 @@ async def stream(
+@@ -337,6 +437,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -396,7 +460,7 @@ index 94f56ae..68231e5 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +411,7 @@ async def stream(
+@@ -348,7 +449,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -405,7 +469,7 @@ index 94f56ae..68231e5 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +441,7 @@ async def stream(
+@@ -378,7 +479,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -414,7 +478,7 @@ index 94f56ae..68231e5 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +456,40 @@ async def stream(
+@@ -393,8 +494,40 @@ async def stream(
                  }
              )
  
@@ -456,11 +520,12 @@ index 94f56ae..68231e5 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +497,27 @@ async def stream(
+@@ -402,18 +535,29 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
 +        ptbr_first=bool(settings.PTBR_FIRST),
++        demote_cam=bool(settings.DEMOTE_CAM),
      )
      ranked_info_hashes = (
          selected_info_hashes
@@ -477,6 +542,7 @@ index 94f56ae..68231e5 100644
          torrent = torrents[info_hash]
          rtn_data = torrent["parsed"]
 +        is_pt = "pt" in (getattr(rtn_data, "languages", None) or ())
++        is_cam = bool(settings.DEMOTE_CAM and is_cam_release(rtn_data))
 +        res_rank = _PTBR_RESOLUTION_ORDER.get(
 +            str(getattr(rtn_data, "resolution", "")).lower(), 8
 +        )
@@ -486,7 +552,7 @@ index 94f56ae..68231e5 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -432,6 +536,74 @@ async def stream(
+@@ -432,6 +576,82 @@ async def stream(
          for entry_index, service, debrid_extension in debrid_stream_specs:
              if service in debrid_errors:
                  continue
@@ -520,6 +586,8 @@ index 94f56ae..68231e5 100644
 +                    seeders=torrent["seeders"],
 +                    status="P2P",
 +                )
++                if is_cam:
++                    stream_name = f"🎦 CAM\n{stream_name}"
 +                if is_pt:
 +                    stream_name = f"🇧🇷 PT-BR\n{stream_name}"
 +
@@ -529,6 +597,11 @@ index 94f56ae..68231e5 100644
 +                    "behaviorHints": behavior_hints,
 +                    "infoHash": info_hash,
 +                }
++                if is_cam:
++                    the_stream["description"] = (
++                        f"🎦 Gravação de cinema: marca d'água e qualidade ruim\n"
++                        f"{the_stream['description']}"
++                    )
 +
 +                if chilllink:
 +                    the_stream["_chilllink"] = format_chilllink(
@@ -552,6 +625,7 @@ index 94f56ae..68231e5 100644
 +                    0 if is_cached else 1,
 +                    rank_idx,
 +                    seed_key,
++                    is_cam,
 +                )
 +                if sort_mixed or is_cached:
 +                    cached_results.append(stream_entry)
@@ -561,16 +635,29 @@ index 94f56ae..68231e5 100644
  
              is_cached = (
                  info_hash_cache_status.get(service, False)
-@@ -463,6 +635,8 @@ async def stream(
+@@ -463,12 +683,21 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
++            if is_cam:
++                stream_name = f"🎦 CAM\n{stream_name}"
 +            if is_pt:
 +                stream_name = f"🇧🇷 PT-BR\n{stream_name}"
  
              the_stream = {
                  "name": stream_name,
-@@ -479,23 +653,34 @@ async def stream(
+                 "description": formatted_title,
+                 "behaviorHints": behavior_hints,
+             }
++            if is_cam:
++                the_stream["description"] = (
++                    f"🎦 Gravação de cinema: marca d'água e qualidade ruim\n"
++                    f"{the_stream['description']}"
++                )
+ 
+             if chilllink:
+                 the_stream["_chilllink"] = format_chilllink(
+@@ -479,23 +708,35 @@ async def stream(
              file_index_str = (
                  str(file_index) if is_cached and file_index is not None else "n"
              )
@@ -592,6 +679,7 @@ index 94f56ae..68231e5 100644
 +                0 if is_cached else 1,
 +                rank_idx,
 +                seed_key,
++                is_cam,
 +            )
              if sort_mixed or is_cached:
 -                cached_results.append(the_stream)
@@ -608,28 +696,67 @@ index 94f56ae..68231e5 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|torrent|{info_hash}",
-@@ -515,6 +700,8 @@ async def stream(
+@@ -515,6 +756,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
++            if is_cam:
++                stream_name = f"🎦 CAM\n{stream_name}"
 +            if is_pt:
 +                stream_name = f"🇧🇷 PT-BR\n{stream_name}"
  
              the_stream = {
                  "name": stream_name,
-@@ -533,12 +720,61 @@ async def stream(
+@@ -522,6 +767,11 @@ async def stream(
+                 "behaviorHints": behavior_hints,
+                 "infoHash": info_hash,
+             }
++            if is_cam:
++                the_stream["description"] = (
++                    f"🎦 Gravação de cinema: marca d'água e qualidade ruim\n"
++                    f"{the_stream['description']}"
++                )
+ 
+             if chilllink:
+                 the_stream["_chilllink"] = format_chilllink(formatted_components, False)
+@@ -533,12 +783,88 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
 -            cached_results.append(the_stream)
-+            cached_results.append((the_stream, is_pt, res_rank, 1, rank_idx, seed_key))
++            cached_results.append(
++                (the_stream, is_pt, res_rank, 1, rank_idx, seed_key, is_cam)
++            )
  
 -    if sort_mixed:
 -        final_streams = cached_results
 +    ordered_entries = (
 +        cached_results if sort_mixed else cached_results + non_cached_results
 +    )
-+    if settings.PTBR_FIRST:
++    if settings.DEMOTE_CAM:
++        if settings.PTBR_FIRST:
++            pt_good = [entry for entry in ordered_entries if entry[1] and not entry[6]]
++            other_good = [entry for entry in ordered_entries if not entry[1] and not entry[6]]
++            pt_cam = [entry for entry in ordered_entries if entry[1] and entry[6]]
++            other_cam = [entry for entry in ordered_entries if not entry[1] and entry[6]]
++            pt_good.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
++            pt_cam.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
++            final_streams = (
++                notice_streams
++                + [entry[0] for entry in pt_good]
++                + [entry[0] for entry in other_good]
++                + [entry[0] for entry in pt_cam]
++                + [entry[0] for entry in other_cam]
++            )
++        else:
++            good_entries = [entry for entry in ordered_entries if not entry[6]]
++            cam_entries = [entry for entry in ordered_entries if entry[6]]
++            final_streams = (
++                notice_streams
++                + [entry[0] for entry in good_entries]
++                + [entry[0] for entry in cam_entries]
++            )
++    elif settings.PTBR_FIRST:
 +        pt_entries = [entry for entry in ordered_entries if entry[1]]
 +        other_entries = [entry for entry in ordered_entries if not entry[1]]
 +        pt_entries.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
@@ -655,6 +782,8 @@ index 94f56ae..68231e5 100644
 +                if not t:
 +                    continue
 +                parsed = t.get("parsed")
++                if settings.DEMOTE_CAM and is_cam_release(parsed):
++                    continue
 +                t_is_pt = "pt" in (getattr(parsed, "languages", None) or ())
 +                if not t_is_pt:
 +                    continue
@@ -684,14 +813,31 @@ index 94f56ae..68231e5 100644
      has_results = len(final_streams) > 0
  
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..c8cf03a 100644
+index 835a975..2e4ca10 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
-@@ -317,6 +317,14 @@ class AppSettings(ServerSettings):
+@@ -60,6 +60,7 @@ _SCRAPER_MODE_FIELDS = (
+     "SCRAPE_TORBOX",
+     "SCRAPE_TORRENTSDB",
+     "SCRAPE_PEERFLIX",
++    "SCRAPE_BRSITES",
+ )
+ _POSITIVE_WORK_COUNT_FIELDS = (
+     "EXECUTOR_MAX_WORKERS",
+@@ -248,6 +249,7 @@ class AppSettings(ServerSettings):
+     TORBOX_API_KEY: str | None = None
+     SCRAPE_TORRENTSDB: bool | str = False
+     SCRAPE_PEERFLIX: bool | str = False
++    SCRAPE_BRSITES: bool | str = False
+     CUSTOM_HEADER_HTML: str | None = None
+     PROXY_DEBRID_STREAM: bool | None = False
+     PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
+@@ -317,6 +319,15 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
 +    PTBR_FIRST: bool = True
++    DEMOTE_CAM: bool = True
 +    PTBR_RELEASE_GROUPS: str = (
 +        "BiOMA,C76,WOLVERDONFILMES,COMANDO,BLUDV,VACATORRENT,LAPUMiA,TBS,SF,STARCKFILMES"
 +    )
@@ -1099,6 +1245,345 @@ index 7521a09..54a81d6 100644
 +            return int(count)
 +
 +        return None
+diff --git a/comet/scrapers/brsites.py b/comet/scrapers/brsites.py
+new file mode 100644
+index 0000000..c6c18de
+--- /dev/null
++++ b/comet/scrapers/brsites.py
+@@ -0,0 +1,333 @@
++import asyncio
++import base64
++import re
++import unicodedata
++import urllib.parse
++from bs4 import BeautifulSoup
++
++from comet.core.logger import log_scraper_error
++from comet.scrapers.base import BaseScraper
++from comet.scrapers.models import ScrapeRequest
++
++SITES = [
++    {
++        "name": "FilmesTorrent",
++        "domain": "filmestorrent.tv",
++        "search_url": "https://filmestorrent.tv/?s={query}",
++        "tracker": "BRSites|FilmesTorrent",
++    },
++    {
++        "name": "ApacheTorrent",
++        "domain": "apachetorrents.com",
++        "search_url": "https://apachetorrents.com/index.php?busca={query}",
++        "tracker": "BRSites|ApacheTorrent",
++    },
++]
++
++RE_ACESSE = re.compile(r"^\s*\[?ACESSE [^\]]*\]\s*", re.IGNORECASE)
++RE_DOMAIN = re.compile(
++    r"^(?:[A-Za-z0-9-]+\.(?:org|com|net|tv|to|biz))\.*\s*", re.IGNORECASE
++)
++RE_AUDIO_TAGS = re.compile(
++    r"[-_.]*(DUBLADO|DUAL[-_.]?AUDIO|DUAL|LEGENDADO)[-_.]*", re.IGNORECASE
++)
++RE_DUAL_AUDIO = re.compile(r"DUAL[-_.]AUDIO", re.IGNORECASE)
++RE_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
++RE_NON_WORD = re.compile(r"[^\w\s]", re.UNICODE)
++RE_NON_POST = re.compile(
++    r"/(?:category|categoria|tag|page|pagina|genero|qualidade|pesquisa|lancamentos|filmes|series|desenhos)(?:/|$)|index\.php|\?s=",
++    re.IGNORECASE,
++)
++
++
++def normalize_text(text: str) -> str:
++    return (
++        unicodedata.normalize("NFKD", text)
++        .encode("ASCII", "ignore")
++        .decode("utf-8")
++        .lower()
++    )
++
++
++def get_significant_words(text: str) -> list[str]:
++    norm = normalize_text(text)
++    words = re.findall(r"[a-z0-9]+", norm)
++    sig = [w for w in words if len(w) >= 3]
++    return sig if sig else words
++
++
++def clean_query_title(title: str) -> str:
++    no_year = RE_YEAR.sub(" ", title)
++    no_punct = RE_NON_WORD.sub(" ", no_year)
++    return " ".join(no_punct.split())
++
++
++def clean_magnet_title(title: str, fallback_title: str) -> str:
++    t = title.strip() if title else ""
++    if not t:
++        t = fallback_title.strip()
++    while True:
++        prev = t
++        t = RE_ACESSE.sub("", t)
++        t = RE_DOMAIN.sub("", t)
++        t = t.lstrip(" .-_/")
++        if t == prev:
++            break
++    t = RE_AUDIO_TAGS.sub(r" \1 ", t)
++    t = RE_DUAL_AUDIO.sub("DUAL AUDIO", t)
++    t = re.sub(r"\s+", " ", t).strip()
++    return t
++
++
++def parse_info_hash(raw_hash: str) -> str | None:
++    raw = raw_hash.strip().lower()
++    if raw.startswith("urn:btih:"):
++        raw = raw[9:]
++    raw = raw.split("&")[0].strip()
++    if len(raw) == 40 and all(c in "0123456789abcdef" for c in raw):
++        return raw
++    if len(raw) == 32:
++        try:
++            decoded = base64.b32decode(raw.upper())
++            return decoded.hex().lower()
++        except Exception:
++            return None
++    return None
++
++
++def parse_magnet(
++    magnet_str: str, fallback_title: str, tracker: str
++) -> dict | None:
++    if not magnet_str.startswith("magnet:?"):
++        return None
++    query_str = magnet_str[8:]
++    params = urllib.parse.parse_qs(query_str)
++
++    xt_list = params.get("xt", [])
++    info_hash = None
++    for xt in xt_list:
++        parsed_hash = parse_info_hash(xt)
++        if parsed_hash:
++            info_hash = parsed_hash
++            break
++    if not info_hash:
++        return None
++
++    raw_dn = params.get("dn", [""])[0]
++    decoded_dn = urllib.parse.unquote_plus(raw_dn) if raw_dn else ""
++    title = clean_magnet_title(decoded_dn, fallback_title)
++    if not title:
++        title = fallback_title
++
++    tr_list = params.get("tr", [])
++    sources = []
++    for tr in tr_list:
++        tr_decoded = urllib.parse.unquote_plus(tr).strip()
++        if tr_decoded:
++            sources.append(f"tracker:{tr_decoded}")
++
++    return {
++        "title": title,
++        "infoHash": info_hash,
++        "fileIndex": None,
++        "seeders": None,
++        "size": None,
++        "tracker": tracker,
++        "sources": sources,
++    }
++
++
++class BrSitesScraper(BaseScraper):
++    impersonate = "chrome"
++
++    async def _scrape_site(
++        self, site: dict, request: ScrapeRequest
++    ) -> list[dict]:
++        results: list[dict] = []
++        seen_hashes: set[str] = set()
++        collected_posts: list[str] = []
++
++        # 1. Build queries
++        queries = list(
++            dict.fromkeys(
++                q
++                for q in (clean_query_title(t) for t in request.query_titles[:2])
++                if q
++            )
++        )
++        target_sigs = [
++            get_significant_words(q) for q in queries if get_significant_words(q)
++        ]
++        first_sig_words = {sig[0].lower() for sig in target_sigs if sig}
++
++        allowed_years = (
++            {request.year - 1, request.year, request.year + 1}
++            if (request.media_type == "movie" and request.year)
++            else None
++        )
++
++        # 2. Search pages
++        for q in queries:
++            search_url = site["search_url"].format(
++                query=urllib.parse.quote_plus(q)
++            )
++            try:
++                async with self.session.get(search_url, timeout=8) as response:
++                    if response.status != 200:
++                        continue
++                    html = await response.text()
++            except Exception as e:
++                log_scraper_error("BRSites", search_url, request.media_id, e)
++                continue
++
++            soup = BeautifulSoup(html, "html.parser")
++            for a in soup.find_all("a", href=True):
++                href = a["href"].strip()
++                if not href or href.startswith(("#", "javascript:")):
++                    continue
++                full_url = urllib.parse.urljoin(search_url, href)
++                parsed = urllib.parse.urlparse(full_url)
++                if parsed.netloc.lower() != site["domain"]:
++                    continue
++                path = parsed.path.strip("/")
++                if not path or RE_NON_POST.search(parsed.path):
++                    continue
++
++                slug = path.split("/")[-1]
++                slug_words = set(re.findall(r"[a-z0-9]+", normalize_text(slug)))
++
++                if not any(
++                    all(w in slug_words for w in sig)
++                    for sig in target_sigs
++                    if sig
++                ):
++                    continue
++
++                link_text = a.get_text(strip=True)
++                if allowed_years is not None:
++                    found_years = [
++                        int(y) for y in RE_YEAR.findall(f"{slug} {link_text}")
++                    ]
++                    if any(y not in allowed_years for y in found_years):
++                        continue
++
++                if full_url not in collected_posts:
++                    collected_posts.append(full_url)
++
++        # Em serie, posts da temporada pedida vem primeiro (os sites tem um post por temporada)
++        if request.media_type == "series" and request.season is not None:
++            season_re = re.compile(
++                rf"(?:^|-)(?:{request.season}a?-temporada|temporada-{request.season}|s0?{request.season})(?:-|$)"
++            )
++            episode_re = (
++                re.compile(rf"(?:^|-)s0?{request.season}e0?{request.episode}(?:-|$)")
++                if request.episode is not None
++                else None
++            )
++
++            def post_priority(url: str) -> int:
++                slug = urllib.parse.urlparse(url).path.strip("/").split("/")[-1]
++                slug = normalize_text(slug)
++                if episode_re and episode_re.search(slug):
++                    return 0
++                if season_re.search(slug):
++                    return 1
++                if re.search(r"(?:^|-)s\d+e\d+(?:-|$)", slug):
++                    return 3
++                if "completa" in slug or "temporada" not in slug:
++                    return 2
++                return 3
++
++            collected_posts.sort(key=post_priority)
++
++        # 3. Fetch each post
++        for post_url in collected_posts[:4]:
++            try:
++                async with self.session.get(post_url, timeout=8) as response:
++                    if response.status != 200:
++                        continue
++                    post_html = await response.text()
++            except Exception as e:
++                log_scraper_error("BRSites", post_url, request.media_id, e)
++                continue
++
++            clean_post_html = post_html.replace("&amp;", "&")
++            soup = BeautifulSoup(clean_post_html, "html.parser")
++            h1 = soup.find("h1")
++            post_title = (
++                h1.get_text(strip=True)
++                if h1
++                else (soup.title.get_text(strip=True) if soup.title else "")
++            )
++
++            if allowed_years is not None:
++                slug = (
++                    urllib.parse.urlparse(post_url)
++                    .path.strip("/")
++                    .split("/")[-1]
++                )
++                post_years = [
++                    int(y) for y in RE_YEAR.findall(f"{slug} {post_title}")
++                ]
++                if any(y not in allowed_years for y in post_years):
++                    continue
++
++            magnet_links: list[str] = []
++            for a in soup.find_all("a", href=True):
++                href = a["href"].strip()
++                if href.startswith("magnet:?"):
++                    magnet_links.append(href)
++            for m in re.findall(r"magnet:\?[^\s\"'<>]+", clean_post_html):
++                if m not in magnet_links:
++                    magnet_links.append(m)
++
++            for m in magnet_links:
++                parsed_torrent = parse_magnet(m, post_title, site["tracker"])
++                if not parsed_torrent:
++                    continue
++                info_hash = parsed_torrent["infoHash"]
++                if info_hash in seen_hashes:
++                    continue
++
++                if request.media_type == "series" and first_sig_words:
++                    clean_norm = normalize_text(parsed_torrent["title"])
++                    magnet_words = set(re.findall(r"[a-z0-9]+", clean_norm))
++                    if not any(fw in magnet_words for fw in first_sig_words):
++                        continue
++
++                seen_hashes.add(info_hash)
++                results.append(parsed_torrent)
++
++        return results
++
++    async def scrape(self, request: ScrapeRequest) -> list[dict]:
++        if not request.media_only_id.startswith("tt"):
++            return []
++
++        all_results: list[dict] = []
++        seen_hashes: set[str] = set()
++        lock = asyncio.Lock()
++
++        async def _run_site(site_info: dict):
++            try:
++                site_torrents = await self._scrape_site(site_info, request)
++                async with lock:
++                    for t in site_torrents:
++                        h = t["infoHash"]
++                        if h not in seen_hashes:
++                            seen_hashes.add(h)
++                            all_results.append(t)
++            except Exception as e:
++                log_scraper_error(
++                    "BRSites", site_info["search_url"], request.media_id, e
++                )
++
++        site_tasks = [asyncio.create_task(_run_site(s)) for s in SITES]
++        try:
++            await asyncio.wait_for(asyncio.gather(*site_tasks), timeout=12.0)
++        except TimeoutError:
++            for task in site_tasks:
++                if not task.done():
++                    task.cancel()
++
++        return all_results
 diff --git a/comet/scrapers/mediafusion.py b/comet/scrapers/mediafusion.py
 index 9ebcf1d..6357c75 100644
 --- a/comet/scrapers/mediafusion.py
@@ -1816,7 +2301,7 @@ index 0000000..4c2b0a7
 +                _cooldown_until = time.time() + 1800
 +                break
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
-index b844e5e..972e4aa 100644
+index b844e5e..e40bb76 100644
 --- a/comet/services/filtering.py
 +++ b/comet/services/filtering.py
 @@ -1,6 +1,7 @@
@@ -1827,7 +2312,7 @@ index b844e5e..972e4aa 100644
  from threading import Event, Lock
  
  from pydantic import ValidationError
-@@ -12,6 +13,84 @@ from comet.utils.languages import alias_language
+@@ -12,6 +13,98 @@ from comet.utils.languages import alias_language
  from comet.utils.parsing import ensure_multi_language
  
  _TITLE_MATCH_CACHE_MAX_ENTRIES = 65_536
@@ -1896,7 +2381,7 @@ index b844e5e..972e4aa 100644
 +    if not is_pt and has_br_season and has_dual:
 +        is_pt = True
 +    if not is_pt and (has_dual or has_br_season):
-+        if has_dual and tracker and "betor" in tracker.lower():
++        if has_dual and tracker and any(t in tracker.lower() for t in ("betor", "brsites")):
 +            is_pt = True
 +        else:
 +            groups_re = _get_ptbr_groups_re(settings.PTBR_RELEASE_GROUPS or "")
@@ -1909,10 +2394,24 @@ index b844e5e..972e4aa 100644
 +
 +    if is_pt and has_br_season and not has_real_es and "es" in parsed.languages:
 +        parsed.languages.remove("es")
++
++
++LOW_QUALITY_SOURCES = {"CAM", "TeleSync", "TeleCine", "SCR"}
++
++
++def is_cam_release(parsed) -> bool:
++    if parsed is None:
++        return False
++    if isinstance(parsed, dict):
++        q = parsed.get("quality")
++    else:
++        q = getattr(parsed, "quality", "")
++    return str(q or "") in LOW_QUALITY_SOURCES
++
  
  if settings.RTN_FILTER_DEBUG:
  
-@@ -355,6 +434,7 @@ def filter_worker(
+@@ -355,6 +448,7 @@ def filter_worker(
                  )
                  parsed.languages.append(language)
  

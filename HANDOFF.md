@@ -69,7 +69,7 @@ Comet, StremThru, Prowlarr, Caddy e AdGuard **não podem ser fechados pelo Andro
 | Debian 13 chroot | `/data/debian` | — | Montado por `/data/comet/chroot.sh` |
 | **Comet** (`g0ldyy/comet` @ `f56677f`) | `/opt/comet` (chroot), `.venv`, Python 3.13, SQLite `data/comet.db` | 8000 | Patch local `comet-patches/ptbr-first.patch`: 19 arquivos Python |
 | **Caddy** + DuckDNS (DNS-01, Let's Encrypt) | `/etc/caddy/Caddyfile` | 443 | `https://a71comet.duckdns.org` → 127.0.0.1:8000 |
-| **StremThru** v0.105.4 local | `/usr/local/bin/stremthru` | 127.0.0.1:8080 | Ponte Comet → Real-Debrid (a instância pública dava timeout) |
+| **StremThru** v0.105.4 local | `/usr/local/bin/stremthru` | 127.0.0.1:8080 (+ Caddy `:8443`) | Ponte Comet → Real-Debrid (a instância pública dava timeout). `STREMTHRU_FEATURE=torz,stremio_store`, `STREMTHRU_BASE_URL=https://a71comet.duckdns.org:8443`: addon **Store** (biblioteca do RD) em `https://a71comet.duckdns.org:8443/stremio/store/configure` |
 | **Prowlarr** v2.7.0.5723 | `/opt/prowlarr`, dados em `/var/lib/prowlarr` | 127.0.0.1:9696 | Indexadores: Catálogo BeTor (BR), Knaben, TorrentsCSV; proxy FlareSolverr integrado |
 | **FlareSolverr** v3.5.2 | `/opt/flaresolverr` (chroot), `.venv` | 127.0.0.1:8191 | Proxy anti-Cloudflare para Prowlarr; Chromium e chromedriver arm64 do sistema (`comet-patches/flaresolverr-arm64.patch`); watchdog mata se passar de 1200 MB PSS; oom 200 (morre antes dos serviços) |
 | **Watchdog** | `/data/comet/watchdog.sh` (= `scripts/watchdog.sh`, MD5 conferido) | — | A cada 30 s religa serviços; proteção oom (-1000/200), free_mem e cap de logs a 5 MB |
@@ -98,6 +98,7 @@ Comet, StremThru, Prowlarr, Caddy e AdGuard **não podem ser fechados pelo Andro
 | Peerflix | — | ✅ Ativo (`impersonate="chrome"`) |
 | Comet | feels.legal | ✅ Ativo (`comet.feels.legal`) |
 | Prowlarr | `PROWLARR_INDEXERS=["1","2","3"]` | Ativo |
+| BRSites | `SCRAPE_BRSITES=live` | ✅ Ativo: scraper próprio (`comet/scrapers/brsites.py`) de `filmestorrent.tv` e `apachetorrents.com`, todos os magnets de cada post |
 
 Flags importantes do `.env`:
 - `PTBR_FIRST=True`
@@ -107,6 +108,7 @@ Flags importantes do `.env`:
 - `STREMTHRU_URL=http://127.0.0.1:8080`
 - `HIDE_DEBRID_BLOCKED`: padrão True no patch
 - `P2P_FALLBACK_FOR_BLOCKED=True`
+- `DEMOTE_CAM`: padrão True no patch (CAM/TS/TC/SCR no fim da lista com `🎦 CAM`)
 - `DEBRID_PRECHECK=True`
 - `DEBRID_PRECHECK_MAX_PER_HOUR=20`
 
@@ -132,7 +134,7 @@ Flags importantes do `.env`:
    - Tabela SQLite `debrid_blocked_hashes`, criada pela migração `2026102901_debrid_blocked_hashes`.
    - O 451 é gravado em `comet/debrid/stremthru.py` e logado como `🚫 RD bloqueou (451)`.
    - `comet/api/endpoints/stream.py` esconde esses hashes daquele debrid; o P2P continua intacto.
-5. **Prowlarr**: instalado e integrado (`SCRAPE_PROWLARR=live`, busca também por título PT). Ganho em filmes: `tt12042730` 11→13 PT-BR, `tt22084616` 16→17. A lista de indexadores excluídos e o motivo está no README, Seção 0.
+5. **Prowlarr**: instalado e integrado (`SCRAPE_PROWLARR=live`, busca também por título PT). Ganho em filmes: `tt12042730` 11→13 PT-BR, `tt22084616` (na verdade *Spider-Man: Brand New Day*, não Transformers) 16→17. A lista de indexadores excluídos e o motivo está no README, Seção 0.
 6. **Watchdog**: supervisão do Prowlarr + cap de logs.
 7. **Séries dubladas PT-BR**. Causa encontrada:
    - **(a)** `torrentio.py` testava `"\n💾" in title_full` e falhava quando havia a linha de seeders (`\n👤 7 💾`). Também usava só o nome do arquivo (ex.: `1 - Piloto.mp4`), que não contém o nome da série.
@@ -151,6 +153,9 @@ Flags importantes do `.env`:
     - `scripts/android-apps.sh` desativando 4 apps do Android.
     - FlareSolverr v3.5.2 em `/opt/flaresolverr` com Chromium/chromedriver do Debian (`comet-patches/flaresolverr-arm64.patch`), proxy criado no Prowlarr com a tag `flaresolverr` (id 1).
     - Experimento de indexadores sem ganho, desfeito (Seção 7, item 5).
+12. **CAM no fim da lista** (`DEMOTE_CAM=True`): `filtering.py::is_cam_release` (usa `parsed.quality` do RTN: `CAM`, `TeleSync`, `TeleCine`, `SCR`). Em `stream.py`, a ordem fica avisos → PT bons → outros bons → PT CAM → outros CAM, com `🎦 CAM` no nome e aviso na descrição; o corte por resolução e o precheck também os deixam por último. Em `playback.py`, a troca do 451 só usa CAM se não houver outro candidato (antes ela escolhia CAMRip com marca d'água "1xbet"). Com "Remover lixo" ligado no `/configure` (o usuário usa assim), os CAM nem aparecem na lista, mas a troca do 451 lê o banco direto.
+13. **Biblioteca do RD:** StremThru com o addon Store ligado e exposto pelo Caddy em `:8443` (`config/Caddyfile`, `scripts/watchdog.sh`).
+14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
 
 **O patch Python inteiro** (tudo menos `comet/templates/index.html`) está em `comet-patches/ptbr-first.patch` (LF). Para reaplicar depois de atualizar o Comet: `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`. Para regenerar a partir do A71: no chroot, `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /tmp/x.patch`, copie para `/data/local/tmp` e faça `adb pull`.
 
@@ -193,7 +198,7 @@ Atalho usado nas medições: um script Python no chroot que, para cada pedido, r
 | `series/tt9335498:1:1` (Demon Slayer) | 212 | — → 3 | 0 | 18s |
 | `series/tt9335498:5:1` (Demon Slayer, arco Hashira) | 56 | — → 3 | 0 | 18s |
 | `series/tt0903747:3:5` (Breaking Bad, 2º episódio da série) | 370 | 6 | 0 | 19s |
-| `movie/tt22084616` (Transformers: O Início) | 674 | 17 → 21 | 0 | 6.46s |
+| `movie/tt22084616` (Spider-Man: Brand New Day; **não** é Transformers, que é `tt8864596`) | 674 | 17 → 21 | 0 | 6.46s |
 
 Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também medidos: Demon Slayer `3:1` = 34 (só arco Yuukaku), One Piece `21:181` (ep. 1071) = 124 / 4 PT-BR. Os números variam ±2 entre medições (fontes ao vivo). Memória disponível no A71: ~3,4 GB.
 
@@ -215,20 +220,16 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 ## 8. Onde paramos e próximo passo
 
-**Estado:** tudo commitado e rodando. A última tarefa (`.orquestra/tarefa.md`: memória + FlareSolverr + indexadores BR) foi concluída. A parte de indexadores não trouxe ganho e foi desfeita.
+**Estado:** rodando no A71. Os itens 12–14 da Seção 4 estão aplicados e conferidos no aparelho (commit só quando o usuário pedir).
 
-**Pendente do lado do usuário:** testar no Stremio com o RD:
-- um lançamento dublado recente, para ver a troca automática no 451 ou o rótulo `⚠️ P2P (bloqueado no RD)`;
-- Demon Slayer T1E1 e T5E1, One Piece e o 2º episódio de qualquer série.
+**Testado pelo usuário em 30/10/2026:** lançamento dublado funcionou, mas pela troca do 451 caiu num CAMRip com marca d'água (resolvido no item 12); Demon Slayer T1 e T5 ok; One Piece sem PT-BR (limite das fontes: quase tudo é legendado); Ben 10 Omniverse: todos os dublados estão bloqueados (451) no RD e só o P2P sobra, que tem poucos seeders.
+
+**Pendente do lado do usuário:** instalar o addon Store (`https://a71comet.duckdns.org:8443/stremio/store/configure`, Real-Debrid + chave do RD).
 
 Se ele relatar problema, comece pelos logs (`/data/comet/comet.log`: procure `🚫 RD bloqueou`, `🔁 451 em`).
 
-**Próximo ganho de conteúdo possível** (o usuário ainda não decidiu; ofereça):
-1. **Definições Cardigann próprias para sites BR de dublado** em `/var/lib/prowlarr/Definitions/Custom/*.yml`, com a tag `flaresolverr`.
-   - É a única via que ainda pode aumentar PT-BR.
-   - Custo: um YAML por site, e esses sites trocam de domínio com frequência.
-   - Critérios de aceite iguais aos da Etapa 3 de `.orquestra/tarefa.md`: busca no Prowlarr em menos de 25 s, PT-BR sobe, sem falsos positivos, série sem cache em até ~30 s.
-2. **Biblioteca do RD no Stremio:** o addon "Store" do StremThru (já instalado) lista o que está na conta RD. Serve para o usuário colar um magnet no site do RD e assistir pelo Stremio. Precisa confirmar a configuração.
-3. Conferir se o usuário deixou "só em cache" desligado no `/configure`, para ver também torrents ainda não baixados no RD.
+**Manutenção:** se o BRSites parar de trazer resultados, provavelmente um dos sites trocou de domínio. Corrija o dict `SITES` em `comet/scrapers/brsites.py`. O `/configure` do usuário já está com "só em cache" desligado.
 
-**Já descartado, não repita:** os indexadores gerais do Prowlarr (1337x, TPB, EZTV, YTS, uIndex, LimeTorrents, TorrentDownloads, KAT). Testados em 30/10/2026: zero ganho e +14 s por busca de série.
+**Cuidado ao medir "novos" contra o banco:** a tabela `torrents` só tem os episódios já buscados. Compare sempre com o resultado ao vivo do Comet para o mesmo episódio, senão episódios de outras temporadas aparecem como "novos".
+
+**Já descartado, não repita:** os indexadores gerais do Prowlarr (1337x, TPB, EZTV, YTS, uIndex, LimeTorrents, TorrentDownloads, KAT). Testados em 30/10/2026: zero ganho e +14 s por busca de série. Sites BR mortos ou sem ganho: VacaTorrent, LAPUMiA, Wolverdon, ThePirataFilmes, StarTorrent, OndeBaixo, LimonTorrent, TudoTorrents, BaixaFilmes, BaixeTorrents. Cardigann não serve para esses sites (um magnet por resultado, e os posts têm vários).
