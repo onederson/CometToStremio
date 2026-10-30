@@ -1,85 +1,139 @@
-# Tarefa (rodada 3, FINAL): rejeitar release de anime que cita OUTRO arco
+# Tarefa: proteger memória + FlareSolverr + indexadores BR
 
-A rodada anterior estourou o tempo só explorando. **Tudo o que você precisa saber já está aqui. NÃO explore; implemente direto.** Tempo-alvo: 15 min.
+São 3 etapas independentes. **Faça só a etapa pedida no comando.** Ao terminar a etapa, pare e responda.
 
 ## Contexto
-- Comandos no A71: `.\scripts\a71.ps1 -Chroot '<cmd>'`. O Comet fica em `/opt/comet`; use `.venv/bin/python`.
-- Reinício: `pkill -f "python -m comet.main"`. O watchdog religa em até 30 s.
-- O estado atual já foi aprovado (patch idêntico a `comet-patches\ptbr-first.patch`). Mude APENAS o descrito abaixo.
+- **Comandos no A71:**
+  - `.\scripts\a71.ps1 '<cmd>'` roda no Android (root).
+  - `.\scripts\a71.ps1 -Chroot '<cmd>'` roda no Debian em `/data/debian`.
+- **Arquivos enviados ao aparelho:**
+  - Use PowerShell com `adb push` para `/data/local/tmp`, depois mova.
+  - Os arquivos devem ficar em LF, nunca CRLF.
+- **Watchdog:**
+  - A cópia do repositório é `scripts/watchdog.sh`; a do aparelho é `/data/comet/watchdog.sh`. As duas precisam ficar idênticas (confira o MD5).
+  - Ele roda em `/system/bin/sh` (toybox, sem bash).
+- **Memória medida hoje:**
+  - Total 5,5 GB; disponível ~3,4 GB; swap de 2,7 GB.
+  - Comet ~210 MB + forkserver ~145 MB; Prowlarr ~356 MB; StremThru 88 MB; AdGuardHome 84 MB; Caddy 20 MB.
+- **Hoje todos os serviços estão com `oom_score_adj=-1000`, mas só por herança do Magisk.** Nenhum script define isso. Se o watchdog for reiniciado pelo `adb shell`, perde a proteção.
+- **PROIBIDO:**
+  - Alterar qualquer arquivo em `/data/adguard/` ou a configuração do AdGuard. Pode apenas escrever em `/proc/<pid>/oom_score_adj` do processo dele.
+  - Imprimir a chave do Prowlarr, a chave do RD ou o token do DuckDNS.
+  - Fazer commit.
 
-## Dados (já verificados pelo orquestrador; não reverifique)
-- `anime_mapper.get_kitsu_ids_from_imdb("tt9335498")` → `['41370','45249','44081','45866','47635','44063','45828']`.
-- `anime_mapper.get_kitsu_episode_mapping(k)` → `{'imdb_id': 'tt9335498', 'from_season': N, 'from_episode': M}`. Para Demon Slayer:
+---
 
-  | kitsu | from_season | from_episode | arco |
-  |---|---|---|---|
-  | 41370 | 1 | 1 | principal |
-  | 45249 | 2 | 1 | Mugen Ressha (TV) |
-  | 44081 | 3 | 1 | Yuukaku |
-  | 45866 | 4 | 1 | Katanakaji no Sato |
-  | 47635 | 5 | 1 | Hashira Geiko |
-  | 44063, 45828 | 0 | — | especiais |
+## Etapa 1: proteção de memória (só `scripts/watchdog.sh` + script novo)
 
-- Títulos de cada entrada Kitsu:
-  - `SELECT entry_id FROM anime_ids WHERE provider='kitsu' AND provider_id=:k` → `SELECT data_json FROM anime_entries WHERE id=:entry_id`.
-  - `data_json` é JSON no formato anime-offline-database: use as chaves `title` (str) e `synonyms` (lista de str).
-- One Piece `tt0388629`: só a kitsu `12` tem `from_season=1`; as demais são `from_season=0` (filmes/especiais).
+### 1.1 Proteção explícita contra o killer de memória
+No watchdog, crie a função `protect()`, chamada a cada volta do loop. Ela escreve `-1000` em `/proc/<pid>/oom_score_adj` de:
+- Comet: `pgrep -f 'python -m comet.main'` e os filhos dele, incluindo o `multiprocessing.forkserver` de `/opt/comet/.venv`;
+- StremThru, Prowlarr e Caddy (os mesmos padrões de `pgrep` já usados no loop);
+- AdGuard: `pgrep -f '/data/adguard/AdGuardHome/AdGuardHome'`, e também o processo `/data/adguard/watchdog.sh`;
+- o próprio watchdog (`$$`).
 
-## Implementação
-### 1. Em `comet/services/anime.py` (classe `AnimeMapper`), adicionar:
-```python
-async def get_imdb_arc_titles(self, imdb_id: str) -> list[tuple[int, set[str]]]:
-    """[(from_season, {títulos normalizados}), ...] para cada kitsu do IMDb; cache em dict na instância."""
-```
-- Normalização (`_norm_arc_title`, função de módulo):
-  - NFKD, sem acentos, minúsculas;
-  - `re.sub(r"[^a-z0-9]+", " ", s).strip()`;
-  - devolve `f" {s} "` (com espaço nas pontas, para casar por palavra inteira);
-  - descarte títulos normalizados com menos de 4 letras úteis.
-- Erros ou dados faltando → retorne `[]`.
+Regras:
+- Escreva só se o valor atual for diferente, para não gerar trabalho à toa.
+- Ignore erros: o processo pode ter morrido entre o `pgrep` e a escrita.
 
-### 2. Função de módulo em `anime.py`:
-```python
-def release_cites_other_arc(release_title: str, arcs: list[tuple[int, set[str]]], requested_season: int) -> bool:
-```
-- Normalize `release_title` do mesmo jeito.
-- Para cada `(season, titles)` em `arcs`, para cada título `t`: se `t in release_norm`, registre `(len(t), season)`.
-- Pegue o maior `len`. Se não houver nenhum casamento → `False`.
-- Entre os casamentos com esse comprimento máximo, se algum tem `season == requested_season` → `False`.
-- Senão → `True` (o título mais específico pertence a outro arco ou a um especial).
+### 1.2 Liberar memória matando coisas do Android
+- **Função `free_mem()`, a cada volta do loop:**
+  - Leia `MemAvailable` de `/proc/meminfo`.
+  - Se ficar abaixo de **600 MB**, rode `am kill-all`. Esse comando mata só processos de apps em segundo plano, nunca os nossos.
+  - Registre em log `memoria baixa (X MB), am kill-all`.
+  - Rode no máximo 1 vez a cada 5 min (guarde o horário em variável).
+- **Script novo `scripts/android-apps.sh`, com dois modos:**
+  - `disable`: roda `pm disable-user --user 0` em cada pacote abaixo. Ignore os que não existirem.
+  - `enable`: roda `pm enable` nos mesmos pacotes (reverte tudo).
+  - Pacotes: `io.chaldeaprjkt.gamespace`, `org.omnirom.omnijaws`, `com.android.settings.intelligence`, `com.android.emergency`.
+  - **NÃO incluir** `com.android.cellbroadcastreceiver*` (alertas da Defesa Civil), launcher, systemui, teclado, phone nem networkstack.
+- Copie o script para `/data/comet/android-apps.sh` e rode `disable` uma vez.
 
-### 3. Em `comet/services/media_search.py`
-Onde hoje já se calcula `is_anime` / `absolute_episode` para pedido IMDb de episódio: se `is_anime`, calcule `arcs = await anime_mapper.get_imdb_arc_titles(media_only_id)` e passe ao `TorrentManager` (novo kwarg `anime_arcs=arcs`, padrão `None`).
+### 1.3 Aplicar
+1. Envie o watchdog e mate o watchdog antigo (o pid está em `/data/comet/watchdog.pid`). Os serviços continuam rodando.
+2. Suba o novo com `nohup /system/bin/sh /data/comet/watchdog.sh >/dev/null 2>&1 &` pelo `adb shell`, de propósito, para provar que a proteção não depende do Magisk.
 
-### 4. Em `comet/services/orchestration.py` (`TorrentManager`)
-- Guarde `self.anime_arcs`.
-- No começo de `_matches_requested_scope`:
-  - se `self.is_anime and self.anime_arcs and self.search_season is not None and not parsed.seasons and release_cites_other_arc(parsed.raw_title or "", self.anime_arcs, self.search_season)` → `return False`.
-- Isso já cobre `scrape_torrents` e `_append_cache_file_infos`, que chamam `_matches_requested_scope`. Confirme os dois e não duplique.
+### Verificação da etapa 1
+- `cat /proc/<pid>/oom_score_adj` dá `-1000` para: Comet, forkserver, StremThru, Prowlarr, Caddy, AdGuardHome e os dois watchdogs. Mostre a lista (pid, valor, nome).
+- `pm list packages -d` mostra os 4 pacotes desativados.
+- Teste do `free_mem`:
+  1. Rode a função uma vez com o limite trocado temporariamente para 99999 MB.
+  2. Confirme a linha no `watchdog.log`.
+  3. Volte o limite para 600 MB.
+- Os MD5 de `scripts/watchdog.sh` e `/data/comet/watchdog.sh` batem.
+- `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/manifest.json` dá `200`.
 
-Lógica esperada:
-- **T1E1:** `Kimetsu no Yaiba - Hashira Geiko Hen - 01` casa com o título mais longo do arco T5 → rejeita.
-- **T5E1:** `[SubsPlease] Kimetsu no Yaiba - 01` casa só com `kimetsu no yaiba` do arco T1 → rejeita, o que é correto (é o T1E01).
-- **One Piece:** `One Piece - 1071` casa com `one piece` (kitsu 12, T1)… mas o pedido `21:181` tem `search_season=21`, então REJEITARIA.
-  - Para evitar isso: **só aplique a regra se `arcs` tiver ≥ 2 entradas com `season ≥ 1` distintas.** O One Piece tem só 1 e fica fora.
-  - Coloque essa checagem em `get_imdb_arc_titles`: retorne `[]` se houver menos de 2 temporadas ≥ 1 distintas.
+---
 
-## Validação (sem cache: antes de cada pedido, apague as linhas `torrents` do IMDb)
-| Pedido | Exigência |
-|---|---|
-| `series/tt9335498:1:1` | NENHUM título com Hashira, Katanakaji, Yuukaku ou Mugen |
-| `series/tt9335498:5:1` | traz `Hashira Geiko Hen - 01` |
-| `series/tt9335498:3:1` | traz `Yuukaku Hen` e nenhum Hashira/Katanakaji |
-| `series/tt0388629:21:181` | mantém `One Piece - 1071` (≈119 total) |
-| `series/tt0388629:1:1` | total ≈ 336 |
-| `series/tt0903747:1:1` | 9 PT-BR |
-| `movie/tt12042730` | ≥ 13 PT-BR |
+## Etapa 2: FlareSolverr no chroot
 
-## Final
-- Rode `py_compile` e reinicie o Comet.
-- Regenere `comet-patches\ptbr-first.patch` com TODO o diff Python, excluindo `comet/templates/index.html`. Faça via `/data/local/tmp` + `adb pull`, em LF, e apague os temporários.
-- Acrescente 1 linha no README (Seção 0) e no `HANDOFF.md` (Seção 7, item Anime).
-- Não faça commit. Não altere mais nada.
+### 2.1 Instalação
+- **Pacotes do Debian:** `apt-get install -y chromium chromium-driver xvfb`.
+- **Código:**
+  - Clone o FlareSolverr na última tag estável do GitHub (`FlareSolverr/FlareSolverr`) em `/opt/flaresolverr`.
+  - Crie a venv `.venv` com Python 3.13 e rode `pip install -r requirements.txt`.
+- **arm64:** o FlareSolverr precisa usar o Chromium e o chromedriver do sistema (`/usr/bin/chromium`, `/usr/bin/chromedriver`).
+  - Se ele tentar baixar driver x86, resolva com a variável de ambiente ou o caminho que o próprio código aceita.
+  - Se não houver jeito por configuração, faça a menor mudança possível em `src/utils.py` e salve como `comet-patches/flaresolverr-arm64.patch`.
+- **Ambiente:** `HOST=127.0.0.1`, `PORT=8191`, `LOG_LEVEL=info`, `HEADLESS=true`, `TZ=America/Sao_Paulo`.
+
+### 2.2 Watchdog
+- Adicione `start_flaresolverr` no mesmo estilo dos outros: via `chroot.sh`, log em `/data/comet/flaresolverr.log` com `cap_log`.
+- O FlareSolverr é **descartável**:
+  - Em `protect()`, defina `oom_score_adj=200` para ele e todos os processos `chromium` filhos. Nunca `-1000`: se a memória acabar, ele morre antes dos nossos serviços.
+  - Limite de memória: some o RSS (`VmRSS`) do FlareSolverr e dos filhos `chromium`. Se passar de **900 MB**, mate o grupo inteiro e registre em log. O loop religa.
+- Envie e reinicie o watchdog como na etapa 1.
+
+### Verificação da etapa 2
+- `curl -s -X POST http://127.0.0.1:8191/v1 -H 'Content-Type: application/json' -d '{"cmd":"request.get","url":"https://nowsecure.nl","maxTimeout":60000}'` responde `"status": "ok"`. Mostre só `status`, `message` e o tempo.
+- RSS total do FlareSolverr + chromium parado e logo após o teste.
+- `oom_score_adj` dele = 200 e dos serviços continua -1000.
+- Os MD5 do watchdog batem.
+
+---
+
+## Etapa 3: indexadores BR no Prowlarr
+
+A API do Prowlarr fica em `http://127.0.0.1:9696/api/v1`. Leia a chave de `/var/lib/prowlarr/config.xml` para uma variável, sem imprimir.
+
+1. **Proxy:** crie um proxy `FlareSolverr` (`POST /indexerProxy`) com host `http://127.0.0.1:8191/`, timeout de 60 s e tag `flaresolverr` (crie a tag se não existir).
+2. **Candidatos:**
+   - Em `GET /indexer/schema`, filtre os indexadores **públicos** com idioma `pt-BR` (ou descrição que indique Brasil).
+   - Liste nome e `definitionName`.
+3. **Para cada candidato:**
+   - Adicione com a tag `flaresolverr` e as categorias padrão.
+   - Rode `POST /indexer/test`.
+   - Mantenha só os que passarem; apague os que falharem.
+   - Registre o motivo de cada falha.
+4. **Busca de prova:**
+   - Para cada indexador mantido, faça `GET /search?query=Breaking%20Bad&indexerIds=<id>&type=search`.
+   - Registre o número de resultados e o tempo.
+   - Remova o indexador se demorar mais de 25 s (o Comet usa `INDEXER_MANAGER_TIMEOUT=30`) ou trouxer 0 resultados.
+5. **Comet:**
+   - Atualize `PROWLARR_INDEXERS` em `/opt/comet/.env` e em `config/.env`, com os IDs antigos (`1`, `2`, `3`) mais os novos.
+   - Reinicie o Comet (`pkill -f "python -m comet.main"`).
+
+### Verificação da etapa 3
+- Use a configuração de teste em modo torrent, sem RD: base64 de `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`.
+- Antes de cada pedido, apague do `data/comet.db` as linhas `torrents` daquele `media_id`.
+- Compare total e PT-BR (contando '🇧🇷' em name+description) com a referência:
+
+  | Pedido | Referência total / PT-BR |
+  |---|---|
+  | `movie/tt12042730` | 823 / 17 |
+  | `series/tt0903747:1:1` | 531 / 9 |
+  | `series/tt0944947:1:1` | 872 / 18 |
+  | `movie/tt22084616` | 672 / 20 |
+
+- PT-BR não pode cair. Tempo de série sem cache: até ~30 s.
+- Confira a olho 10 títulos novos marcados PT-BR (sem falsos positivos).
+
+### Documentação (só na etapa 3)
+- **`HANDOFF.md`:**
+  - Na tabela de componentes, corrija "~1 GB de RAM livre" para "~3,4 GB disponíveis".
+  - Acrescente FlareSolverr (127.0.0.1:8191) e os novos indexadores.
+  - Atualize a tabela de resultados.
+- **`README.md`:** 1 linha na Seção 0.
 
 ## Resposta final (máx. 8 linhas)
-Arquivos alterados, tabela da validação (total, PT-BR e se passou).
+Etapa feita, arquivos alterados, resultado de cada verificação.

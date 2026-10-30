@@ -10,11 +10,15 @@ Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado rea
 
 ### Modo de trabalho (do `CLAUDE.md`)
 - A IA principal é **orquestradora**. Ela escreve a especificação em `.orquestra/tarefa.md`, delega ao `agy` (CLI do Antigravity) e revisa com `git diff --stat` / `git diff`, além de uma verificação independente no aparelho. Se aprovar, faz `git add -A`.
-- **Quem roda o `agy` é o usuário**, com `! agy -p "..."`. O classificador bloqueia a IA de rodá-lo. Comando padrão:
+- **Quem roda o `agy`:** desde 30/10/2026 o usuário autorizou a IA a rodá-lo **ela mesma, em segundo plano** (PowerShell com `run_in_background`, saída redirecionada para um log). A IA roda etapa por etapa, revisa cada uma, corrige e **entrega só o resultado final**. Se o ambiente bloquear, peça ao usuário para rodar com `! agy ...`. Comando padrão:
   ```
   agy -p "Execute exatamente o que está em .orquestra/tarefa.md. Não faça nada fora do escopo. Ao terminar, rode a verificação descrita e responda em no máximo 5 linhas: arquivos alterados e resultado da verificação." --model gemini-3.8-flash-high --dangerously-skip-permissions --print-timeout 900s
   ```
-  Para tarefas difíceis, use `--model gemini-4-argon-high`. Para continuar a mesma conversa, use `-c`. Nunca use os modelos `claude-*` do agy.
+  Para tarefas difíceis, use `--model gemini-4-argon-high` (cota esgotada em 30/10/2026, volta em ~5 dias). Para continuar a mesma conversa, use `-c`. Nunca use os modelos `claude-*` do agy.
+- **Lições sobre o agy (flash):**
+  - Tarefas grandes estouram o tempo: divida em etapas e use `--print-timeout 1800s`.
+  - Ele às vezes dispara tarefas em segundo plano e sai no meio. Escreva no prompt: "NÃO rode tarefas em segundo plano".
+  - Ele relata "aprovado" mesmo quando a própria validação falha. **Sempre confira no aparelho** antes do `git add -A`.
 - Mudanças triviais (menos de ~20 linhas) a IA faz direto. No máximo 3 rodadas por tarefa; depois disso a IA corrige diretamente.
 - **Commit só quando o usuário pedir.** Escreva a mensagem num arquivo temporário e use `git commit -F arquivo`.
 
@@ -25,8 +29,9 @@ Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado rea
   - a API key do Prowlarr.
 - Use somente o domínio DuckDNS **`a71comet.duckdns.org`**. A conta tem 2 domínios; não mexa no outro.
 - E-mail do git **só neste repo** (config local): `wandersonks02@gmail.com`.
-- **Não mexa no AdGuard Home nem em nada da Fase 1.**
-- **Não contorne o bloqueio 451 do Real-Debrid** (DMCA, `infringing_file`). A decisão foi apenas **esconder** os torrents bloqueados.
+- **Não mexa no AdGuard Home nem em nada da Fase 1.** Única exceção: o watchdog do Comet escreve `-1000` em `/proc/<pid>/oom_score_adj` do processo do AdGuard (pedido do usuário), sem tocar em arquivos de `/data/adguard/`.
+- **Não contorne o bloqueio 451 do Real-Debrid** (DMCA, `infringing_file`). O usuário pediu duas vezes e foi recusado. O que existe é legítimo: troca automática para outro torrent e fallback P2P rotulado. Não proponha truques para fazer o RD servir um hash bloqueado.
+- **Não sugerir outro debrid nem outra assinatura**: o usuário não vai assinar.
 - Idioma das respostas ao usuário: **PT-BR**, linguagem simples.
 
 ### Pegadinhas do ambiente (Windows + PowerShell)
@@ -50,7 +55,9 @@ Um addon Stremio próprio (Comet + Real-Debrid), rodando no Galaxy A71, com a se
 2. Depois, todo o resto.
 3. Quando não houver PT-BR, inglês serve. Em anime, japonês.
 
-Torrents bloqueados pelo RD (451) devem ficar **escondidos**. O usuário quer **"todos os conteúdos possíveis"**: dublados, lançamentos, séries e anime. Ele disse que **esperava ganhos maiores, com mais conteúdo** (ver Seção 8).
+Torrents bloqueados pelo RD (451) não aparecem como RD: viram troca automática ou `⚠️ P2P (bloqueado no RD)`. O usuário quer **"todos os conteúdos possíveis"**: dublados, lançamentos, séries e anime. Ele achava que o RD "tinha tudo" e se frustrou ao ver que não; já foi explicado que o RD só tem o que existe em torrents que o addon encontra. O caminho para mais conteúdo é **achar mais torrents** (ver Seção 8).
+
+Comet, StremThru, Prowlarr, Caddy e AdGuard **não podem ser fechados pelo Android**. Se faltar memória, o Android deve matar coisas dele mesmo (apps em segundo plano) e o FlareSolverr.
 
 ---
 
@@ -58,17 +65,24 @@ Torrents bloqueados pelo RD (451) devem ficar **escondidos**. O usuário quer **
 
 | Componente | Onde | Porta | Observação |
 |---|---|---|---|
-| Galaxy A71 | `192.168.3.44`, ADB Wi-Fi `:5555` | — | Android 14 (crDroid), Magisk root, ~1 GB de RAM livre + swap |
+| Galaxy A71 | `192.168.3.44`, ADB Wi-Fi `:5555` | — | Android 14 (crDroid), Magisk root, ~3,4 GB disponíveis + swap |
 | Debian 13 chroot | `/data/debian` | — | Montado por `/data/comet/chroot.sh` |
-| **Comet** (`g0ldyy/comet` @ `f56677f`) | `/opt/comet` (chroot), `.venv`, Python 3.13, SQLite `data/comet.db` | 8000 | Patch local: 12 arquivos, +738/−223 linhas |
+| **Comet** (`g0ldyy/comet` @ `f56677f`) | `/opt/comet` (chroot), `.venv`, Python 3.13, SQLite `data/comet.db` | 8000 | Patch local `comet-patches/ptbr-first.patch`: 19 arquivos Python |
 | **Caddy** + DuckDNS (DNS-01, Let's Encrypt) | `/etc/caddy/Caddyfile` | 443 | `https://a71comet.duckdns.org` → 127.0.0.1:8000 |
 | **StremThru** v0.105.4 local | `/usr/local/bin/stremthru` | 127.0.0.1:8080 | Ponte Comet → Real-Debrid (a instância pública dava timeout) |
-| **Prowlarr** v2.7.0.5723 | `/opt/prowlarr`, dados em `/var/lib/prowlarr` | 127.0.0.1:9696 | Indexadores: Catálogo BeTor (BR), Knaben, TorrentsCSV |
-| **Watchdog** | `/data/comet/watchdog.sh` (= `scripts/watchdog.sh`, MD5 conferido) | — | A cada 30 s religa StremThru, Prowlarr, Comet e Caddy; logs limitados a 5 MB |
+| **Prowlarr** v2.7.0.5723 | `/opt/prowlarr`, dados em `/var/lib/prowlarr` | 127.0.0.1:9696 | Indexadores: Catálogo BeTor (BR), Knaben, TorrentsCSV; proxy FlareSolverr integrado |
+| **FlareSolverr** v3.5.2 | `/opt/flaresolverr` (chroot), `.venv` | 127.0.0.1:8191 | Proxy anti-Cloudflare para Prowlarr; Chromium e chromedriver arm64 do sistema (`comet-patches/flaresolverr-arm64.patch`); watchdog mata se passar de 1200 MB PSS; oom 200 (morre antes dos serviços) |
+| **Watchdog** | `/data/comet/watchdog.sh` (= `scripts/watchdog.sh`, MD5 conferido) | — | A cada 30 s religa serviços; proteção oom (-1000/200), free_mem e cap de logs a 5 MB |
 | Boot | `/data/adb/service.d/comet.sh` | — | Sobe o watchdog. Reboot já validado |
+| Apps do Android | `/data/comet/android-apps.sh` (= `scripts/android-apps.sh`) | — | `disable` aplicado: GameSpace, OmniJaws, Settings Intelligence, Emergency. `enable` reverte. Alertas da Defesa Civil mantidos de propósito |
 
-- **Logs:** `/data/comet/{comet,caddy,stremthru,prowlarr,watchdog}.log`.
+- **Logs:** `/data/comet/{comet,caddy,stremthru,prowlarr,flaresolverr,watchdog}.log`.
 - **Reiniciar o Comet:** `.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`. O watchdog religa em até 30 s.
+- **Memória (watchdog):**
+  - A cada volta, `protect()` põe `oom_score_adj=-1000` em Comet (e filhos/forkserver), StremThru, Prowlarr, Caddy, AdGuardHome, os dois watchdogs; e `200` no FlareSolverr/Chromium.
+  - `free_mem()` roda `am kill-all` se `MemAvailable` < 600 MB (no máximo 1x a cada 5 min).
+  - `check_flaresolverr_mem()` mata o FlareSolverr se a soma de **PSS** passar de 1200 MB. Use PSS e não RSS: RSS conta várias vezes a memória compartilhada do Chromium e dava 1,25 GB falsos logo na subida.
+- **Reiniciar o watchdog** (depois de trocar `/data/comet/watchdog.sh`): `kill -9 $(cat /data/comet/watchdog.pid)` e depois `nohup /system/bin/sh /data/comet/watchdog.sh >/dev/null 2>&1 &`. Um `kill` simples só age quando termina o `sleep 30`, e o novo watchdog sai sozinho se o antigo ainda estiver vivo.
 
 **Fontes de scraping** (`config/.env`, que está no `.gitignore` e é instalado em `/opt/comet/.env`):
 
@@ -114,13 +128,13 @@ Flags importantes do `.env`:
 3. **StremThru local + correções de reprodução** (commit `372e0e8`):
    - `magnet_error` no RD acontecia porque os hashes chegavam sem trackers. Agora usa 20 trackers públicos (`ngosang/trackerslist`).
    - StremThru compilado e rodando localmente.
-4. **Filtro 451** (staged, sem commit):
+4. **Filtro 451** (itens 4 a 7 no commit `6615563`):
    - Tabela SQLite `debrid_blocked_hashes`, criada pela migração `2026102901_debrid_blocked_hashes`.
    - O 451 é gravado em `comet/debrid/stremthru.py` e logado como `🚫 RD bloqueou (451)`.
    - `comet/api/endpoints/stream.py` esconde esses hashes daquele debrid; o P2P continua intacto.
-5. **Prowlarr** (staged): instalado e integrado (`SCRAPE_PROWLARR=live`, busca também por título PT). Ganho em filmes: `tt12042730` 11→13 PT-BR, `tt22084616` 16→17. A lista de indexadores excluídos e o motivo está no README, Seção 0.
-6. **Watchdog** (staged, já implantado no A71): supervisão do Prowlarr + cap de logs.
-7. **Séries dubladas PT-BR** (staged). Causa encontrada:
+5. **Prowlarr**: instalado e integrado (`SCRAPE_PROWLARR=live`, busca também por título PT). Ganho em filmes: `tt12042730` 11→13 PT-BR, `tt22084616` 16→17. A lista de indexadores excluídos e o motivo está no README, Seção 0.
+6. **Watchdog**: supervisão do Prowlarr + cap de logs.
+7. **Séries dubladas PT-BR**. Causa encontrada:
    - **(a)** `torrentio.py` testava `"\n💾" in title_full` e falhava quando havia a linha de seeders (`\n👤 7 💾`). Também usava só o nome do arquivo (ex.: `1 - Piloto.mp4`), que não contém o nome da série.
    - **(b)** O RTN marca títulos BR com "Temporada/Completa" como `es`.
    - **(c)** Pacotes de temporada (`seasons=[N], episodes=[]`) eram descartados por `reject_unknown_episode_files=True`, em `match_parsed_episode_target` (`comet/utils/parsing.py`).
@@ -129,6 +143,14 @@ Flags importantes do `.env`:
    - `torrentio.py`: `METADATA_SPLIT_PATTERN`, `BARE_EPISODE_PREFIX_PATTERN` e `_select_stream_title`. Usa o arquivo quando ele é reconhecível; senão cai para a linha 1 (nome do torrent), mantendo o `fileIndex`.
    - `filtering.py::apply_ptbr_detection`: `_PTBR_SEASON_RE`, com marcador de temporada BR + PT, tracker BR, `dual` ou grupo BR → `pt`. Remove o `es` falso, mas não quando há `latino`, `castellano`, `spanish`, `español` ou `spa`.
    - `orchestration.py::TorrentManager`: `_is_matching_season_pack`, `_matches_requested_scope`, `_live_torrent_priority`, dedup que une `pt` e `sources`, e `_append_cache_file_infos` passou a manter os packs.
+8. **451 sem perder o conteúdo** (commit `7642b2a`): `P2P_FALLBACK_FOR_BLOCKED` (hash bloqueado vira stream P2P rotulado), `DEBRID_PRECHECK` (`comet/services/debrid_precheck.py`, testa até 3 hashes PT-BR em segundo plano, máx. 20/h, tabela `debrid_verified_hashes`), e troca automática no playback (`_try_playback_fallback_on_451` em `playback.py`, até 3 candidatos, mesma resolução + PT primeiro).
+9. **Anime** (commit `7642b2a`): episódio absoluto (`episode_index.py::get_absolute_episode`), packs/batches sem temporada, filtro de arcos (Seção 7, item 2) e busca ao vivo por episódio (Seção 7, item 3).
+10. **Fontes** (commit `7642b2a`): MediaFusion (Midnight) com parsing corrigido, Peerflix, Comet `feels.legal`, SeaDex; TorrentsDB desligado.
+11. **Memória + FlareSolverr** (commit seguinte ao `7642b2a`):
+    - Watchdog com `protect()`, `free_mem()` e `check_flaresolverr_mem()` (Seção 3).
+    - `scripts/android-apps.sh` desativando 4 apps do Android.
+    - FlareSolverr v3.5.2 em `/opt/flaresolverr` com Chromium/chromedriver do Debian (`comet-patches/flaresolverr-arm64.patch`), proxy criado no Prowlarr com a tag `flaresolverr` (id 1).
+    - Experimento de indexadores sem ganho, desfeito (Seção 7, item 5).
 
 **O patch Python inteiro** (tudo menos `comet/templates/index.html`) está em `comet-patches/ptbr-first.patch` (LF). Para reaplicar depois de atualizar o Comet: `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`. Para regenerar a partir do A71: no chroot, `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /tmp/x.patch`, copie para `/data/local/tmp` e faça `adb pull`.
 
@@ -136,15 +158,11 @@ Flags importantes do `.env`:
 
 ## 5. Estado do git (IMPORTANTE)
 
-- **Commits:** `cbe21b8` → `17cec22` → `372e0e8` (HEAD).
-- **Staged, sem commit:**
-  - `comet-patches/ptbr-first.patch` (451 + Prowlarr + séries)
-  - `README.md`
-  - `scripts/watchdog.sh`
-  - `.orquestra/tarefa.md`
-  - este `HANDOFF.md`
-- O usuário **ainda não pediu commit**. Proponha: "Filtro 451, Prowlarr, watchdog e séries PT-BR". Use o e-mail local `wandersonks02@gmail.com` e termine a mensagem com a linha de coautoria definida pela sessão.
-- O código do A71 **já está com tudo aplicado e rodando**. O que está staged é só o espelho no PC.
+- **Commits:** `cbe21b8` → `17cec22` → `372e0e8` → `6615563` → `7642b2a` → "Proteção de memória, FlareSolverr e limpeza de apps do Android" (HEAD). Veja com `git log --oneline`.
+- **Árvore limpa** depois do último commit. Nada pendente.
+- O A71 está com tudo aplicado e rodando. O repositório é o espelho: `scripts/watchdog.sh` = `/data/comet/watchdog.sh` (confira o MD5), `comet-patches/*.patch` = diffs de `/opt/comet` e `/opt/flaresolverr`.
+- `config/.env` (no `.gitignore`) = `/opt/comet/.env`. Ao mudar um, mude o outro.
+- Commit só quando o usuário pedir. E-mail local `wandersonks02@gmail.com`; mensagem por arquivo (`git commit -F`) com a linha de coautoria definida pela sessão.
 
 ---
 
@@ -158,24 +176,26 @@ $s=$r.streams; "total=$($s.Count) ptbr=$(($s | ? { ($_.name + $_.description) -m
 # série: .../stream/series/tt0903747:1:1.json
 ```
 
-O cache fica na tabela `torrents` do SQLite (`/opt/comet/data/comet.db`). Para medir sem cache, apague as linhas do IMDb testado.
+O cache fica na tabela `torrents` do SQLite (`/opt/comet/data/comet.db`), coluna `media_id` = IMDb puro (ex.: `tt0903747`). Para medir sem cache, apague as linhas do IMDb testado.
 
-**Resultados verificados (30/10/2026 - após Etapas 1, 2 e 3):**
+Atalho usado nas medições: um script Python no chroot que, para cada pedido, roda `DELETE FROM torrents WHERE media_id=?`, chama `http://127.0.0.1:8000/<b64>/stream/<tipo>/<id>.json` e conta os `🇧🇷` em `name`+`description`. Rode com `/opt/comet/.venv/bin/python` e apague o script depois.
+
+**Resultados verificados (30/10/2026, estado atual):**
 
 | Pedido | Total | PT-BR (antes → depois) | Falsos positivos | Tempo sem cache |
 |---|---|---|---|---|
-| `movie/tt12042730` (Devoradores de Estrelas) | 823 | 13 → 17 | 0 | 6.38s |
-| `series/tt0903747:1:1` (Breaking Bad) | 531 | 9 → 9 | 0 | 17.73s |
-| `series/tt0944947:1:1` (Game of Thrones) | 872 | 11 → 18 | 0 | 18.50s |
+| `movie/tt12042730` (Devoradores de Estrelas) | 824 | 13 → 17 | 0 | 6.38s |
+| `series/tt0903747:1:1` (Breaking Bad) | 530 | 9 → 9 | 0 | 17.54s |
+| `series/tt0944947:1:1` (Game of Thrones) | 872 | 11 → 18 | 0 | 18.11s |
 | `series/tt2861424:1:1` (Rick and Morty) | 319 | 5 → 6 | 0 | 17.86s |
 | `series/tt0388629:1:1` (One Piece) | 382 | 0 → 0 | 0 | 18.04s |
 | `series/tt0388629:21:1` (One Piece ep ~1071) | 55 | 0 → 0 | 0 | 30.87s |
 | `series/tt9335498:1:1` (Demon Slayer) | 212 | — → 3 | 0 | 18s |
 | `series/tt9335498:5:1` (Demon Slayer, arco Hashira) | 56 | — → 3 | 0 | 18s |
 | `series/tt0903747:3:5` (Breaking Bad, 2º episódio da série) | 370 | 6 | 0 | 19s |
-| `movie/tt22084616` (Transformers: O Início) | 672 | 17 → 20 | 0 | 6.59s |
+| `movie/tt22084616` (Transformers: O Início) | 674 | 17 → 21 | 0 | 6.46s |
 
-Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. RAM livre no A71: > 2,5 GB.
+Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também medidos: Demon Slayer `3:1` = 34 (só arco Yuukaku), One Piece `21:181` (ep. 1071) = 124 / 4 PT-BR. Os números variam ±2 entre medições (fontes ao vivo). Memória disponível no A71: ~3,4 GB.
 
 ---
 
@@ -183,14 +203,32 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. RAM livre n
 
 1. **RD 451:** Mitigado. Hashes bloqueados agora recebem fallback transparente para P2P com rótulo `⚠️ P2P (bloqueado no RD)` (`P2P_FALLBACK_FOR_BLOCKED=True`), detecção prévia em background (`DEBRID_PRECHECK=True`) e auto-switch no playback (até 3 candidatos antes de exibir vídeo de erro).
 2. **Anime:** Numeração absoluta mapeada via Kitsu/Cinemeta, aceitando batches/packs sem temporada (`seasons=[]`) e episódios com numeração corrida (One Piece 47 → 382 streams). Filtro de arcos: `get_imdb_arc_titles` + `release_cites_other_arc` (em `comet/services/anime.py`) rejeitam release cujo título mais específico cita OUTRO arco do mesmo IMDb, com ou sem número de temporada (grupos numeram arcos de jeitos diferentes: "Entertainment District Arc S01", "Swordsmith S03" do TVDB). Só vale para anime com ≥ 2 temporadas mapeadas (One Piece fica fora). No IMDb, Demon Slayer é T1 principal, T2 Mugen Train, T3 Entertainment District, T4 Swordsmith, T5 Hashira.
-5. **Cache por episódio:** antes, qualquer linha em cache da temporada (packs salvos na busca de outro episódio) fazia o Comet pular a busca ao vivo, e o 2º episódio aberto de uma série vinha pobre (ex.: One Piece T1E1 com 47 em vez de 382). Agora `primary_cached` (em `orchestration.py::get_cached_torrents`) só é verdadeiro se houver linha daquele episódio; cada episódio novo faz 1 busca ao vivo (~18 s) e depois vem do cache. A 2ª abertura do mesmo episódio traz um pouco menos que a 1ª (ex.: BB T3E5 370 ao vivo → 213 do cache), comportamento original do Comet.
-3. **Fontes:** MediaFusion recuperado (instância aberta Midnight + parsing corrigido); Peerflix e Comet adicionados com sucesso; TorrentsDB desativado por estar fora do ar (HTTP 502 na origem).
-4. **Indexadores:** Sites BR e gerais com Cloudflare (1337x, etc.) continuam fora por exigirem FlareSolverr.
+3. **Cache por episódio:** antes, qualquer linha em cache da temporada (packs salvos na busca de outro episódio) fazia o Comet pular a busca ao vivo, e o 2º episódio aberto de uma série vinha pobre (ex.: One Piece T1E1 com 47 em vez de 382). Agora `primary_cached` (em `orchestration.py::get_cached_torrents`) só é verdadeiro se houver linha daquele episódio; cada episódio novo faz 1 busca ao vivo (~18 s) e depois vem do cache. A 2ª abertura do mesmo episódio traz um pouco menos que a 1ª (ex.: BB T3E5 370 ao vivo → 213 do cache), comportamento original do Comet.
+4. **Fontes:** MediaFusion recuperado (instância aberta Midnight + parsing corrigido); Peerflix e Comet adicionados com sucesso; TorrentsDB desativado por estar fora do ar (HTTP 502 na origem). AnimeTosho falha no DNS e NekoBT passa de 8 s.
+5. **Indexadores:** FlareSolverr instalado e ligado ao Prowlarr (tag `flaresolverr`; resolve o Cloudflare do 1337x em ~17 s, pico real de ~750 MB PSS). Mas o catálogo do Prowlarr só tem 2 definições públicas pt-BR: BeTor (já ativo) e um site pornô (removido). Os sites BR de dublado não existem mais lá. Testados 8 indexadores gerais (1337x, TPB, EZTV, YTS, uIndex, LimeTorrents, TorrentDownloads, KAT): **nenhum ganho** de total ou PT-BR (Torrentio/Knaben já cobrem) e a busca de série subiu de ~18 s para ~32 s; todos removidos (`PROWLARR_INDEXERS=["1","2","3"]`). Próximo ganho possível: definições Cardigann próprias (`/var/lib/prowlarr/Definitions/Custom`) para sites BR, usando o FlareSolverr já pronto.
 
 ---
 
-## 8. Próximo passo (revisão e commit)
+6. **Outros limites:** a 1ª busca de cada episódio leva ~18 s (filme ~6 s), por causa do Prowlarr. Em anime, quase todo PT-BR é legendado, não dublado.
 
-Todas as 3 etapas de `.orquestra/tarefa.md` foram concluídas com sucesso.
-1. Propor ao usuário a realização do commit consolidado de todas as melhorias (Partes 1, 1B, 2, 3, 4 e 5).
-2. Mensagem sugerida: "Comet A71: fallback P2P 451, precheck/troca automática, anime absoluto e expansão de fontes".
+---
+
+## 8. Onde paramos e próximo passo
+
+**Estado:** tudo commitado e rodando. A última tarefa (`.orquestra/tarefa.md`: memória + FlareSolverr + indexadores BR) foi concluída. A parte de indexadores não trouxe ganho e foi desfeita.
+
+**Pendente do lado do usuário:** testar no Stremio com o RD:
+- um lançamento dublado recente, para ver a troca automática no 451 ou o rótulo `⚠️ P2P (bloqueado no RD)`;
+- Demon Slayer T1E1 e T5E1, One Piece e o 2º episódio de qualquer série.
+
+Se ele relatar problema, comece pelos logs (`/data/comet/comet.log`: procure `🚫 RD bloqueou`, `🔁 451 em`).
+
+**Próximo ganho de conteúdo possível** (o usuário ainda não decidiu; ofereça):
+1. **Definições Cardigann próprias para sites BR de dublado** em `/var/lib/prowlarr/Definitions/Custom/*.yml`, com a tag `flaresolverr`.
+   - É a única via que ainda pode aumentar PT-BR.
+   - Custo: um YAML por site, e esses sites trocam de domínio com frequência.
+   - Critérios de aceite iguais aos da Etapa 3 de `.orquestra/tarefa.md`: busca no Prowlarr em menos de 25 s, PT-BR sobe, sem falsos positivos, série sem cache em até ~30 s.
+2. **Biblioteca do RD no Stremio:** o addon "Store" do StremThru (já instalado) lista o que está na conta RD. Serve para o usuário colar um magnet no site do RD e assistir pelo Stremio. Precisa confirmar a configuração.
+3. Conferir se o usuário deixou "só em cache" desligado no `/configure`, para ver também torrents ainda não baixados no RD.
+
+**Já descartado, não repita:** os indexadores gerais do Prowlarr (1337x, TPB, EZTV, YTS, uIndex, LimeTorrents, TorrentDownloads, KAT). Testados em 30/10/2026: zero ganho e +14 s por busca de série.

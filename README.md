@@ -53,6 +53,7 @@
 * **Melhorias Parte 3 (Fontes perdidas e novos scrapers):** MediaFusion corrigido apontando para a instância pública aberta `https://mediafusionfortheweebs.midnightignite.me` com parsing robusto de títulos, tamanhos e seeders; TorrentsDB desativado (`SCRAPE_TORRENTSDB=False`) por indisponibilidade total da origem (HTTP 502); novos scrapers ativos: `SCRAPE_PEERFLIX=live` (com `impersonate="chrome"`) e `SCRAPE_COMET=live` (`https://comet.feels.legal`), elevando a contagem de fontes sem sobrecarregar a memória do A71 (> 2 GB livres).
 * **Filtro de Arcos em Anime (`comet-patches/ptbr-first.patch`):** Rejeição automática de releases de anime que citam outro arco via mapeamento Kitsu/IMDb e detecção de títulos normalizados de arcos concorrentes (preservando séries com arco único como One Piece), inclusive em releases com número de temporada próprio do grupo.
 * **Busca ao vivo por episódio:** `primary_cached` só considera o cache válido se houver linha daquele episódio (packs salvos na busca de outro episódio não bastam), então cada episódio novo de uma série faz sua própria busca nas fontes.
+* **Proteção de memória e FlareSolverr:** Watchdog com proteção oom (-1000 para Comet, StremThru, Prowlarr, Caddy e AdGuard; 200 para o FlareSolverr), `am kill-all` abaixo de 600 MB disponíveis, limite de 1200 MB PSS no FlareSolverr, 4 apps do Android desativados (`scripts/android-apps.sh`). FlareSolverr v3.5.2 (127.0.0.1:8191) em arm64 com proxy no Prowlarr (tag `flaresolverr`). Indexadores gerais testados via FlareSolverr não trouxeram ganho e foram removidos (detalhes em `HANDOFF.md`, Seção 7).
 
 ### Checklist de progresso
 - [x] Conferir ADB (`192.168.3.44:5555`), root, internet do A71, espaço e RAM
@@ -67,6 +68,9 @@
 - [x] **Passo 5 (com o usuário):** Gerar manifest no `/configure` com a API Key do **Real-Debrid** + filtros **PT-BR / Dual Áudio**, instalar no Stremio (PC e Smart TV) e validar reprodução
 - [x] StremThru local, filtro 451, Prowlarr e correção de séries PT-BR (ver Seção 0 acima)
 - [x] Fallback P2P para 451, precheck/troca automática, anime absoluto e expansão de fontes (MediaFusion, Comet, Peerflix)
+- [x] Proteção de memória (oom + `am kill-all`), FlareSolverr e desativação de apps do Android
+- [ ] Teste do usuário no Stremio com RD (451/troca automática, anime, 2º episódio)
+- [ ] (Opcional) Definições Cardigann próprias para sites BR de dublado (ver `HANDOFF.md`, Seção 8)
 
 ---
 
@@ -79,7 +83,9 @@
 | `scripts/install_rootfs.sh` | `/data/local/tmp/install_rootfs.sh` | ✅ Já executado | Extraiu o rootfs, configurou DNS/hosts e copiou scripts |
 | `scripts/chroot.sh` | `/data/comet/chroot.sh` | ✅ Instalado (`755`) | Monta `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm` (tmpfs 128 MB) e executa comandos no chroot Debian |
 | `scripts/setup_comet.sh` | `/data/debian/root/setup_comet.sh` | ✅ Executado c/ sucesso | Instalou Python 3.13, GCC, Rust, `uv`, clonou Comet em `/opt/comet` e rodou `uv sync` (log em `/data/comet/setup.log`) |
-| `scripts/watchdog.sh` | `/data/comet/watchdog.sh` | ✅ Ativo (`755`) | Supervisiona a cada 30 s Comet (`comet.main`) e Caddy (`caddy run`); religa se caírem e limita `comet.log` e `caddy.log` a 5 MB |
+| `scripts/watchdog.sh` | `/data/comet/watchdog.sh` | ✅ Ativo (`755`) | A cada 30 s religa StremThru, Prowlarr, Comet, Caddy e FlareSolverr; protege os serviços (e o AdGuard) do killer de memória; `am kill-all` com pouca RAM; limita logs a 5 MB |
+| `scripts/android-apps.sh` | `/data/comet/android-apps.sh` | ✅ `disable` aplicado | Desativa (`disable`) ou reativa (`enable`) 4 apps do Android que gastam RAM à toa |
+| `comet-patches/flaresolverr-arm64.patch` | *(aplicado em `/data/debian/opt/flaresolverr`)* | ✅ Aplicado | FlareSolverr v3.5.2 usando `/usr/bin/chromium` e `/usr/bin/chromedriver` do Debian (arm64); log em `/data/comet/flaresolverr.log` |
 | `scripts/comet.sh` | `/data/adb/service.d/comet.sh` | ✅ Instalado (`755`) | Script de boot Magisk (`sleep 45` + sobe `/data/comet/watchdog.sh`) |
 | `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True`, `DOWNLOAD_GENERIC_TRACKERS=True`, `STREMTHRU_URL=http://127.0.0.1:8080`, `SCRAPE_PROWLARR=live` em `127.0.0.1:9696` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
 | *(compilado no chroot)* | `/data/debian/usr/local/bin/stremthru` | ✅ Ativo (`755`) | StremThru `v0.105.4` (`arm64`, compilado da tag `0.105.4`) em `127.0.0.1:8080` para operações de store Real-Debrid; dados em `/data/debian/var/lib/stremthru` e log em `/data/comet/stremthru.log` |
@@ -87,7 +93,7 @@
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado: detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 (`HIDE_DEBRID_BLOCKED` + `debrid_blocked_hashes`) e melhorias no scraper Prowlarr |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (19 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix e melhorias no Prowlarr |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**

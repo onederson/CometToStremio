@@ -1,10 +1,14 @@
 #!/system/bin/sh
 # Comet - watchdog (/data/comet/watchdog.sh)
-# Sobe o StremThru, o Prowlarr, o Comet e o Caddy (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
+# Sobe o StremThru, o Prowlarr, o Comet, o Caddy e o FlareSolverr (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
 
 BASE=/data/comet
 LOG=$BASE/watchdog.log
 OUT=$BASE/comet.log
+CADDY_OUT=$BASE/caddy.log
+STREMTHRU_OUT=$BASE/stremthru.log
+PROWLARR_OUT=$BASE/prowlarr.log
+FLARESOLVERR_OUT=$BASE/flaresolverr.log
 
 # Evita dois watchdogs ao mesmo tempo
 PIDFILE=$BASE/watchdog.pid
@@ -18,6 +22,87 @@ log() {
   echo "$(date '+%F %T') $1" >> "$LOG"
   if [ "$(wc -l < "$LOG")" -gt 1000 ]; then
     tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+  fi
+}
+
+set_oom() {
+  _p="$1"
+  _val="$2"
+  [ -z "$_p" ] && return
+  [ -d "/proc/$_p" ] || return
+  _cur=$(cat "/proc/$_p/oom_score_adj" 2>/dev/null)
+  if [ "$_cur" != "$_val" ]; then
+    echo "$_val" > "/proc/$_p/oom_score_adj" 2>/dev/null || true
+  fi
+}
+
+protect() {
+  set_oom $$ -1000
+
+  for p in $(pgrep -f '^/usr/local/bin/stremthru$') \
+           $(pgrep -f '^/opt/prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr$') \
+           $(pgrep -f 'caddy run --config /etc/caddy/Caddyfile') \
+           $(pgrep -f '/data/adguard/AdGuardHome/AdGuardHome') \
+           $(pgrep -f '/data/adguard/watchdog.sh'); do
+    set_oom "$p" -1000
+  done
+
+  for p in $(pgrep -f 'python -m comet.main') \
+           $(pgrep -f '/opt/comet/.venv') \
+           $(pgrep -f 'multiprocessing.forkserver'); do
+    set_oom "$p" -1000
+    for child in $(pgrep -P "$p" 2>/dev/null); do
+      set_oom "$child" -1000
+      for gchild in $(pgrep -P "$child" 2>/dev/null); do
+        set_oom "$gchild" -1000
+      done
+    done
+  done
+
+  for p in $(pgrep -f 'flaresolverr.py') \
+           $(pgrep -f 'chromium'); do
+    set_oom "$p" 200
+    for child in $(pgrep -P "$p" 2>/dev/null); do
+      set_oom "$child" 200
+    done
+  done
+}
+
+LAST_KILL=0
+FREE_MEM_THRESHOLD=600
+
+free_mem() {
+  avail_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
+  [ -z "$avail_kb" ] && return
+  avail_mb=$((avail_kb / 1024))
+  if [ "$avail_mb" -lt "$FREE_MEM_THRESHOLD" ]; then
+    now=$(date +%s)
+    if [ $((now - LAST_KILL)) -ge 300 ]; then
+      log "memoria baixa (${avail_mb} MB), am kill-all"
+      am kill-all
+      LAST_KILL=$now
+    fi
+  fi
+}
+
+check_flaresolverr_mem() {
+  _fs_pids=$( (pgrep -f 'flaresolverr.py'; pgrep -f 'chromium') | sort -u )
+  [ -z "$_fs_pids" ] && return
+  # PSS e nao RSS: os processos do Chromium compartilham memoria e a soma de RSS
+  # conta o mesmo bloco varias vezes (pico real ~750 MB por pagina resolvida).
+  _pss_kb=0
+  for _pid in $_fs_pids; do
+    _val=$(awk '/^Pss:/ {print $2}' "/proc/$_pid/smaps_rollup" 2>/dev/null)
+    if [ -n "$_val" ]; then
+      _pss_kb=$((_pss_kb + _val))
+    fi
+  done
+  _pss_mb=$((_pss_kb / 1024))
+  if [ "$_pss_mb" -gt 1200 ]; then
+    log "FlareSolverr excedeu limite de memoria (${_pss_mb} MB > 1200 MB), matando"
+    for _pid in $_fs_pids; do
+      kill -9 "$_pid" 2>/dev/null || true
+    done
   fi
 }
 
@@ -54,12 +139,16 @@ start_prowlarr() {
     >> "$PROWLARR_OUT" 2>&1 < /dev/null &
 }
 
-CADDY_OUT=$BASE/caddy.log
-STREMTHRU_OUT=$BASE/stremthru.log
-PROWLARR_OUT=$BASE/prowlarr.log
+start_flaresolverr() {
+  nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /opt/flaresolverr && HOST=127.0.0.1 PORT=8191 LOG_LEVEL=info HEADLESS=true TZ=America/Sao_Paulo exec /opt/flaresolverr/.venv/bin/python src/flaresolverr.py' \
+    >> "$FLARESOLVERR_OUT" 2>&1 < /dev/null &
+}
 
 log "watchdog iniciado (pid $$)"
 while true; do
+  protect
+  free_mem
+  check_flaresolverr_mem
   if ! pgrep -f '^/usr/local/bin/stremthru$' > /dev/null; then
     log "StremThru nao esta rodando, iniciando"
     start_stremthru
@@ -76,10 +165,15 @@ while true; do
     log "Caddy nao esta rodando, iniciando"
     start_caddy
   fi
+  if ! pgrep -f 'flaresolverr.py' > /dev/null; then
+    log "FlareSolverr nao esta rodando, iniciando"
+    start_flaresolverr
+  fi
+  protect
   cap_log "$OUT"
   cap_log "$CADDY_OUT"
   cap_log "$STREMTHRU_OUT"
   cap_log "$PROWLARR_OUT"
+  cap_log "$FLARESOLVERR_OUT"
   sleep 30
 done
-

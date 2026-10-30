@@ -1,0 +1,42 @@
+diff --git a/src/utils.py b/src/utils.py
+index 5e12178..563b16f 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -147,6 +147,8 @@ def get_webdriver(proxy: dict = None) -> WebDriver:
+     options.add_argument('--disable-dev-shm-usage')
+     # this option removes the zygote sandbox (it seems that the resolution is a bit faster)
+     options.add_argument('--no-zygote')
++    options.add_argument('--renderer-process-limit=1')
++    options.add_argument('--disable-gpu')
+     # attempt to fix Docker ARM32 build
+     IS_ARMARCH = platform.machine().startswith(('arm', 'aarch'))
+     if IS_ARMARCH:
+@@ -188,6 +190,8 @@ def get_webdriver(proxy: dict = None) -> WebDriver:
+     # if we are inside the Docker container, we avoid downloading the driver
+     driver_exe_path = None
+     version_main = None
++    if os.path.exists("/usr/bin/chromedriver"):
++        driver_exe_path = "/usr/bin/chromedriver"
+     if os.path.exists("/app/chromedriver"):
+         # running inside Docker
+         driver_exe_path = "/app/chromedriver"
+@@ -204,7 +208,8 @@ def get_webdriver(proxy: dict = None) -> WebDriver:
+     try:
+         driver = uc.Chrome(options=options, browser_executable_path=browser_executable_path,
+                            driver_executable_path=driver_exe_path, version_main=version_main,
+-                           windows_headless=windows_headless, headless=get_config_headless())
++                           windows_headless=windows_headless, headless=get_config_headless(),
++                           use_subprocess=True)
+     except Exception as e:
+         logging.error("Error starting Chrome: %s" % e)
+         # No point in continuing if we cannot retrieve the driver
+@@ -248,6 +253,9 @@ def get_chrome_exe_path() -> str:
+     if os.path.exists(chrome_path):
+         CHROME_EXE_PATH = chrome_path
+         return CHROME_EXE_PATH
++    if os.path.exists("/usr/bin/chromium"):
++        CHROME_EXE_PATH = "/usr/bin/chromium"
++        return CHROME_EXE_PATH
+     # system
+     CHROME_EXE_PATH = uc.find_chrome_executable()
+     return CHROME_EXE_PATH
