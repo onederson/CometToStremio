@@ -1,9 +1,9 @@
 # Fase 2: Backend de Addon Stremio no Galaxy A71 (Comet + Real-Debrid)
 
 *Início da Fase: 29/10/2026*  
-*Última atualização: 29/10/2026, 17:29 (horário de Brasília)*
+*Última atualização: 30/10/2026 (horário de Brasília)*
 
-> **🤖 Para outra IA continuar daqui:** leia a **Seção 0** inteira antes de rodar qualquer comando. Ela descreve o estado real verificado no aparelho, o que já está pronto e o comando exato do próximo passo.  
+> **🤖 Para outra IA continuar daqui:** comece por **`HANDOFF.md`** (resumo completo, regras, estado do git e próximo passo). Depois leia a **Seção 0** inteira antes de rodar qualquer comando. Ela descreve o estado real verificado no aparelho, o que já está pronto e o comando exato do próximo passo.  
 > O contexto completo da Fase 1 (rede `192.168.3.0/24`, IP fixo `192.168.3.44`, DNS `a71.lan`, AdGuard Home, ADB Wi-Fi permanente e regras de `su -c`) está em `README adguard contexto.md`.
 
 ---
@@ -42,6 +42,11 @@
 * **Patch "PT-BR primeiro" aplicado no Comet (`PTBR_FIRST=True`):** Detecção ampliada de PT-BR (trackers BR, marcadores de título e grupos `PTBR_RELEASE_GROUPS`), ordenação de streams PT-BR no topo agrupados por resolução (preservando PT-BR no corte de `maxResultsPerResolution`) e rótulo visual `🇧🇷 PT-BR`. Salvo em `comet-patches/ptbr-first.patch`.
 * **Correção `magnet_error` no Real-Debrid (mesmo patch + `DOWNLOAD_GENERIC_TRACKERS=True`):** hashes vindos do Torrentio/StremThru chegam sem trackers; sem eles o RD não achava peers e recusava o magnet ("provider is currently unavailable" no Stremio). Agora `comet/debrid/stremthru.py` usa os 20 trackers públicos de `ngosang/trackerslist` quando o torrent não tem trackers próprios. **Nota:** após `git pull` do Comet, reaplicar `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`.
 * **StremThru self-hosted local (`v0.105.4`):** A instância pública (`stremthru.13377001.xyz`) dava `TimeoutError` / `magnet_error` ao adicionar torrents não cacheados no Real-Debrid (`POST /v0/store/magnets`). Compilado do código-fonte oficial (`MunifTanjim/stremthru` tag `0.105.4` com Go `1.26.10` `linux/arm64`, já que as releases não publicam binários pré-compilados) em `/usr/local/bin/stremthru` (`chmod 755`, no chroot), escutando apenas em `127.0.0.1:8080`, dados em `/var/lib/stremthru` (chroot), log em `/data/comet/stremthru.log` e RSS de ~60,6 MB (`62.084 KB`). No `.env` do Comet foi adicionado `STREMTHRU_URL=http://127.0.0.1:8080` (mantendo `STREMTHRU_SCRAPE_URL` público apenas para scraping).
+* **Filtro de hashes bloqueados pelo Real-Debrid (`451` / `HIDE_DEBRID_BLOCKED=True`):** Quando `POST /magnets` retorna HTTP 451 (`UNAVAILABLE_FOR_LEGAL_REASONS` / `infringing_file`), `comet/debrid/stremthru.py` grava upsert na tabela SQLite `debrid_blocked_hashes` (migração nativa `2026102901_debrid_blocked_hashes`), loga `🚫 RD bloqueou (451) <hash> <nome>` mantendo o vídeo de status atual no clique, e `comet/api/endpoints/stream.py` esconde os streams daquele serviço debrid nos próximos requests (consulta única em lote; modo P2P intacto).
+* **Prowlarr local (`v2.7.0.5723` `linux-core-arm64`):** Instalado em `/opt/prowlarr` (dados em `/var/lib/prowlarr`, pacotes `libicu76` + `sqlite3`), bind exclusivo em `127.0.0.1:9696`, log em `/data/comet/prowlarr.log` e RSS de ~223,3 MB (`228.676 KB`; Comet em ~121,3 MB e `1.569 MB` de RAM livre no A71). Integrado ao Comet com `SCRAPE_PROWLARR=live` e `PROWLARR_URL=http://127.0.0.1:9696` (ainda fora do `watchdog.sh`).
+  * **Indexadores ativos (3):** `Catálogo BeTor` (`catalogo-betor.yml` custom oficial `pt-BR` agregando BluDV, Comando, Torrent dos Filmes, StarckFilmes, RedeTorrent e SemTorrent via busca direta por IMDb ID), `Knaben` (meta-busca geral não usada pelo Torrentio) e `TorrentsCSV` (índice curado DHT/trackers).
+  * **Excluídos e motivo:** Blogs BR avulsos (Comando, BluDV, Torrent dos Filmes, VacaTorrent, ApacheTorrent, RedeTorrent, LAPUMiA, Filmes Torrent, StarckFilmes, BaixaFilmes, Wolverdon, ThePirataFilmes) não existem no schema nativo do Prowlarr (Cloudflare/DNS morto/posts multi-magnet, cobertos pelo `Catálogo BeTor`); nativos `pt-BR`/`pt-PT` do schema são privados (ASC, BJ-Share, BrasilTracker, CapybaraBR, Locadora, MDAN, SAMARITANO, ShaKaw, UniOtaku, BTNext, Portugas, SAPIbr, SceneRush) ou adulto (`PornoTorrent`); `1337x`, `EZTV`, `Uindex`, `ExtraTorrent.st`, `Magnet Cat` e `KickassTorrents` exigem bypass Cloudflare (sem FlareSolverr); `TheRARBG` ausente no v2.7; `YTS` e `The Pirate Bay` redundantes com Torrentio; `LimeTorrents`, `TorrentDownload` e `TorrentProject2` omitem `infoHash` na listagem; `FileMood` retorna HTTP 429; `BTdirectory`, `DaMagNet`, `TorrentByte`, `Torrent[CORE]` e `52BT` falham no teste (HTTP 400).
+* **Correção de séries dubladas PT-BR (`comet-patches/ptbr-first.patch`):** `torrentio.py` agora separa corretamente o cabeçalho antes de `\n👤 ... 💾`, usa o nome do arquivo quando reconhecível e faz fallback para a linha 1 do torrent quando o arquivo não traz o título da série (ex.: `1 - Piloto.mp4`, preservando `fileIndex`); `filtering.py` reconhece marcadores BR de temporada (`\d+ª Temporada`, `Temporada \d+`, `\d+ Temporada`, `Temporada Completa`) combinados com PT/tracker BR/`dual` e remove o `es` falso do RTN (mantendo `es` real); `orchestration.py` preserva pacotes de temporada (`seasons=[N]`, `episodes=[]`) em buscas de episódio mesmo com `reject_unknown_episode_files=True`.
 
 ### Checklist de progresso
 - [x] Conferir ADB (`192.168.3.44:5555`), root, internet do A71, espaço e RAM
@@ -53,7 +58,9 @@
 - [x] **Passo 2:** Testar `http://192.168.3.44:8000/manifest.json` e `http://a71.lan:8000/configure` a partir do PC
 - [x] **Passo 3:** Configurar **HTTPS com DuckDNS + Caddy (Let's Encrypt via DNS-01)** e validar do PC
 - [x] **Passo 4:** Ativar persistência: `watchdog.sh` supervisionando Comet + Caddy, `comet.sh` instalado em `/data/adb/service.d/` e reboot validado com AdGuard e HTTPS automáticos
-- [ ] **👉 PRÓXIMO PASSO (Passo 5 - com o usuário):** Gerar manifest no `/configure` com a API Key do **Real-Debrid** + filtros **PT-BR / Dual Áudio**, instalar no Stremio (PC e Smart TV) e validar reprodução
+- [x] **Passo 5 (com o usuário):** Gerar manifest no `/configure` com a API Key do **Real-Debrid** + filtros **PT-BR / Dual Áudio**, instalar no Stremio (PC e Smart TV) e validar reprodução
+- [x] StremThru local, filtro 451, Prowlarr e correção de séries PT-BR (ver Seção 0 acima)
+- [ ] **👉 PRÓXIMO PASSO:** ver `HANDOFF.md`, Seção 8 (fallback P2P para 451, anime com numeração absoluta, MediaFusion/TorrentsDB)
 
 ---
 
@@ -68,12 +75,13 @@
 | `scripts/setup_comet.sh` | `/data/debian/root/setup_comet.sh` | ✅ Executado c/ sucesso | Instalou Python 3.13, GCC, Rust, `uv`, clonou Comet em `/opt/comet` e rodou `uv sync` (log em `/data/comet/setup.log`) |
 | `scripts/watchdog.sh` | `/data/comet/watchdog.sh` | ✅ Ativo (`755`) | Supervisiona a cada 30 s Comet (`comet.main`) e Caddy (`caddy run`); religa se caírem e limita `comet.log` e `caddy.log` a 5 MB |
 | `scripts/comet.sh` | `/data/adb/service.d/comet.sh` | ✅ Instalado (`755`) | Script de boot Magisk (`sleep 45` + sobe `/data/comet/watchdog.sh`) |
-| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True`, `DOWNLOAD_GENERIC_TRACKERS=True`, `STREMTHRU_URL=http://127.0.0.1:8080` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
+| `config/.env` | `/data/debian/opt/comet/.env` | ✅ Instalado (`600`) | Configurações do Comet (SQLite, 1 worker, scrapers, `PTBR_FIRST=True`, `DOWNLOAD_GENERIC_TRACKERS=True`, `STREMTHRU_URL=http://127.0.0.1:8080`, `SCRAPE_PROWLARR=live` em `127.0.0.1:9696` e `PUBLIC_BASE_URL=https://a71comet.duckdns.org`) |
 | *(compilado no chroot)* | `/data/debian/usr/local/bin/stremthru` | ✅ Ativo (`755`) | StremThru `v0.105.4` (`arm64`, compilado da tag `0.105.4`) em `127.0.0.1:8080` para operações de store Real-Debrid; dados em `/data/debian/var/lib/stremthru` e log em `/data/comet/stremthru.log` |
+| *(instalado no chroot)* | `/data/debian/opt/prowlarr` | ✅ Ativo (`755`) | Prowlarr `v2.7.0.5723` (`linux-core-arm64`) em `127.0.0.1:9696` (`Catálogo BeTor`, `Knaben`, `TorrentsCSV`); dados em `/data/debian/var/lib/prowlarr` e log em `/data/comet/prowlarr.log` |
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python "PT-BR primeiro" (detecção PT-BR, ordenação `PTBR_FIRST`, rótulo `🇧🇷 PT-BR` e trackers genéricos nos magnets sem trackers) |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado: detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 (`HIDE_DEBRID_BLOCKED` + `debrid_blocked_hashes`) e melhorias no scraper Prowlarr |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**

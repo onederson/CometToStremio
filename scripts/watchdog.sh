@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # Comet - watchdog (/data/comet/watchdog.sh)
-# Sobe o StremThru, o Comet e o Caddy (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
+# Sobe o StremThru, o Prowlarr, o Comet e o Caddy (dentro do chroot Debian) se nao estiverem rodando e verifica a cada 30 s.
 
 BASE=/data/comet
 LOG=$BASE/watchdog.log
@@ -48,14 +48,25 @@ start_stremthru() {
     >> "$STREMTHRU_OUT" 2>&1 < /dev/null &
 }
 
+# Prowlarr local (127.0.0.1:9696): indexadores BR (BeTor) e gerais para o Comet.
+start_prowlarr() {
+  nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /opt/prowlarr && DOTNET_EnableDiagnostics=0 exec /opt/prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr' \
+    >> "$PROWLARR_OUT" 2>&1 < /dev/null &
+}
+
 CADDY_OUT=$BASE/caddy.log
 STREMTHRU_OUT=$BASE/stremthru.log
+PROWLARR_OUT=$BASE/prowlarr.log
 
 log "watchdog iniciado (pid $$)"
 while true; do
   if ! pgrep -f '^/usr/local/bin/stremthru$' > /dev/null; then
     log "StremThru nao esta rodando, iniciando"
     start_stremthru
+  fi
+  if ! pgrep -f '^/opt/prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr$' > /dev/null; then
+    log "Prowlarr nao esta rodando, iniciando"
+    start_prowlarr
   fi
   if ! pgrep -f 'python -m comet.main' > /dev/null; then
     log "Comet nao esta rodando, iniciando"
@@ -68,6 +79,7 @@ while true; do
   cap_log "$OUT"
   cap_log "$CADDY_OUT"
   cap_log "$STREMTHRU_OUT"
+  cap_log "$PROWLARR_OUT"
   sleep 30
 done
 

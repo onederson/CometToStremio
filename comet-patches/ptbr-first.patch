@@ -1,8 +1,21 @@
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..d0557cc 100644
+index 94f56ae..039ae18 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
-@@ -33,6 +33,19 @@ RESOLUTION_TO_DIMENSIONS = {
+@@ -4,7 +4,11 @@ from urllib.parse import quote
+ from fastapi import APIRouter, BackgroundTasks, Request
+ 
+ from comet.core.config_validation import config_check
+-from comet.core.models import settings
++from comet.core.database import (
++    build_json_list_membership_predicate,
++    encode_json_param,
++)
++from comet.core.models import database, settings
+ from comet.debrid.manager import get_debrid_extension
+ from comet.observability import metrics
+ from comet.services.media_search import MediaSearchStatus, search_media
+@@ -33,6 +37,19 @@ RESOLUTION_TO_DIMENSIONS = {
      "240P": (240, 320),
  }
  
@@ -22,7 +35,45 @@ index 94f56ae..d0557cc 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -132,6 +145,7 @@ def _select_info_hashes_by_resolution(
+@@ -125,6 +142,37 @@ def _encode_playback_scope(value: int | None) -> str:
+     return str(value) if value is not None else "n"
+ 
+ 
++_BLOCKED_SERVICES_MEMBERSHIP_SQL = build_json_list_membership_predicate(
++    "debrid_service", "services"
++)
++_BLOCKED_HASHES_MEMBERSHIP_SQL = build_json_list_membership_predicate(
++    "info_hash", "info_hashes"
++)
++
++
++async def _get_blocked_hashes_by_service(
++    services: list[str], info_hashes: list[str]
++) -> dict[str, set[str]]:
++    if not services or not info_hashes:
++        return {}
++    rows = await database.fetch_all(
++        f"""
++        SELECT debrid_service, info_hash
++        FROM debrid_blocked_hashes
++        WHERE {_BLOCKED_SERVICES_MEMBERSHIP_SQL}
++          AND {_BLOCKED_HASHES_MEMBERSHIP_SQL}
++        """,
++        {
++            "services": encode_json_param(list(dict.fromkeys(services))),
++            "info_hashes": encode_json_param([h.lower() for h in info_hashes]),
++        },
++    )
++    blocked: dict[str, set[str]] = defaultdict(set)
++    for row in rows:
++        blocked[row["debrid_service"]].add(row["info_hash"].lower())
++    return blocked
++
++
+ def _select_info_hashes_by_resolution(
+     ranked_info_hashes,
+     torrents: dict,
+@@ -132,6 +180,7 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -30,7 +81,7 @@ index 94f56ae..d0557cc 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +167,39 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +202,39 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -85,7 +136,7 @@ index 94f56ae..d0557cc 100644
      return selected_info_hashes
  
  
-@@ -329,7 +355,7 @@ async def stream(
+@@ -329,7 +390,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -94,7 +145,7 @@ index 94f56ae..d0557cc 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +363,7 @@ async def stream(
+@@ -337,6 +398,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -102,7 +153,7 @@ index 94f56ae..d0557cc 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +375,7 @@ async def stream(
+@@ -348,7 +410,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -111,7 +162,7 @@ index 94f56ae..d0557cc 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +405,7 @@ async def stream(
+@@ -378,7 +440,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -120,7 +171,44 @@ index 94f56ae..d0557cc 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -402,6 +429,7 @@ async def stream(
+@@ -393,8 +455,35 @@ async def stream(
+                 }
+             )
+ 
++    active_debrid_services = [
++        service
++        for _, service, _ in debrid_stream_specs
++        if service not in debrid_errors
++    ]
++    blocked_by_service: dict[str, set[str]] = {}
++    if (
++        settings.HIDE_DEBRID_BLOCKED
++        and active_debrid_services
++        and search_result.ranked_info_hashes
++    ):
++        blocked_by_service = await _get_blocked_hashes_by_service(
++            active_debrid_services,
++            search_result.ranked_info_hashes,
++        )
++
++    candidate_info_hashes = search_result.ranked_info_hashes
++    if blocked_by_service and active_debrid_services and not enable_torrent:
++        candidate_info_hashes = [
++            h
++            for h in candidate_info_hashes
++            if not all(
++                h.lower() in blocked_by_service.get(svc, ())
++                for svc in active_debrid_services
++            )
++        ]
++
+     selected_info_hashes = _select_info_hashes_by_resolution(
+-        ranked_info_hashes=search_result.ranked_info_hashes,
++        ranked_info_hashes=candidate_info_hashes,
+         torrents=torrents,
+         service_cache_status=service_cache_status,
+         max_results=config["maxResultsPerResolution"],
+@@ -402,18 +491,26 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -128,7 +216,10 @@ index 94f56ae..d0557cc 100644
      )
      ranked_info_hashes = (
          selected_info_hashes
-@@ -411,9 +439,16 @@ async def stream(
+         if selected_info_hashes is not None
+-        else search_result.ranked_info_hashes
++        else candidate_info_hashes
+     )
  
      added_hashes = set()
  
@@ -146,7 +237,16 @@ index 94f56ae..d0557cc 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -463,6 +498,8 @@ async def stream(
+@@ -432,6 +529,8 @@ async def stream(
+         for entry_index, service, debrid_extension in debrid_stream_specs:
+             if service in debrid_errors:
+                 continue
++            if info_hash.lower() in blocked_by_service.get(service, ()):
++                continue
+ 
+             is_cached = (
+                 info_hash_cache_status.get(service, False)
+@@ -463,6 +562,8 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -155,7 +255,7 @@ index 94f56ae..d0557cc 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -488,10 +525,18 @@ async def stream(
+@@ -488,10 +589,18 @@ async def stream(
              if is_cached:
                  added_hashes.add(info_hash)
  
@@ -176,7 +276,7 @@ index 94f56ae..d0557cc 100644
  
          if enable_torrent:
              if deduplicate_streams and info_hash in added_hashes:
-@@ -515,6 +560,8 @@ async def stream(
+@@ -515,6 +624,8 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -185,7 +285,7 @@ index 94f56ae..d0557cc 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -533,12 +580,22 @@ async def stream(
+@@ -533,12 +644,22 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -213,25 +313,93 @@ index 94f56ae..d0557cc 100644
      has_results = len(final_streams) > 0
  
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..0e45c38 100644
+index 835a975..26b8329 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
-@@ -317,6 +317,10 @@ class AppSettings(ServerSettings):
+@@ -317,6 +317,11 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
 +    PTBR_FIRST: bool = True
 +    PTBR_RELEASE_GROUPS: str = (
-+        "BiOMA,C76,WOLVERDONFILMES,COMANDO,BLUDV,VACATORRENT,LAPUMiA,TBS,SF"
++        "BiOMA,C76,WOLVERDONFILMES,COMANDO,BLUDV,VACATORRENT,LAPUMiA,TBS,SF,STARCKFILMES"
 +    )
++    HIDE_DEBRID_BLOCKED: bool = True
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
+diff --git a/comet/core/schema_migrations.py b/comet/core/schema_migrations.py
+index 7fe4809..e89681d 100644
+--- a/comet/core/schema_migrations.py
++++ b/comet/core/schema_migrations.py
+@@ -20,6 +20,7 @@ from comet.core.schema_specs import (
+     DEBRID_ACCOUNT_MAGNETS_TABLE_SPEC,
+     DEBRID_ACCOUNT_SYNC_STATE_TABLE_SPEC,
+     DEBRID_AVAILABILITY_TABLE_SPEC,
++    DEBRID_BLOCKED_HASHES_TABLE_SPEC,
+     DMM_ENTRIES_TABLE_SPEC,
+     DMM_INGESTED_FILES_TABLE_SPEC,
+     DOWNLOAD_LINKS_CACHE_TABLE_SPEC,
+@@ -994,6 +995,11 @@ async def _migration_media_demand_scrape_coverage(ctx: MigrationContext):
+     return True
+ 
+ 
++async def _migration_debrid_blocked_hashes(ctx: MigrationContext):
++    await _ensure_managed_table(ctx, DEBRID_BLOCKED_HASHES_TABLE_SPEC)
++    return True
++
++
+ MIGRATIONS = [
+     ("2026030901_foundation", _migration_foundation),
+     ("2026030902_backfill_canonical_tables", _migration_backfill_canonical_tables),
+@@ -1018,4 +1024,5 @@ MIGRATIONS = [
+         _migration_media_demand_scrape_coverage,
+     ),
+     ("2026072701_imdb_title_lookup", _migration_imdb_title_lookup),
++    ("2026102901_debrid_blocked_hashes", _migration_debrid_blocked_hashes),
+ ]
+diff --git a/comet/core/schema_specs.py b/comet/core/schema_specs.py
+index cd66755..4f14359 100644
+--- a/comet/core/schema_specs.py
++++ b/comet/core/schema_specs.py
+@@ -235,6 +235,19 @@ IMDB_TITLE_LOOKUP_TABLE_SPEC = ManagedTableSpec(
+     ),
+ )
+ 
++DEBRID_BLOCKED_HASHES_TABLE_SPEC = ManagedTableSpec(
++    table_name="debrid_blocked_hashes",
++    create_sql="""
++        CREATE TABLE {table_name} (
++            debrid_service TEXT,
++            info_hash TEXT,
++            reason TEXT,
++            blocked_at INTEGER,
++            PRIMARY KEY (debrid_service, info_hash)
++        )
++    """,
++)
++
+ SERIES_EPISODE_INDEX_TABLE_SPEC = ManagedTableSpec(
+     table_name="series_episode_index",
+     create_sql="""
 diff --git a/comet/debrid/stremthru.py b/comet/debrid/stremthru.py
-index 90a2aa5..3c3f893 100644
+index 90a2aa5..48fdfbe 100644
 --- a/comet/debrid/stremthru.py
 +++ b/comet/debrid/stremthru.py
-@@ -12,6 +12,7 @@ from comet.metadata.episode_index import EpisodeIndexService
+@@ -1,4 +1,5 @@
+ import asyncio
++import time
+ from urllib.parse import quote, unquote
+ 
+ import aiohttp
+@@ -6,12 +7,13 @@ from RTN import normalize_title, parse, title_match
+ 
+ from comet.core.execution import get_executor
+ from comet.core.logger import logger
+-from comet.core.models import settings
++from comet.core.models import database, settings
+ from comet.debrid.exceptions import DebridAuthError, DebridLinkGenerationError
+ from comet.metadata.episode_index import EpisodeIndexService
  from comet.services.debrid_cache import schedule_cache_availability
  from comet.services.filtering import exact_alias_match
  from comet.services.torrent_manager import torrent_update_queue
@@ -239,7 +407,57 @@ index 90a2aa5..3c3f893 100644
  from comet.utils.parsing import (
      ensure_multi_language,
      is_video,
-@@ -426,9 +427,10 @@ class StremThru:
+@@ -20,6 +22,31 @@ from comet.utils.parsing import (
+ )
+ 
+ 
++async def _record_debrid_blocked_hash(
++    debrid_service: str, info_hash: str, reason: str = "infringing_file"
++) -> None:
++    try:
++        await database.execute(
++            """
++            INSERT INTO debrid_blocked_hashes (debrid_service, info_hash, reason, blocked_at)
++            VALUES (:debrid_service, :info_hash, :reason, :blocked_at)
++            ON CONFLICT (debrid_service, info_hash) DO UPDATE SET
++                reason = EXCLUDED.reason,
++                blocked_at = EXCLUDED.blocked_at
++            """,
++            {
++                "debrid_service": debrid_service,
++                "info_hash": info_hash.lower(),
++                "reason": reason,
++                "blocked_at": int(time.time()),
++            },
++        )
++    except Exception as exc:
++        logger.warning(
++            f"Failed to record blocked hash {info_hash} for {debrid_service}: {exc}"
++        )
++
++
+ def batch_parse(filenames):
+     parsed_results = [parse(f) for f in filenames]
+     for parsed in parsed_results:
+@@ -198,7 +225,7 @@ class StremThru:
+                         message or f"{self.store_name}: Failed to {action}.",
+                         error_code=error.get("code"),
+                         upstream_error_code=self._extract_upstream_error_code(upstream),
+-                        payload=data,
++                        payload={**data, "status_code": response.status},
+                     )
+                 elif error:
+                     raise DebridLinkGenerationError(
+@@ -206,7 +233,7 @@ class StremThru:
+                         str(error)
+                         if isinstance(error, str)
+                         else f"{self.store_name}: Failed to {action}.",
+-                        payload=data,
++                        payload={**data, "status_code": response.status},
+                     )
+ 
+                 if response.status < 400:
+@@ -426,15 +453,31 @@ class StremThru:
          try:
              magnet_uri = f"magnet:?xt=urn:btih:{hash}&dn={quote(torrent_name)}"
  
@@ -251,8 +469,292 @@ index 90a2aa5..3c3f893 100644
 +            for source in sources or generic_trackers[:20]:
 +                magnet_uri += f"&tr={quote(source, safe='')}"
  
-             magnet = await self._post_store_json(
-                 f"/magnets?client_ip={self.client_ip}",
+-            magnet = await self._post_store_json(
+-                f"/magnets?client_ip={self.client_ip}",
+-                {"magnet": magnet_uri},
+-                "add torrent to store",
+-            )
++            try:
++                magnet = await self._post_store_json(
++                    f"/magnets?client_ip={self.client_ip}",
++                    {"magnet": magnet_uri},
++                    "add torrent to store",
++                )
++            except DebridLinkGenerationError as err:
++                if (
++                    err.payload.get("status_code") == 451
++                    or err.error_code == "UNAVAILABLE_FOR_LEGAL_REASONS"
++                    or err.upstream_error_code == "infringing_file"
++                ):
++                    await _record_debrid_blocked_hash(
++                        self.store_name, hash, "infringing_file"
++                    )
++                    logger.log(
++                        "PLAYBACK",
++                        f"🚫 RD bloqueou (451) {hash.lower()} {unquote(torrent_name)}",
++                    )
++                raise
+ 
+             magnet_data = magnet.get("data", {})
+             magnet_status = magnet_data.get("status", "")
+diff --git a/comet/scrapers/prowlarr.py b/comet/scrapers/prowlarr.py
+index 9db107e..29841e7 100644
+--- a/comet/scrapers/prowlarr.py
++++ b/comet/scrapers/prowlarr.py
+@@ -16,6 +16,7 @@ from comet.services.torrent_manager import (
+     extract_torrent_metadata,
+     extract_trackers_from_magnet,
+ )
++from comet.utils.formatting import normalize_info_hash
+ 
+ 
+ class ProwlarrScraper(BaseScraper):
+@@ -37,6 +38,24 @@ class ProwlarrScraper(BaseScraper):
+ 
+         torrents = []
+ 
++        if result.get("infoHash"):
++            base_torrent["infoHash"] = normalize_info_hash(result["infoHash"])
++            magnet = result.get("magnetUrl") or result.get("guid") or ""
++            if isinstance(magnet, str) and magnet.startswith("magnet:"):
++                base_torrent["sources"] = extract_trackers_from_magnet(magnet)
++
++                await add_torrent_queue.add_torrent(
++                    magnet,
++                    base_torrent["seeders"],
++                    base_torrent["tracker"],
++                    media_id,
++                    season,
++                    base_torrent["infoHash"],
++                )
++
++            torrents.append(base_torrent)
++            return torrents
++
+         if "downloadUrl" in result:
+             content, magnet_hash, magnet_url = await download_torrent(
+                 self.session, result["downloadUrl"]
+@@ -56,7 +75,7 @@ class ProwlarrScraper(BaseScraper):
+                     return torrents
+ 
+             if magnet_hash:
+-                base_torrent["infoHash"] = magnet_hash.lower()
++                base_torrent["infoHash"] = normalize_info_hash(magnet_hash)
+                 base_torrent["sources"] = extract_trackers_from_magnet(magnet_url)
+ 
+                 await add_torrent_queue.add_torrent(
+@@ -71,31 +90,23 @@ class ProwlarrScraper(BaseScraper):
+                 torrents.append(base_torrent)
+                 return torrents
+ 
+-        if result.get("infoHash"):
+-            base_torrent["infoHash"] = result["infoHash"].lower()
+-            if "guid" in result and result["guid"].startswith("magnet:"):
+-                base_torrent["sources"] = extract_trackers_from_magnet(result["guid"])
+-
+-                await add_torrent_queue.add_torrent(
+-                    result["guid"],
+-                    base_torrent["seeders"],
+-                    base_torrent["tracker"],
+-                    media_id,
+-                    season,
+-                    base_torrent["infoHash"],
+-                )
+-
+-            torrents.append(base_torrent)
+-
+         return torrents
+ 
+-    async def _fetch_search_results(self, query):
++    async def _fetch_search_results(
++        self,
++        query: str,
++        indexer_ids: list[str],
++        search_type: str = "search",
++        categories: str | None = None,
++    ):
+         url = f"{self.url}/api/v1/search"
+         params = [
+             ("query", query),
+-            *(("indexerIds", indexer_id) for indexer_id in settings.PROWLARR_INDEXERS),
+-            ("type", "search"),
++            *(("indexerIds", indexer_id) for indexer_id in indexer_ids),
++            ("type", search_type),
+         ]
++        if categories:
++            params.append(("categories", categories))
+         async with self.session.get(
+             url,
+             params=params,
+@@ -110,17 +121,18 @@ class ProwlarrScraper(BaseScraper):
+             return data
+ 
+     async def scrape(self, request: ScrapeRequest):
+-        if not settings.PROWLARR_INDEXERS:
++        if not indexer_manager.prowlarr_initialized.is_set():
+             try:
+                 await asyncio.wait_for(
+                     indexer_manager.prowlarr_initialized.wait(),
+                     timeout=settings.INDEXER_MANAGER_WAIT_TIMEOUT,
+                 )
+             except TimeoutError:
+-                logger.warning(
+-                    "Timed out waiting for Prowlarr indexers; skipping scrape."
+-                )
+-                return []
++                if not settings.PROWLARR_INDEXERS:
++                    logger.warning(
++                        "Timed out waiting for Prowlarr indexers; skipping scrape."
++                    )
++                    return []
+ 
+         if not settings.PROWLARR_INDEXERS:
+             logger.warning("No Prowlarr indexers available, skipping scrape.")
+@@ -130,15 +142,53 @@ class ProwlarrScraper(BaseScraper):
+         seen: set[str] = set()
+ 
+         queries = request.title_queries(include_episode_variants=True)
++        active_ids = list(settings.PROWLARR_INDEXERS)
++        search_tasks = []
++
++        if request.media_only_id.startswith("tt"):
++            imdb_capable = (
++                indexer_manager.prowlarr_imdb_tv_ids
++                if request.media_type == "series"
++                else indexer_manager.prowlarr_imdb_movie_ids
++            )
++            imdb_ids = [idx for idx in active_ids if idx in imdb_capable]
++            text_ids = [idx for idx in active_ids if idx not in imdb_capable]
++            if imdb_ids:
++                imdb_query = f"{{ImdbId:{request.media_only_id}}}"
++                if request.media_type == "series":
++                    if request.season is not None:
++                        imdb_query += f"{{Season:{request.season}}}"
++                    search_tasks.append(
++                        (
++                            f"Prowlarr IMDb {imdb_query!r} ({self.url})",
++                            self._fetch_search_results(
++                                imdb_query, imdb_ids, "tvsearch", "5000"
++                            ),
++                        )
++                    )
++                else:
++                    search_tasks.append(
++                        (
++                            f"Prowlarr IMDb {imdb_query!r} ({self.url})",
++                            self._fetch_search_results(
++                                imdb_query, imdb_ids, "movie", "2000"
++                            ),
++                        )
++                    )
++        else:
++            text_ids = active_ids
+ 
+-        try:
+-            responses = await gather_with_error_logging(
+-                (
+-                    f"Prowlarr query {query!r} ({self.url})",
+-                    self._fetch_search_results(query),
++        if text_ids:
++            for query in queries:
++                search_tasks.append(
++                    (
++                        f"Prowlarr query {query!r} ({self.url})",
++                        self._fetch_search_results(query, text_ids, "search"),
++                    )
+                 )
+-                for query in queries
+-            )
++
++        try:
++            responses = await gather_with_error_logging(search_tasks)
+             all_results = []
+             for response in responses:
+                 all_results.extend(response)
+@@ -148,10 +198,17 @@ class ProwlarrScraper(BaseScraper):
+                 if not isinstance(result, dict):
+                     continue
+                 info_url = result.get("infoUrl")
+-                if not isinstance(info_url, str) or not info_url or info_url in seen:
++                raw_hash = result.get("infoHash")
++                norm_hash = (
++                    normalize_info_hash(raw_hash)
++                    if isinstance(raw_hash, str) and raw_hash
++                    else None
++                )
++                dedup_key = norm_hash or result.get("guid") or info_url
++                if not isinstance(dedup_key, str) or not dedup_key or dedup_key in seen:
+                     continue
+ 
+-                seen.add(info_url)
++                seen.add(dedup_key)
+                 torrent_tasks.append(
+                     (
+                         f"Prowlarr result {info_url!r}",
+diff --git a/comet/scrapers/torrentio.py b/comet/scrapers/torrentio.py
+index b73981c..44acb28 100644
+--- a/comet/scrapers/torrentio.py
++++ b/comet/scrapers/torrentio.py
+@@ -1,5 +1,7 @@
+ import re
+ 
++from RTN import parse, title_match
++
+ from comet.core.logger import log_scraper_error
+ from comet.scrapers.base import BaseScraper
+ from comet.scrapers.models import ScrapeRequest
+@@ -8,6 +10,38 @@ from comet.utils.formatting import size_to_bytes
+ DATA_PATTERN = re.compile(
+     r"(?:👤 (\d+) )?💾 ([\d.]+ [KMGT]B)(?: ⚙️ (\w+))?", re.IGNORECASE
+ )
++METADATA_SPLIT_PATTERN = re.compile(r"\n(?:👤[^\n]*?)?💾")
++BARE_EPISODE_PREFIX_PATTERN = re.compile(
++    r"^(?:s\d{1,2}[ ._-]*e\d{1,3}|\d{1,2}x\d{1,3}|e(?:p(?:is[oó]dio|isode)?)?[ ._-]*\d{1,4}|cap(?:[ií]tulo|\.)?[ ._-]*\d{1,4}|\d{1,3}\s*[-._)\]]\s*(?!\d)|\d{1,3}\s+[a-zA-ZÀ-ÿ])",
++    re.IGNORECASE,
++)
++_VIDEO_EXTENSIONS = {"mkv", "mp4", "avi", "m4v", "ts", "webm"}
++
++
++def _select_stream_title(lines: list[str]) -> str:
++    if len(lines) == 1:
++        return lines[0]
++
++    torrent_line = lines[0]
++    file_leaf = lines[-1].rsplit("/", 1)[-1].strip() or lines[-1]
++    file_title = (parse(file_leaf).parsed_title or "").strip()
++    unrecognizable_file = (
++        not file_title
++        or not any(ch.isalnum() for ch in file_title)
++        or file_title.lower() in _VIDEO_EXTENSIONS
++    )
++    if (
++        unrecognizable_file
++        or BARE_EPISODE_PREFIX_PATTERN.match(file_leaf)
++        or file_title.isdigit()
++    ):
++        torrent_title = (parse(torrent_line).parsed_title or "").strip()
++        if torrent_title and (
++            unrecognizable_file or not title_match(torrent_title, file_title)
++        ):
++            return torrent_line
++
++    return file_leaf
+ 
+ 
+ class TorrentioScraper(BaseScraper):
+@@ -33,8 +67,10 @@ class TorrentioScraper(BaseScraper):
+         ):
+             return None
+ 
+-        if "\n💾" in title_full:
+-            title = title_full.split("\n💾")[0].split("\n")[-1]
++        if METADATA_SPLIT_PATTERN.search(title_full):
++            header = METADATA_SPLIT_PATTERN.split(title_full, maxsplit=1)[0]
++            lines = [line.strip() for line in header.split("\n") if line.strip()]
++            title = _select_stream_title(lines) if lines else title_full.split("\n")[0]
+         else:
+             title = title_full.split("\n")[0]
+ 
 diff --git a/comet/services/debrid.py b/comet/services/debrid.py
 index 819551b..23202e1 100644
 --- a/comet/services/debrid.py
@@ -288,7 +790,7 @@ index 819551b..23202e1 100644
  
          file_index = cls._coerce_file_index(file_index)
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
-index b844e5e..f7c3e9a 100644
+index b844e5e..972e4aa 100644
 --- a/comet/services/filtering.py
 +++ b/comet/services/filtering.py
 @@ -1,6 +1,7 @@
@@ -299,7 +801,7 @@ index b844e5e..f7c3e9a 100644
  from threading import Event, Lock
  
  from pydantic import ValidationError
-@@ -12,6 +13,70 @@ from comet.utils.languages import alias_language
+@@ -12,6 +13,84 @@ from comet.utils.languages import alias_language
  from comet.utils.parsing import ensure_multi_language
  
  _TITLE_MATCH_CACHE_MAX_ENTRIES = 65_536
@@ -313,8 +815,12 @@ index b844e5e..f7c3e9a 100644
 +    r"(?<![a-z0-9])(?:dual|audio|áudio)(?![a-z0-9])", re.IGNORECASE
 +)
 +_PTBR_DUAL_RE = re.compile(r"(?<![a-z0-9])dual(?![a-z0-9])", re.IGNORECASE)
++_PTBR_SEASON_RE = re.compile(
++    r"(?:\d+\s*[ªº°][\s._-]*temporada|temporada[\s._-]+\d+|\d+[\s._-]+temporada|temporada[\s._-]+completa)",
++    re.IGNORECASE,
++)
 +_LAT_ES_RE = re.compile(
-+    r"(?<![a-z0-9])(?:lat|latino|castellano|esp|spanish)(?![a-z0-9])",
++    r"(?<![a-z0-9])(?:lat|latino|castellano|esp|espa[ñn]ol|spa|spanish)(?![a-z0-9])",
 +    re.IGNORECASE,
 +)
 +
@@ -331,8 +837,7 @@ index b844e5e..f7c3e9a 100644
 +def apply_ptbr_detection(
 +    parsed, torrent_title: str, tracker: str | None = None
 +) -> None:
-+    if "pt" in parsed.languages:
-+        return
++    already_pt = "pt" in parsed.languages
 +
 +    por_text = torrent_title
 +    if getattr(parsed, "parsed_title", None):
@@ -346,31 +851,42 @@ index b844e5e..f7c3e9a 100644
 +                flags=re.IGNORECASE,
 +            )
 +
-+    has_explicit_pt = bool(
++    has_explicit_pt = already_pt or bool(
 +        _PTBR_TITLE_EXPLICIT_RE.search(torrent_title)
 +        or (
 +            _PTBR_POR_RE.search(por_text)
 +            and _PTBR_DUAL_AUDIO_RE.search(torrent_title)
 +        )
 +    )
-+    if not has_explicit_pt and _LAT_ES_RE.search(torrent_title):
++    has_real_es = bool(_LAT_ES_RE.search(torrent_title))
++    if not has_explicit_pt and has_real_es:
 +        return
 +
-+    is_pt = has_explicit_pt or bool(
-+        tracker and _PTBR_TRACKER_RE.search(tracker)
-+    )
-+    if not is_pt and _PTBR_DUAL_RE.search(torrent_title):
-+        groups_re = _get_ptbr_groups_re(settings.PTBR_RELEASE_GROUPS or "")
-+        if groups_re is not None and groups_re.search(torrent_title):
-+            is_pt = True
++    is_br_tracker = bool(tracker and _PTBR_TRACKER_RE.search(tracker))
++    has_dual = bool(_PTBR_DUAL_RE.search(torrent_title))
++    has_br_season = bool(_PTBR_SEASON_RE.search(torrent_title))
 +
-+    if is_pt:
++    is_pt = has_explicit_pt or is_br_tracker
++    if not is_pt and has_br_season and has_dual:
++        is_pt = True
++    if not is_pt and (has_dual or has_br_season):
++        if has_dual and tracker and "betor" in tracker.lower():
++            is_pt = True
++        else:
++            groups_re = _get_ptbr_groups_re(settings.PTBR_RELEASE_GROUPS or "")
++            if groups_re is not None and groups_re.search(por_text):
++                is_pt = True
++
++    if is_pt and not already_pt:
 +        _log_exclusion(f"🏷️ Added Language (PT-BR) | {torrent_title} | pt")
 +        parsed.languages.append("pt")
++
++    if is_pt and has_br_season and not has_real_es and "es" in parsed.languages:
++        parsed.languages.remove("es")
  
  if settings.RTN_FILTER_DEBUG:
  
-@@ -355,6 +420,7 @@ def filter_worker(
+@@ -355,6 +434,7 @@ def filter_worker(
                  )
                  parsed.languages.append(language)
  
@@ -378,8 +894,45 @@ index b844e5e..f7c3e9a 100644
          ensure_multi_language(parsed)
  
          if remove_adult_content and parsed.adult:
+diff --git a/comet/services/indexer_manager.py b/comet/services/indexer_manager.py
+index 81fb382..f1528ef 100644
+--- a/comet/services/indexer_manager.py
++++ b/comet/services/indexer_manager.py
+@@ -91,6 +91,8 @@ class IndexerManager:
+         self.original_prowlarr_config = settings.PROWLARR_INDEXERS.copy()
+         self.jackett_initialized = asyncio.Event()
+         self.prowlarr_initialized = asyncio.Event()
++        self.prowlarr_imdb_movie_ids: set[str] = set()
++        self.prowlarr_imdb_tv_ids: set[str] = set()
+ 
+     async def get_session(self):
+         if self.session is None or self.session.closed:
+@@ -196,6 +198,23 @@ class IndexerManager:
+                     current_time,
+                 )
+ 
++                active_set = set(active_ids)
++                imdb_movie_ids: set[str] = set()
++                imdb_tv_ids: set[str] = set()
++                for item in indexers:
++                    if not isinstance(item, dict):
++                        continue
++                    idx_id = str(item.get("id"))
++                    if idx_id not in active_set:
++                        continue
++                    caps = item.get("capabilities") or {}
++                    if "imdbId" in (caps.get("movieSearchParams") or ()):
++                        imdb_movie_ids.add(idx_id)
++                    if "imdbId" in (caps.get("tvSearchParams") or ()):
++                        imdb_tv_ids.add(idx_id)
++                self.prowlarr_imdb_movie_ids = imdb_movie_ids
++                self.prowlarr_imdb_tv_ids = imdb_tv_ids
++
+                 if sorted(settings.PROWLARR_INDEXERS) != sorted(active_ids):
+                     settings.PROWLARR_INDEXERS = active_ids
+ 
 diff --git a/comet/services/orchestration.py b/comet/services/orchestration.py
-index aa43646..a24dc2c 100644
+index aa43646..1f39706 100644
 --- a/comet/services/orchestration.py
 +++ b/comet/services/orchestration.py
 @@ -9,7 +9,7 @@ from comet.core.models import CometSettingsModel, database, settings
@@ -391,7 +944,85 @@ index aa43646..a24dc2c 100644
  from comet.services.ranking import rank_worker
  from comet.services.torrent_manager import torrent_update_queue
  from comet.utils.languages import select_indexer_titles
-@@ -244,6 +244,7 @@ class TorrentManager:
+@@ -109,6 +109,29 @@ class TorrentManager:
+         self.primary_cached = False
+         self.live_result_timestamp = time.time()
+ 
++    def _is_matching_season_pack(self, parsed: ParsedData) -> bool:
++        return (
++            self.media_scope is MediaScope.EPISODE
++            and self.search_season is not None
++            and bool(parsed.seasons)
++            and self.search_season in parsed.seasons
++            and not parsed.episodes
++        )
++
++    def _live_torrent_priority(self, entry: dict) -> tuple:
++        parsed = entry["parsed"]
++        preferred_scope = (
++            not parsed.episodes
++            if self.media_scope.is_aggregate
++            else bool(parsed.episodes)
++        )
++        return (
++            preferred_scope,
++            entry["fileIndex"] is not None,
++            (entry["seeders"] or 0) > 0,
++            entry["seeders"] or 0,
++        )
++
+     def _matches_requested_scope(
+         self,
+         parsed: ParsedData,
+@@ -116,6 +139,8 @@ class TorrentManager:
+         reject_unknown_override: bool | None = None,
+         scope_is_known: bool = False,
+     ) -> bool:
++        if self._is_matching_season_pack(parsed):
++            return True
+         reject_unknown = (
+             self.reject_unknown_episode_files
+             if reject_unknown_override is None
+@@ -170,7 +195,7 @@ class TorrentManager:
+                 continue
+ 
+             info_hash = torrent["infoHash"]
+-            self.torrents[info_hash] = {
++            candidate = {
+                 "fileIndex": torrent["fileIndex"],
+                 "title": torrent["title"],
+                 "seeders": torrent["seeders"],
+@@ -180,6 +205,29 @@ class TorrentManager:
+                 "parsed": torrent["parsed"],
+                 "updatedAt": self.live_result_timestamp,
+             }
++            existing = self.torrents.get(info_hash)
++            if existing is not None:
++                if (
++                    "pt" in existing["parsed"].languages
++                    and "pt" not in candidate["parsed"].languages
++                ):
++                    candidate["parsed"].languages.append("pt")
++                    ensure_multi_language(candidate["parsed"])
++                elif (
++                    "pt" in candidate["parsed"].languages
++                    and "pt" not in existing["parsed"].languages
++                ):
++                    existing["parsed"].languages.append("pt")
++                    ensure_multi_language(existing["parsed"])
++                if self._live_torrent_priority(candidate) < self._live_torrent_priority(
++                    existing
++                ):
++                    if not existing["sources"] and candidate["sources"]:
++                        existing["sources"] = candidate["sources"]
++                    continue
++                if not candidate["sources"] and existing["sources"]:
++                    candidate["sources"] = existing["sources"]
++            self.torrents[info_hash] = candidate
+ 
+     async def _fetch_cached_rows(self, media_id: str):
+         where_clause, params = build_torrent_cache_where(
+@@ -244,6 +292,7 @@ class TorrentManager:
                      f"Skipping torrent cache row with invalid parsed data: {row['info_hash']}"
                  )
                  continue
@@ -399,3 +1030,29 @@ index aa43646..a24dc2c 100644
              ensure_multi_language(parsed_data)
  
              target_season = self.search_season
+@@ -286,11 +335,20 @@ class TorrentManager:
+         parsed_episodes = parsed.episodes or [None]
+ 
+         if self.reject_unknown_episode_files and self.search_episode is not None:
+-            if not self._matches_requested_scope(parsed, reject_unknown_override=True):
+-                return
+-
+-            cache_seasons = [self.search_season]
+-            parsed_episodes = [self.search_episode]
++            if bool(parsed.seasons) and not parsed.episodes:
++                if torrent["fileIndex"] is not None:
++                    if self.search_season not in parsed.seasons:
++                        return
++                    cache_seasons = [self.search_season]
++                    parsed_episodes = [self.search_episode]
++            else:
++                if not self._matches_requested_scope(
++                    parsed, reject_unknown_override=True
++                ):
++                    return
++
++                cache_seasons = [self.search_season]
++                parsed_episodes = [self.search_episode]
+ 
+         episode = None if len(parsed_episodes) > 1 else parsed_episodes[0]
+         info_hash = torrent["infoHash"]

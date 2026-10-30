@@ -1,52 +1,45 @@
-# Tarefa: (1) esconder torrents bloqueados pelo RD (451) e (2) Prowlarr local com indexadores BR
+# Tarefa: Séries dubladas PT-BR — achar e corrigir onde o Comet perde temporadas/episódios BR
 
-Contexto: PowerShell em `C:\Users\Vendel\Desktop\Projetos\a71\STREMIO`. Comandos no A71: `.\scripts\a71.ps1 '<cmd>'` (root Android) / `.\scripts\a71.ps1 -Chroot '<cmd>'` (Debian). Comet em `/opt/comet` (git; já tem patch local — veja `git -C /opt/comet diff --stat`). StremThru local em `127.0.0.1:8080`. Leia README Seção 0 e "Pegadinhas". Reinício do Comet: `pkill -f "python -m comet.main"` (watchdog religa em ≤30 s).
+Contexto: PowerShell em `C:\Users\Vendel\Desktop\Projetos\a71\STREMIO`. Comandos no A71: `.\scripts\a71.ps1 '<cmd>'` / `.\scripts\a71.ps1 -Chroot '<cmd>'`. Comet em `/opt/comet` (git com patch local; veja `git -C /opt/comet diff --stat`). Use `.venv/bin/python`. Reinício: `pkill -f "python -m comet.main"` (watchdog religa ≤30 s). `RTN_FILTER_DEBUG=True` no `.env` liga logs `_log_exclusion` (use só durante o diagnóstico e REMOVA ao final).
 
----
-## PARTE 1 — Esconder torrents com 451 (infringing_file)
+## Evidências (orquestrador, não refaça — parta daqui)
+Série teste: Breaking Bad `tt0903747`, episódio `1:1`.
+- Torrentio cru (`https://torrentio.strem.fun/stream/series/tt0903747:1:1.json`) retorna 77 streams, incluindo:
+  - linha1 `Breaking Bad 2008 - 1ª Temporada Completa [4k] WWW.BLUDV.COM` / linha2 (arquivo) `Breaking.Bad.S01E01.4K.2160p.WEB-DL.5.1.x264.DUAL-WWW.BLUDV.COM.mkv` / `⚙️ Comando`
+  - linha1 `Breaking Bad 1 Temporada BDRip blruay 720p dublado - derew` / linha2 `1 - Piloto.mp4` / `⚙️ ThePirateBay`
+- O Comet recebe os 77 (log `found 77`), mas NENHUM dos dois chega à tabela `torrents` nem à resposta (`PT-BR: 0` na lista; banco só tem 55 linhas para tt0903747).
+- `filter_worker` isolado (chamado direto em Python com title="Breaking Bad", year=2008, year_end=2013, media_type="series", aliases={}) ACEITA os dois e marca `pt` — então a perda ocorre em outra etapa (aliases reais? `TitleMatcher` com aliases TMDB? checagem de season/episode? global RTN filtering com `rtn_settings_default`? ranking `is_fetchable`? dedup? armazenamento?).
+- `comet/scrapers/torrentio.py::_parse_stream` usa como `title` só a linha do ARQUIVO (última linha antes de `\n💾`), descartando o nome do torrent (linha 1). Para `1 - Piloto.mp4` isso perde o nome da série.
+- RTN `parse()` classifica títulos BR com "Temporada"/"Completa" como `languages=['es']` (ex.: `Breaking Bad 2ª Temporada Completa 1080p Dual Audio` → `['es']`), mas extrai `seasons` corretamente.
 
-Diagnóstico: ao dar play num torrent não cacheado, `comet/debrid/stremthru.py` (`generate_download_link` → `_post_store_json` em `/magnets`) recebe do StremThru HTTP 451, `code: "UNAVAILABLE_FOR_LEGAL_REASONS"`, `upstream_cause` `{"error":"infringing_file","error_code":35}`. O RD bloqueou aquele hash. Esses itens continuam aparecendo na lista e o usuário perde cliques.
+## Passo A — Rastrear a perda (obrigatório, com prova)
+Com `RTN_FILTER_DEBUG=True`, faça a busca real de `series/tt0903747:1:1` (config b64 modo torrent: `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`; se houver cache, apague as linhas `torrents` de `tt0903747` antes) e encontre EXATAMENTE em que etapa/arquivo/linha cada um dos dois títulos acima é descartado. Instrumente temporariamente se necessário (logs extras), e remova a instrumentação depois. Relate a causa com o trecho de log.
 
-Implemente (mudança mínima):
-1. Tabela SQLite nova `debrid_blocked_hashes(debrid_service TEXT, info_hash TEXT, reason TEXT, blocked_at INTEGER, PRIMARY KEY(debrid_service, info_hash))`, criada no mesmo mecanismo que o Comet usa para criar/migrar as outras tabelas (descubra qual; não crie à mão fora dele).
-2. Quando `/magnets` retornar 451/`UNAVAILABLE_FOR_LEGAL_REASONS`, gravar `(service, hash, "infringing_file", now)` (upsert). Logar `🚫 RD bloqueou (451) <hash> <nome>`. Manter o vídeo de status atual para esse clique.
-3. Na montagem da lista de streams (`comet/api/endpoints/stream.py`), NÃO emitir streams debrid daquele serviço para hashes bloqueados (consulta única por request, em lote). Modo torrent/P2P não é afetado.
-4. Nova setting `HIDE_DEBRID_BLOCKED: bool = True` (models.py) controlando o item 3.
-5. Não toque em nada de cached/availability além do necessário.
+## Passo B — Corrigir (mudanças mínimas, no patch existente)
+1. Corrigir a(s) causa(s) encontrada(s) no Passo A.
+2. `torrentio.py::_parse_stream`: quando a linha do arquivo NÃO contém o nome/título reconhecível (ex.: `1 - Piloto.mp4`) e a linha 1 (nome do torrent) contém, usar a linha 1 como `title` (o `fileIndex` continua apontando o arquivo certo). Não mude o comportamento para os casos em que a linha do arquivo já é boa. Explique a heurística.
+3. Na detecção PT-BR (`apply_ptbr_detection`): se o título tem marcador BR de temporada (`\d+ª Temporada`, `Temporada \d+`, `\d+ Temporada`, `Temporada Completa`) E (marcador PT explícito OU tracker BR OU `dual`), garantir `pt` e REMOVER o `es` falso que veio só de "Temporada/Completa" (só remova `es` se não houver marcador espanhol real: `latino|castellano|spanish|esp\b|lat\b`).
+4. Garantir que pacotes de temporada (`seasons=[N]`, `episodes=[]`) apareçam para pedidos de episódio daquela temporada (o Comet já suporta packs — confirme que não há regressão).
 
-Validação da Parte 1 (sem usar a chave RD do usuário):
-- Inserir manualmente na tabela um hash conhecido de `tt12042730` (ex.: o 1º PT-BR da lista atual) para `realdebrid`, e provar que o filtro funciona: chame `/stream` com uma config b64 que tenha `debridServices:[{"service":"realdebrid","apiKey":"teste"}]` e `cachedOnly:false` e verifique que aquele hash some (o Comet pode mostrar erro de chave inválida — isso é aceitável; se impedir o teste, teste a função de filtro isoladamente em Python). Depois REMOVA o registro de teste.
-- `py_compile` de todos os arquivos alterados.
+## Passo C — Validar (modo torrent, sem RD)
+Para cada um, PT-BR antes → depois e até 5 títulos PT-BR:
+- `series/tt0903747:1:1` (Breaking Bad), `series/tt0903747:3:5`
+- `series/tt0944947:1:1` (Game of Thrones)
+- `series/tt0121955:1:1` (South Park)
+- `series/tt2861424:1:1` (Rick and Morty)
+- um anime: `series/tt0388629:1:1` (One Piece)
+- regressão filmes: `movie/tt12042730` deve manter ≥13 PT-BR e ordem PT-BR→resolução.
+Confirme 0 falsos positivos (nenhum `Latino`/`Castellano`/`Spanish` marcado PT-BR) e que o `es` foi removido só quando falso.
 
----
-## PARTE 2 — Prowlarr local com indexadores brasileiros
-
-Objetivo: mais fontes de releases DUBLADOS/DUAL PT-BR. O Comet já tem scraper nativo `prowlarr` (`SCRAPE_PROWLARR`, `PROWLARR_URL`, e a variável de API key — confira os nomes exatos em `comet/core/models.py` e `comet/scrapers/prowlarr.py`/`services/indexer_manager.py`).
-
-1. Instale o **Prowlarr** (versão estável, `linux-core-arm64`) no chroot em `/opt/prowlarr`, dados em `/var/lib/prowlarr`. Instale dependências que ele exigir (ex.: `libicu`, `sqlite3`). Bind **somente** `127.0.0.1:9696` (config.xml: `BindAddress`=127.0.0.1, `AuthenticationMethod`/`AuthenticationRequired` adequados para uso local). Log em `/data/comet/prowlarr.log`.
-2. Pela API do Prowlarr (`/api/v1/indexer/schema`), liste TODOS os indexadores públicos com idioma `pt`/`pt-BR` ou sites brasileiros conhecidos (ex.: Comando, BluDV, Torrent dos Filmes, VacaTorrent, ApacheTorrent, RedeTorrent, LAPUMiA, Filmes Torrent, StarckFilmes, BaixaFilmes, Wolverdon, ThePirataFilmes, BeTor — use o que existir). Adicione cada um e rode o teste (`/api/v1/indexer/test`). Mantenha **só os que passam**. NÃO instale FlareSolverr (pesado demais); indexadores que exigem Cloudflare bypass ficam de fora — liste-os no relatório.
-3. Adicione também 2–3 indexadores públicos gerais confiáveis que passem no teste (ex.: 1337x se passar, TheRARBG, Knaben, EZTV, YTS) — só se não forem redundantes com o Torrentio; justifique.
-4. Ligue no Comet: `SCRAPE_PROWLARR=live`, URL `http://127.0.0.1:9696`, API key e IDs de indexadores conforme o Comet exige. Atualize `config\.env` (LF, preserve o resto) e o `.env` no A71 (método do README, chmod 600). **A API key do Prowlarr não pode aparecer em README, `.orquestra/` nem na resposta final.**
-5. Verifique que o Comet busca títulos em português para o Prowlarr (log `Indexer titles`, `INDEXER_LANGUAGES=["pt","en"]` já existe). Ex.: `tt12042730` deve buscar "Devoradores de Estrelas".
-
-Validação da Parte 2 (modo torrent, sem RD): config b64 `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`:
-- `tt12042730` e `tt22084616`: conte streams `🇧🇷 PT-BR` ANTES (anote da lista atual) e DEPOIS do Prowlarr; quantos vieram com fonte Prowlarr (campo 🔎 na description); liste até 8 títulos PT-BR novos.
-- Um título PT-BR mais antigo, ex. `tt0110357` (O Rei Leão 1994): quantos PT-BR.
-- Tempo total da busca (primeira busca, sem cache) — não pode passar de ~30 s; se passar, ajuste timeouts/indexadores e explique.
-- RSS do Prowlarr e do Comet; RAM livre do A71 (`free -m`).
-
----
-## Watchdog
-NÃO edite `scripts/watchdog.sh`. No relatório, dê o comando de start do Prowlarr em UMA linha no padrão de `start_stremthru` (via `"$BASE/chroot.sh" -c '... exec ...'`, log `>> "$BASE/prowlarr.log"`) e um padrão `pgrep -f` único (teste no Toybox do Android). Deixe o Prowlarr rodando ao final.
-
-## Patch e README
-- Regenere `comet-patches\ptbr-first.patch` com TODO o diff Python atual (`git -C /opt/comet diff -- comet/ ':!comet/templates/index.html'`, via `/data/local/tmp` + `adb pull`, LF, apague temporários).
-- README Seção 0 + "Mapa de arquivos": filtro 451 (`HIDE_DEBRID_BLOCKED`), Prowlarr (versão, porta local, indexadores ativos, os que ficaram de fora e por quê). Mudanças mínimas.
+## Passo D — Limpeza, patch, README
+- Remova `RTN_FILTER_DEBUG` do `.env` (PC e A71) e qualquer instrumentação temporária; reinicie o Comet.
+- `py_compile` dos arquivos alterados.
+- Regenere `comet-patches\ptbr-first.patch` (TODO o diff Python, excluindo `comet/templates/index.html`; via `/data/local/tmp` + `adb pull`; LF; apague temporários).
+- README Seção 0: nota curta sobre a correção de séries PT-BR.
 
 ## Regras
-- Não altere `scripts/`, `comet-ui/`, Caddy, StremThru, AdGuard.
-- Não exponha Prowlarr na LAN nem no Caddy. Não imprima chaves.
-- NÃO tente contornar o bloqueio 451 do Real-Debrid (nada de alterar hashes/magnets para enganar o RD). A Parte 2 é só ampliar fontes legítimas de busca.
+- Não altere `scripts/`, `comet-ui/`, Caddy, StremThru, Prowlarr, AdGuard.
+- Não imprima chaves.
 
-## Resposta final (máx. 14 linhas)
-P1: arquivos alterados, onde grava/filtra, resultado do teste. P2: versão do Prowlarr, indexadores ativos (nomes), excluídos (e motivo), PT-BR antes→depois em tt12042730/tt22084616/tt0110357, tempo de busca, RSS e RAM livre, comando de start + pgrep, pendências.
+## Resposta final (máx. 12 linhas)
+Causa exata da perda (etapa/arquivo/linha + log), correções feitas (arquivos), tabela PT-BR antes→depois por título, exemplos, falsos positivos, pendências.
