@@ -75,12 +75,15 @@ Torrents bloqueados pelo RD (451) devem ficar **escondidos**. O usuário quer **
 | Fonte | Configuração | Situação |
 |---|---|---|
 | Torrentio | — | Principal |
-| MediaFusion | elfhosted | ⚠️ retorna 0 resultados |
-| Zilean | — | — |
-| StremThru scrape | público | — |
-| TorrentsDB | — | ⚠️ HTTP 502 por rate limit |
-| Nyaa | anime only | — |
-| Prowlarr | `PROWLARR_INDEXERS=["1","2","3"]` | — |
+| MediaFusion | midnightignite | ✅ Ativo (`mediafusionfortheweebs.midnightignite.me`, parsing corrigido) |
+| Zilean | — | Ativo |
+| StremThru scrape | público | Ativo |
+| TorrentsDB | — | ❌ Desligado (`SCRAPE_TORRENTSDB=False`, origem 502) |
+| Nyaa | anime only | Ativo |
+| SeaDex | anime only | ✅ Ativo |
+| Peerflix | — | ✅ Ativo (`impersonate="chrome"`) |
+| Comet | feels.legal | ✅ Ativo (`comet.feels.legal`) |
+| Prowlarr | `PROWLARR_INDEXERS=["1","2","3"]` | Ativo |
 
 Flags importantes do `.env`:
 - `PTBR_FIRST=True`
@@ -89,6 +92,9 @@ Flags importantes do `.env`:
 - `DOWNLOAD_GENERIC_TRACKERS=True`
 - `STREMTHRU_URL=http://127.0.0.1:8080`
 - `HIDE_DEBRID_BLOCKED`: padrão True no patch
+- `P2P_FALLBACK_FOR_BLOCKED=True`
+- `DEBRID_PRECHECK=True`
+- `DEBRID_PRECHECK_MAX_PER_HOUR=20`
 
 **No Stremio:** o usuário configura o RD pela página `/configure` (traduzida para PT-BR em `comet-ui/index.html`). A chave RD fica só na URL do manifest instalado.
 
@@ -154,47 +160,37 @@ $s=$r.streams; "total=$($s.Count) ptbr=$(($s | ? { ($_.name + $_.description) -m
 
 O cache fica na tabela `torrents` do SQLite (`/opt/comet/data/comet.db`). Para medir sem cache, apague as linhas do IMDb testado.
 
-**Resultados verificados (30/10/2026):**
+**Resultados verificados (30/10/2026 - após Etapas 1, 2 e 3):**
 
-| Pedido | Total | PT-BR (antes → depois) | Falsos positivos |
-|---|---|---|---|
-| `movie/tt12042730` (Devoradores de Estrelas) | 713 | 13 → 13 | 0 |
-| `series/tt0903747:1:1` (Breaking Bad) | 332 | 0 → 9 | 0 |
-| `series/tt0903747:3:5` | 236 | 0 → 6 | 0 |
-| `series/tt0944947:1:1` (Game of Thrones) | 605 | 1 → 11 | 0 |
-| `series/tt2861424:1:1` (Rick and Morty) | 212 | 0 → 5 | 0 |
-| `series/tt0121955:1:1` (South Park) | — | 0 → 1 | 0 |
-| `series/tt0388629:1:1` (One Piece) | — | 0 → 0 | — |
+| Pedido | Total | PT-BR (antes → depois) | Falsos positivos | Tempo sem cache |
+|---|---|---|---|---|
+| `movie/tt12042730` (Devoradores de Estrelas) | 823 | 13 → 17 | 0 | 6.38s |
+| `series/tt0903747:1:1` (Breaking Bad) | 531 | 9 → 9 | 0 | 17.73s |
+| `series/tt0944947:1:1` (Game of Thrones) | 872 | 11 → 18 | 0 | 18.50s |
+| `series/tt2861424:1:1` (Rick and Morty) | 319 | 5 → 6 | 0 | 17.86s |
+| `series/tt0388629:1:1` (One Piece) | 382 | 0 → 0 | 0 | 18.04s |
+| `series/tt0388629:21:1` (One Piece ep ~1071) | 55 | 0 → 0 | 0 | 30.87s |
+| `series/tt9335498:1:1` (Demon Slayer) | 212 | — → 3 | 0 | 18s |
+| `series/tt9335498:5:1` (Demon Slayer, arco Hashira) | 56 | — → 3 | 0 | 18s |
+| `series/tt0903747:3:5` (Breaking Bad, 2º episódio da série) | 370 | 6 | 0 | 19s |
+| `movie/tt22084616` (Transformers: O Início) | 672 | 17 → 20 | 0 | 6.59s |
 
-Em todos os casos os PT-BR vêm primeiro, ordenados por resolução.
-
----
-
-## 7. Lacunas conhecidas (por que ainda falta conteúdo)
-
-1. **RD 451:** o Real-Debrid bloqueia boa parte dos **lançamentos dublados recentes**. Esse é o maior limitador. Não contornar.
-2. **Anime:**
-   - Packs com numeração absoluta (`001-600`) não têm temporada (`seasons=[]`) e não casam com o pedido `S1E1` vindo do IMDb.
-   - One Piece tem 0 PT-BR.
-3. **MediaFusion** retorna 0 resultados e **TorrentsDB** dá 502 (rate limit). São duas fontes perdidas.
-4. **Indexadores:** sites BR e gerais protegidos por Cloudflare (1337x, EZTV, Kickass etc.) exigiriam o FlareSolverr. Ele foi considerado pesado para o A71 (cerca de 1 GB de RAM livre); dá para reavaliar.
+Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. RAM livre no A71: > 2,5 GB.
 
 ---
 
-## 8. Próximo passo (proposta feita ao usuário, aguardando resposta)
+## 7. Lacunas conhecidas (situação atualizada)
 
-O usuário disse que esperava **ganhos maiores, com mais conteúdo**. A recomendação foi uma única tarefa para o agy com os itens 1, 2 e 3 abaixo, todos grátis:
+1. **RD 451:** Mitigado. Hashes bloqueados agora recebem fallback transparente para P2P com rótulo `⚠️ P2P (bloqueado no RD)` (`P2P_FALLBACK_FOR_BLOCKED=True`), detecção prévia em background (`DEBRID_PRECHECK=True`) e auto-switch no playback (até 3 candidatos antes de exibir vídeo de erro).
+2. **Anime:** Numeração absoluta mapeada via Kitsu/Cinemeta, aceitando batches/packs sem temporada (`seasons=[]`) e episódios com numeração corrida (One Piece 47 → 382 streams). Filtro de arcos: `get_imdb_arc_titles` + `release_cites_other_arc` (em `comet/services/anime.py`) rejeitam release cujo título mais específico cita OUTRO arco do mesmo IMDb, com ou sem número de temporada (grupos numeram arcos de jeitos diferentes: "Entertainment District Arc S01", "Swordsmith S03" do TVDB). Só vale para anime com ≥ 2 temporadas mapeadas (One Piece fica fora). No IMDb, Demon Slayer é T1 principal, T2 Mugen Train, T3 Entertainment District, T4 Swordsmith, T5 Hashira.
+5. **Cache por episódio:** antes, qualquer linha em cache da temporada (packs salvos na busca de outro episódio) fazia o Comet pular a busca ao vivo, e o 2º episódio aberto de uma série vinha pobre (ex.: One Piece T1E1 com 47 em vez de 382). Agora `primary_cached` (em `orchestration.py::get_cached_torrents`) só é verdadeiro se houver linha daquele episódio; cada episódio novo faz 1 busca ao vivo (~18 s) e depois vem do cache. A 2ª abertura do mesmo episódio traz um pouco menos que a 1ª (ex.: BB T3E5 370 ao vivo → 213 do cache), comportamento original do Comet.
+3. **Fontes:** MediaFusion recuperado (instância aberta Midnight + parsing corrigido); Peerflix e Comet adicionados com sucesso; TorrentsDB desativado por estar fora do ar (HTTP 502 na origem).
+4. **Indexadores:** Sites BR e gerais com Cloudflare (1337x, etc.) continuam fora por exigirem FlareSolverr.
 
-1. **Fallback P2P (modo torrent) para os bloqueados pelo 451:**
-   - Em vez de sumir, o stream bloqueado aparece como opção P2P (o Stremio baixa direto).
-   - Contra: depende de seeders e expõe o IP do usuário no swarm. Tem que ser opcional, e o usuário precisa concordar.
-2. **Anime com numeração absoluta:**
-   - Mapear temporada/episódio para episódio absoluto (via metadados: Kitsu/AniList/TMDB, ou a contagem de episódios por temporada).
-   - Aceitar packs/episódios sem temporada cujo intervalo contenha o absoluto.
-3. **Consertar MediaFusion** (outra instância ou configuração) e **TorrentsDB** (backoff/limite).
-4. *(Pago, opcional)* **Segundo debrid** (TorBox, AllDebrid ou Premiumize). Antes, testar se ele também bloqueia os mesmos títulos.
+---
 
-**Antes de começar:**
-- Pergunte ao usuário se ele aprova a tarefa e se quer **commitar o que está staged**.
-- Depois escreva `.orquestra/tarefa.md` no mesmo formato da tarefa de séries: contexto, evidências, passos A–D, regras e resposta final curta.
-- Inclua validação antes → depois com a tabela da Seção 6 + One Piece + um lançamento recente, e exija 0 falsos positivos.
+## 8. Próximo passo (revisão e commit)
+
+Todas as 3 etapas de `.orquestra/tarefa.md` foram concluídas com sucesso.
+1. Propor ao usuário a realização do commit consolidado de todas as melhorias (Partes 1, 1B, 2, 3, 4 e 5).
+2. Mensagem sugerida: "Comet A71: fallback P2P 451, precheck/troca automática, anime absoluto e expansão de fontes".

@@ -1,45 +1,85 @@
-# Tarefa: Séries dubladas PT-BR — achar e corrigir onde o Comet perde temporadas/episódios BR
+# Tarefa (rodada 3, FINAL): rejeitar release de anime que cita OUTRO arco
 
-Contexto: PowerShell em `C:\Users\Vendel\Desktop\Projetos\a71\STREMIO`. Comandos no A71: `.\scripts\a71.ps1 '<cmd>'` / `.\scripts\a71.ps1 -Chroot '<cmd>'`. Comet em `/opt/comet` (git com patch local; veja `git -C /opt/comet diff --stat`). Use `.venv/bin/python`. Reinício: `pkill -f "python -m comet.main"` (watchdog religa ≤30 s). `RTN_FILTER_DEBUG=True` no `.env` liga logs `_log_exclusion` (use só durante o diagnóstico e REMOVA ao final).
+A rodada anterior estourou o tempo só explorando. **Tudo o que você precisa saber já está aqui. NÃO explore; implemente direto.** Tempo-alvo: 15 min.
 
-## Evidências (orquestrador, não refaça — parta daqui)
-Série teste: Breaking Bad `tt0903747`, episódio `1:1`.
-- Torrentio cru (`https://torrentio.strem.fun/stream/series/tt0903747:1:1.json`) retorna 77 streams, incluindo:
-  - linha1 `Breaking Bad 2008 - 1ª Temporada Completa [4k] WWW.BLUDV.COM` / linha2 (arquivo) `Breaking.Bad.S01E01.4K.2160p.WEB-DL.5.1.x264.DUAL-WWW.BLUDV.COM.mkv` / `⚙️ Comando`
-  - linha1 `Breaking Bad 1 Temporada BDRip blruay 720p dublado - derew` / linha2 `1 - Piloto.mp4` / `⚙️ ThePirateBay`
-- O Comet recebe os 77 (log `found 77`), mas NENHUM dos dois chega à tabela `torrents` nem à resposta (`PT-BR: 0` na lista; banco só tem 55 linhas para tt0903747).
-- `filter_worker` isolado (chamado direto em Python com title="Breaking Bad", year=2008, year_end=2013, media_type="series", aliases={}) ACEITA os dois e marca `pt` — então a perda ocorre em outra etapa (aliases reais? `TitleMatcher` com aliases TMDB? checagem de season/episode? global RTN filtering com `rtn_settings_default`? ranking `is_fetchable`? dedup? armazenamento?).
-- `comet/scrapers/torrentio.py::_parse_stream` usa como `title` só a linha do ARQUIVO (última linha antes de `\n💾`), descartando o nome do torrent (linha 1). Para `1 - Piloto.mp4` isso perde o nome da série.
-- RTN `parse()` classifica títulos BR com "Temporada"/"Completa" como `languages=['es']` (ex.: `Breaking Bad 2ª Temporada Completa 1080p Dual Audio` → `['es']`), mas extrai `seasons` corretamente.
+## Contexto
+- Comandos no A71: `.\scripts\a71.ps1 -Chroot '<cmd>'`. O Comet fica em `/opt/comet`; use `.venv/bin/python`.
+- Reinício: `pkill -f "python -m comet.main"`. O watchdog religa em até 30 s.
+- O estado atual já foi aprovado (patch idêntico a `comet-patches\ptbr-first.patch`). Mude APENAS o descrito abaixo.
 
-## Passo A — Rastrear a perda (obrigatório, com prova)
-Com `RTN_FILTER_DEBUG=True`, faça a busca real de `series/tt0903747:1:1` (config b64 modo torrent: `{"debridServices":[],"enableTorrent":true,"cachedOnly":false,"removeTrash":true,"maxResultsPerResolution":0}`; se houver cache, apague as linhas `torrents` de `tt0903747` antes) e encontre EXATAMENTE em que etapa/arquivo/linha cada um dos dois títulos acima é descartado. Instrumente temporariamente se necessário (logs extras), e remova a instrumentação depois. Relate a causa com o trecho de log.
+## Dados (já verificados pelo orquestrador; não reverifique)
+- `anime_mapper.get_kitsu_ids_from_imdb("tt9335498")` → `['41370','45249','44081','45866','47635','44063','45828']`.
+- `anime_mapper.get_kitsu_episode_mapping(k)` → `{'imdb_id': 'tt9335498', 'from_season': N, 'from_episode': M}`. Para Demon Slayer:
 
-## Passo B — Corrigir (mudanças mínimas, no patch existente)
-1. Corrigir a(s) causa(s) encontrada(s) no Passo A.
-2. `torrentio.py::_parse_stream`: quando a linha do arquivo NÃO contém o nome/título reconhecível (ex.: `1 - Piloto.mp4`) e a linha 1 (nome do torrent) contém, usar a linha 1 como `title` (o `fileIndex` continua apontando o arquivo certo). Não mude o comportamento para os casos em que a linha do arquivo já é boa. Explique a heurística.
-3. Na detecção PT-BR (`apply_ptbr_detection`): se o título tem marcador BR de temporada (`\d+ª Temporada`, `Temporada \d+`, `\d+ Temporada`, `Temporada Completa`) E (marcador PT explícito OU tracker BR OU `dual`), garantir `pt` e REMOVER o `es` falso que veio só de "Temporada/Completa" (só remova `es` se não houver marcador espanhol real: `latino|castellano|spanish|esp\b|lat\b`).
-4. Garantir que pacotes de temporada (`seasons=[N]`, `episodes=[]`) apareçam para pedidos de episódio daquela temporada (o Comet já suporta packs — confirme que não há regressão).
+  | kitsu | from_season | from_episode | arco |
+  |---|---|---|---|
+  | 41370 | 1 | 1 | principal |
+  | 45249 | 2 | 1 | Mugen Ressha (TV) |
+  | 44081 | 3 | 1 | Yuukaku |
+  | 45866 | 4 | 1 | Katanakaji no Sato |
+  | 47635 | 5 | 1 | Hashira Geiko |
+  | 44063, 45828 | 0 | — | especiais |
 
-## Passo C — Validar (modo torrent, sem RD)
-Para cada um, PT-BR antes → depois e até 5 títulos PT-BR:
-- `series/tt0903747:1:1` (Breaking Bad), `series/tt0903747:3:5`
-- `series/tt0944947:1:1` (Game of Thrones)
-- `series/tt0121955:1:1` (South Park)
-- `series/tt2861424:1:1` (Rick and Morty)
-- um anime: `series/tt0388629:1:1` (One Piece)
-- regressão filmes: `movie/tt12042730` deve manter ≥13 PT-BR e ordem PT-BR→resolução.
-Confirme 0 falsos positivos (nenhum `Latino`/`Castellano`/`Spanish` marcado PT-BR) e que o `es` foi removido só quando falso.
+- Títulos de cada entrada Kitsu:
+  - `SELECT entry_id FROM anime_ids WHERE provider='kitsu' AND provider_id=:k` → `SELECT data_json FROM anime_entries WHERE id=:entry_id`.
+  - `data_json` é JSON no formato anime-offline-database: use as chaves `title` (str) e `synonyms` (lista de str).
+- One Piece `tt0388629`: só a kitsu `12` tem `from_season=1`; as demais são `from_season=0` (filmes/especiais).
 
-## Passo D — Limpeza, patch, README
-- Remova `RTN_FILTER_DEBUG` do `.env` (PC e A71) e qualquer instrumentação temporária; reinicie o Comet.
-- `py_compile` dos arquivos alterados.
-- Regenere `comet-patches\ptbr-first.patch` (TODO o diff Python, excluindo `comet/templates/index.html`; via `/data/local/tmp` + `adb pull`; LF; apague temporários).
-- README Seção 0: nota curta sobre a correção de séries PT-BR.
+## Implementação
+### 1. Em `comet/services/anime.py` (classe `AnimeMapper`), adicionar:
+```python
+async def get_imdb_arc_titles(self, imdb_id: str) -> list[tuple[int, set[str]]]:
+    """[(from_season, {títulos normalizados}), ...] para cada kitsu do IMDb; cache em dict na instância."""
+```
+- Normalização (`_norm_arc_title`, função de módulo):
+  - NFKD, sem acentos, minúsculas;
+  - `re.sub(r"[^a-z0-9]+", " ", s).strip()`;
+  - devolve `f" {s} "` (com espaço nas pontas, para casar por palavra inteira);
+  - descarte títulos normalizados com menos de 4 letras úteis.
+- Erros ou dados faltando → retorne `[]`.
 
-## Regras
-- Não altere `scripts/`, `comet-ui/`, Caddy, StremThru, Prowlarr, AdGuard.
-- Não imprima chaves.
+### 2. Função de módulo em `anime.py`:
+```python
+def release_cites_other_arc(release_title: str, arcs: list[tuple[int, set[str]]], requested_season: int) -> bool:
+```
+- Normalize `release_title` do mesmo jeito.
+- Para cada `(season, titles)` em `arcs`, para cada título `t`: se `t in release_norm`, registre `(len(t), season)`.
+- Pegue o maior `len`. Se não houver nenhum casamento → `False`.
+- Entre os casamentos com esse comprimento máximo, se algum tem `season == requested_season` → `False`.
+- Senão → `True` (o título mais específico pertence a outro arco ou a um especial).
 
-## Resposta final (máx. 12 linhas)
-Causa exata da perda (etapa/arquivo/linha + log), correções feitas (arquivos), tabela PT-BR antes→depois por título, exemplos, falsos positivos, pendências.
+### 3. Em `comet/services/media_search.py`
+Onde hoje já se calcula `is_anime` / `absolute_episode` para pedido IMDb de episódio: se `is_anime`, calcule `arcs = await anime_mapper.get_imdb_arc_titles(media_only_id)` e passe ao `TorrentManager` (novo kwarg `anime_arcs=arcs`, padrão `None`).
+
+### 4. Em `comet/services/orchestration.py` (`TorrentManager`)
+- Guarde `self.anime_arcs`.
+- No começo de `_matches_requested_scope`:
+  - se `self.is_anime and self.anime_arcs and self.search_season is not None and not parsed.seasons and release_cites_other_arc(parsed.raw_title or "", self.anime_arcs, self.search_season)` → `return False`.
+- Isso já cobre `scrape_torrents` e `_append_cache_file_infos`, que chamam `_matches_requested_scope`. Confirme os dois e não duplique.
+
+Lógica esperada:
+- **T1E1:** `Kimetsu no Yaiba - Hashira Geiko Hen - 01` casa com o título mais longo do arco T5 → rejeita.
+- **T5E1:** `[SubsPlease] Kimetsu no Yaiba - 01` casa só com `kimetsu no yaiba` do arco T1 → rejeita, o que é correto (é o T1E01).
+- **One Piece:** `One Piece - 1071` casa com `one piece` (kitsu 12, T1)… mas o pedido `21:181` tem `search_season=21`, então REJEITARIA.
+  - Para evitar isso: **só aplique a regra se `arcs` tiver ≥ 2 entradas com `season ≥ 1` distintas.** O One Piece tem só 1 e fica fora.
+  - Coloque essa checagem em `get_imdb_arc_titles`: retorne `[]` se houver menos de 2 temporadas ≥ 1 distintas.
+
+## Validação (sem cache: antes de cada pedido, apague as linhas `torrents` do IMDb)
+| Pedido | Exigência |
+|---|---|
+| `series/tt9335498:1:1` | NENHUM título com Hashira, Katanakaji, Yuukaku ou Mugen |
+| `series/tt9335498:5:1` | traz `Hashira Geiko Hen - 01` |
+| `series/tt9335498:3:1` | traz `Yuukaku Hen` e nenhum Hashira/Katanakaji |
+| `series/tt0388629:21:181` | mantém `One Piece - 1071` (≈119 total) |
+| `series/tt0388629:1:1` | total ≈ 336 |
+| `series/tt0903747:1:1` | 9 PT-BR |
+| `movie/tt12042730` | ≥ 13 PT-BR |
+
+## Final
+- Rode `py_compile` e reinicie o Comet.
+- Regenere `comet-patches\ptbr-first.patch` com TODO o diff Python, excluindo `comet/templates/index.html`. Faça via `/data/local/tmp` + `adb pull`, em LF, e apague os temporários.
+- Acrescente 1 linha no README (Seção 0) e no `HANDOFF.md` (Seção 7, item Anime).
+- Não faça commit. Não altere mais nada.
+
+## Resposta final (máx. 8 linhas)
+Arquivos alterados, tabela da validação (total, PT-BR e se passou).
