@@ -77,7 +77,8 @@
 - [x] CAM no fim da lista, addon Store (biblioteca do RD) e fonte BRSites
 - [ ] (Opcional) Usuário instalar o addon Store no Stremio; desinstalar FenixFlix/FrostStream, que agora vêm pelo Comet
 - [ ] Achar mais addons de link direto (como FenixFlix/FrostStream) e somar em `DIRECT_ADDONS_URL`
-- [ ] Legendas PT-BR melhores que o OpenSubtitles PRO (acerto de release e sincronia)
+- [x] Legendas PT-BR no próprio Comet (OpenSubtitles + SubSource + SubDL, escolha pela release do arquivo e sincronia automática)
+- [ ] Usuário reinstalar o Comet no Stremio (recurso de legendas), tirar o OpenSubtitles PRO e trocar a chave do SubDL
 
 ---
 
@@ -100,7 +101,7 @@
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (22 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix, melhorias no Prowlarr, CAM no fim (`DEMOTE_CAM`) scrapers `BRSites` e `Addons` e links diretos mesclados (`DIRECT_ADDONS_URL`) |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (27 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix, melhorias no Prowlarr, CAM no fim (`DEMOTE_CAM`) scrapers `BRSites` e `Addons` links diretos mesclados (`DIRECT_ADDONS_URL`) e legendas PT-BR com sincronia (`subtitles`) |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**

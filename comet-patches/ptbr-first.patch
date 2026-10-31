@@ -1,3 +1,43 @@
+diff --git a/comet/api/app.py b/comet/api/app.py
+index f7832d1..305c367 100644
+--- a/comet/api/app.py
++++ b/comet/api/app.py
+@@ -20,6 +20,7 @@ from comet.api.endpoints import (
+     manifest,
+     playback,
+     prometheus,
++    subtitles,
+     torznab,
+ )
+ from comet.api.endpoints import stream as streams_router
+@@ -270,6 +271,7 @@ stremio_routers = (
+     streams_router.streams,
+     torznab.router,
+     chilllink.router,
++    subtitles.router,
+ )
+ 
+ for stremio_router in stremio_routers:
+diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
+index bce0fec..9244c02 100644
+--- a/comet/api/endpoints/manifest.py
++++ b/comet/api/endpoints/manifest.py
+@@ -39,6 +39,15 @@ async def manifest(request: Request, b64config: str | None = None):
+         "behaviorHints": {"configurable": True, "configurationRequired": False},
+     }
+ 
++    if settings.SUBTITLES_ENABLED:
++        base_manifest["resources"].append(
++            {
++                "name": "subtitles",
++                "types": ["movie", "series"],
++                "idPrefixes": ["tt"],
++            }
++        )
++
+     config = config_check(b64config, strict_b64config=True)
+     if not config:
+         base_manifest["name"] = "❌ | Comet"
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
 index 35b1121..c0e91cf 100644
 --- a/comet/api/endpoints/playback.py
@@ -995,8 +1035,287 @@ index 94f56ae..491fa0f 100644
  
      has_results = len(final_streams) > 0
  
+diff --git a/comet/api/endpoints/subtitles.py b/comet/api/endpoints/subtitles.py
+new file mode 100644
+index 0000000..96f748d
+--- /dev/null
++++ b/comet/api/endpoints/subtitles.py
+@@ -0,0 +1,273 @@
++import asyncio
++import hashlib
++import os
++import time
++import urllib.parse
++from fastapi import APIRouter, HTTPException, Request, Response
++from fastapi.responses import JSONResponse
++
++from comet.core.config_validation import config_check
++from comet.core.logger import logger
++from comet.core.models import settings
++from comet.services.subtitle_sync import align_srt_detail
++from comet.services.subtitles import (
++    DISK_CACHE_TTL,
++    SUBS_CACHE_DIR,
++    fetch_subtitle,
++    search_subtitles,
++)
++
++router = APIRouter()
++
++
++@router.get(
++    "/subtitles/{media_type}/{media_id}.json",
++    tags=["Stremio"],
++    summary="Subtitles Provider",
++    description="Returns a list of subtitles for the specified media.",
++)
++@router.get(
++    "/subtitles/{media_type}/{media_id}/{extra}.json",
++    tags=["Stremio"],
++    summary="Subtitles Provider",
++    description="Returns a list of subtitles for the specified media with extra parameters.",
++)
++@router.get(
++    "/{b64config}/subtitles/{media_type}/{media_id}.json",
++    tags=["Stremio"],
++    summary="Subtitles Provider",
++    description="Returns a list of subtitles with configuration.",
++)
++@router.get(
++    "/{b64config}/subtitles/{media_type}/{media_id}/{extra}.json",
++    tags=["Stremio"],
++    summary="Subtitles Provider",
++    description="Returns a list of subtitles with configuration and extra parameters.",
++)
++async def get_subtitles(
++    request: Request,
++    media_type: str,
++    media_id: str,
++    extra: str | None = None,
++    b64config: str | None = None,
++):
++    if not settings.SUBTITLES_ENABLED:
++        return JSONResponse(
++            content={"subtitles": []},
++            headers={"Cache-Control": "max-age=3600"},
++        )
++
++    try:
++        if b64config:
++            config = config_check(b64config)
++            if not config:
++                return JSONResponse(
++                    content={"subtitles": []},
++                    headers={"Cache-Control": "max-age=3600"},
++                )
++
++        filename = None
++        video_hash = None
++        if extra:
++            parsed = urllib.parse.parse_qs(extra)
++            if "filename" in parsed and parsed["filename"]:
++                filename = parsed["filename"][0]
++            if "videoHash" in parsed and parsed["videoHash"]:
++                video_hash = parsed["videoHash"][0]
++
++        if not filename and "filename" in request.query_params:
++            filename = request.query_params.get("filename")
++        if not video_hash and "videoHash" in request.query_params:
++            video_hash = request.query_params.get("videoHash")
++
++        base_url = (
++            settings.PUBLIC_BASE_URL
++            if settings.PUBLIC_BASE_URL
++            else f"{request.url.scheme}://{request.url.netloc}"
++        )
++
++        subtitles = await search_subtitles(
++            media_type=media_type,
++            media_id=media_id,
++            filename=filename,
++            video_hash=video_hash,
++            base_url=base_url,
++        )
++        return JSONResponse(
++            content={"subtitles": subtitles},
++            headers={"Cache-Control": "max-age=3600"},
++        )
++    except Exception as e:
++        logger.warning(f"Error handling subtitles request: {type(e).__name__}")
++        return JSONResponse(
++            content={"subtitles": []},
++            headers={"Cache-Control": "max-age=3600"},
++        )
++
++
++@router.get(
++    "/subs/{provider}/{sub_id}/{season}/{episode}.srt",
++    tags=["Stremio"],
++    summary="Subtitle Download",
++    description="Downloads the subtitle file in SRT format.",
++)
++@router.get(
++    "/{b64config}/subs/{provider}/{sub_id}/{season}/{episode}.srt",
++    tags=["Stremio"],
++    summary="Subtitle Download",
++    description="Downloads the subtitle file in SRT format with configuration.",
++)
++async def get_subtitle_file(
++    provider: str,
++    sub_id: str,
++    season: int,
++    episode: int,
++    b64config: str | None = None,
++):
++    sub_bytes = await fetch_subtitle(
++        provider=provider,
++        sub_id=sub_id,
++        season=season,
++        episode=episode,
++    )
++    if not sub_bytes:
++        raise HTTPException(status_code=404, detail="Subtitle not found")
++
++    return Response(
++        content=sub_bytes,
++        media_type="application/x-subrip; charset=utf-8",
++        headers={
++            "Access-Control-Allow-Origin": "*",
++            "Cache-Control": "max-age=86400",
++        },
++    )
++
++
++@router.get(
++    "/subs/sync/{provider}/{sub_id}/{season}/{episode}/{ref_provider}/{ref_id}.srt",
++    tags=["Stremio"],
++    summary="Synchronized Subtitle Download",
++    description="Downloads a synchronized subtitle file in SRT format.",
++)
++@router.get(
++    "/{b64config}/subs/sync/{provider}/{sub_id}/{season}/{episode}/{ref_provider}/{ref_id}.srt",
++    tags=["Stremio"],
++    summary="Synchronized Subtitle Download",
++    description="Downloads a synchronized subtitle file in SRT format with configuration.",
++)
++async def get_sync_subtitle_file(
++    provider: str,
++    sub_id: str,
++    season: int,
++    episode: int,
++    ref_provider: str,
++    ref_id: str,
++    b64config: str | None = None,
++):
++    os.makedirs(SUBS_CACHE_DIR, exist_ok=True)
++    cache_key_str = (
++        f"{provider}:{sub_id}:{season}:{episode}:{ref_provider}:{ref_id}"
++    )
++    cache_hash = hashlib.sha1(cache_key_str.encode("utf-8")).hexdigest()
++    sync_cache_file = os.path.join(SUBS_CACHE_DIR, f"sync-{cache_hash}.srt")
++
++    if os.path.exists(sync_cache_file):
++        try:
++            mtime = os.path.getmtime(sync_cache_file)
++            if (time.time() - mtime) < DISK_CACHE_TTL:
++                with open(sync_cache_file, "rb") as f:
++                    cached_bytes = f.read()
++                return Response(
++                    content=cached_bytes,
++                    media_type="application/x-subrip; charset=utf-8",
++                    headers={
++                        "Access-Control-Allow-Origin": "*",
++                        "Cache-Control": "max-age=86400",
++                    },
++                )
++        except Exception:
++            pass
++
++    target_bytes, ref_bytes = await asyncio.gather(
++        fetch_subtitle(
++            provider=provider,
++            sub_id=sub_id,
++            season=season,
++            episode=episode,
++        ),
++        fetch_subtitle(
++            provider=ref_provider,
++            sub_id=ref_id,
++            season=season,
++            episode=episode,
++        ),
++    )
++
++    if not target_bytes:
++        raise HTTPException(status_code=404, detail="Subtitle not found")
++
++    if not ref_bytes:
++        logger.info(
++            f"🗒️ Sync {provider}-{sub_id} com ref {ref_provider}-{ref_id}: não aplicado (ref não encontrada)"
++        )
++        return Response(
++            content=target_bytes,
++            media_type="application/x-subrip; charset=utf-8",
++            headers={
++                "Access-Control-Allow-Origin": "*",
++                "Cache-Control": "max-age=86400",
++            },
++        )
++
++    try:
++        target_srt = target_bytes.decode("utf-8", errors="replace")
++        ref_srt = ref_bytes.decode("utf-8", errors="replace")
++        aligned_srt, stats = await asyncio.to_thread(
++            align_srt_detail, target_srt, ref_srt
++        )
++        if aligned_srt is not None:
++            logger.info(
++                f"🗒️ Sync {provider}-{sub_id} com ref {ref_provider}-{ref_id}: "
++                f"razão {round(stats['ratio'], 4)}, desloc {stats['offset_ms']} ms, "
++                f"encaixe {stats['before']:.2f}→{stats['after']:.2f}"
++            )
++            out_bytes = aligned_srt.encode("utf-8")
++            try:
++                with open(sync_cache_file, "wb") as f:
++                    f.write(out_bytes)
++            except Exception:
++                pass
++            return Response(
++                content=out_bytes,
++                media_type="application/x-subrip; charset=utf-8",
++                headers={
++                    "Access-Control-Allow-Origin": "*",
++                    "Cache-Control": "max-age=86400",
++                },
++            )
++        else:
++            logger.info(
++                f"🗒️ Sync {provider}-{sub_id} com ref {ref_provider}-{ref_id}: "
++                f"não aplicado ({stats['before']:.2f}→{stats['after']:.2f})"
++            )
++            return Response(
++                content=target_bytes,
++                media_type="application/x-subrip; charset=utf-8",
++                headers={
++                    "Access-Control-Allow-Origin": "*",
++                    "Cache-Control": "max-age=86400",
++                },
++            )
++    except Exception as e:
++        logger.warning(
++            f"🗒️ Sync {provider}-{sub_id} com ref {ref_provider}-{ref_id}: "
++            f"erro ({type(e).__name__}), servindo original"
++        )
++        return Response(
++            content=target_bytes,
++            media_type="application/x-subrip; charset=utf-8",
++            headers={
++                "Access-Control-Allow-Origin": "*",
++                "Cache-Control": "max-age=86400",
++            },
++        )
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..eecf5db 100644
+index 835a975..36bb362 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -1020,7 +1339,7 @@ index 835a975..eecf5db 100644
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -317,6 +324,15 @@ class AppSettings(ServerSettings):
+@@ -317,6 +324,21 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -1033,10 +1352,16 @@ index 835a975..eecf5db 100644
 +    P2P_FALLBACK_FOR_BLOCKED: bool = True
 +    DEBRID_PRECHECK: bool = True
 +    DEBRID_PRECHECK_MAX_PER_HOUR: int = 20
++    SUBTITLES_ENABLED: bool = True
++    SUBDL_API_KEY: str | None = None
++    SUBSOURCE_API_KEY: str | None = None
++    OPENSUBTITLES_API_KEY: str | None = None
++    OPENSUBTITLES_USERNAME: str | None = None
++    OPENSUBTITLES_PASSWORD: str | None = None
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,6 +669,8 @@ class AppSettings(ServerSettings):
+@@ -653,6 +675,8 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -3336,6 +3661,1319 @@ index aa43646..5b4013a 100644
  
          episode = None if len(parsed_episodes) > 1 else parsed_episodes[0]
          info_hash = torrent["infoHash"]
+diff --git a/comet/services/subtitle_sync.py b/comet/services/subtitle_sync.py
+new file mode 100644
+index 0000000..114c872
+--- /dev/null
++++ b/comet/services/subtitle_sync.py
+@@ -0,0 +1,188 @@
++import re
++
++SPEED_RATIOS = (
++    1.0,
++    25 / 23.976,
++    23.976 / 25,
++    24 / 23.976,
++    23.976 / 24,
++    25 / 24,
++    24 / 25,
++)
++
++
++def _parse_time(t_str: str) -> int | None:
++    t_str = t_str.strip().replace(".", ",")
++    parts = t_str.split(":")
++    try:
++        if len(parts) == 3:
++            h = int(parts[0])
++            m = int(parts[1])
++            s, ms = parts[2].split(",")
++            return (h * 3600 + m * 60 + int(s)) * 1000 + int((ms + "000")[:3])
++        elif len(parts) == 2:
++            m = int(parts[0])
++            s, ms = parts[1].split(",")
++            return (m * 60 + int(s)) * 1000 + int((ms + "000")[:3])
++    except Exception:
++        return None
++    return None
++
++
++def _format_time(ms: int) -> str:
++    h = ms // 3600000
++    ms %= 3600000
++    m = ms // 60000
++    ms %= 60000
++    s = ms // 1000
++    ms %= 1000
++    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
++
++
++def parse_srt(srt_text: str) -> list[tuple[int, int, str]]:
++    lines = srt_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
++    blocks = []
++    i = 0
++    n = len(lines)
++    while i < n:
++        line = lines[i].strip()
++        if not line:
++            i += 1
++            continue
++        if "-->" in line:
++            time_line = line
++            i += 1
++        elif i + 1 < n and "-->" in lines[i + 1]:
++            time_line = lines[i + 1].strip()
++            i += 2
++        else:
++            i += 1
++            continue
++
++        parts = time_line.split("-->")
++        if len(parts) != 2:
++            continue
++        start_str = parts[0].strip().split()[0]
++        end_str = parts[1].strip().split()[0]
++        start_ms = _parse_time(start_str)
++        end_ms = _parse_time(end_str)
++        if start_ms is None or end_ms is None or start_ms >= end_ms:
++            continue
++
++        text_lines = []
++        while i < n and lines[i].strip() and "-->" not in lines[i]:
++            if i + 1 < n and "-->" in lines[i + 1] and lines[i].strip().isdigit():
++                break
++            text_lines.append(lines[i].strip())
++            i += 1
++        blocks.append((start_ms, end_ms, "\n".join(text_lines)))
++    return blocks
++
++
++def build_bitmask(intervals: list[tuple[int, int]], bin_ms: int) -> int:
++    mask = 0
++    for start_ms, end_ms in intervals:
++        start_bin = max(0, start_ms // bin_ms)
++        end_bin = max(start_bin, (end_ms + bin_ms - 1) // bin_ms)
++        span = end_bin - start_bin
++        if span > 0:
++            mask |= ((1 << span) - 1) << start_bin
++    return mask
++
++
++def align_srt_detail(
++    target_srt: str, reference_srt: str
++) -> tuple[str | None, dict]:
++    target_blocks = parse_srt(target_srt)
++    ref_blocks = parse_srt(reference_srt)
++    if not target_blocks or not ref_blocks:
++        return None, {"ratio": 1.0, "offset_ms": 0, "before": 0.0, "after": 0.0}
++
++    ref_intervals = [(s, e) for s, e, _ in ref_blocks]
++    ref_mask_100 = build_bitmask(ref_intervals, 100)
++
++    best_count = -1
++    best_ratio = 1.0
++    best_k_100 = 0
++
++    for ratio in SPEED_RATIOS:
++        scaled = [
++            (int(round(s * ratio)), int(round(e * ratio)))
++            for s, e, _ in target_blocks
++        ]
++        target_mask_100 = build_bitmask(scaled, 100)
++        for k in range(-1200, 1201):
++            shifted = (
++                (target_mask_100 << k)
++                if k >= 0
++                else (target_mask_100 >> (-k))
++            )
++            c = (ref_mask_100 & shifted).bit_count()
++            if c > best_count:
++                best_count = c
++                best_ratio = ratio
++                best_k_100 = k
++
++    ref_mask_20 = build_bitmask(ref_intervals, 20)
++    scaled_best = [
++        (int(round(s * best_ratio)), int(round(e * best_ratio)))
++        for s, e, _ in target_blocks
++    ]
++    target_mask_20 = build_bitmask(scaled_best, 20)
++
++    center_k_20 = best_k_100 * 5
++    best_count_20 = -1
++    best_k_20 = center_k_20
++    for k_20 in range(center_k_20 - 10, center_k_20 + 11):
++        shifted = (
++            (target_mask_20 << k_20)
++            if k_20 >= 0
++            else (target_mask_20 >> (-k_20))
++        )
++        c = (ref_mask_20 & shifted).bit_count()
++        if c > best_count_20:
++            best_count_20 = c
++            best_k_20 = k_20
++
++    best_offset_ms = best_k_20 * 20
++
++    ref_fala_20 = ref_mask_20.bit_count()
++    target_mask_20_r1 = build_bitmask([(s, e) for s, e, _ in target_blocks], 20)
++    denom_before = min(ref_fala_20, target_mask_20_r1.bit_count())
++    overlap_antes = (
++        ((ref_mask_20 & target_mask_20_r1).bit_count() / denom_before)
++        if denom_before > 0
++        else 0.0
++    )
++
++    denom_after = min(ref_fala_20, target_mask_20.bit_count())
++    overlap_depois = (best_count_20 / denom_after) if denom_after > 0 else 0.0
++
++    stats = {
++        "ratio": best_ratio,
++        "offset_ms": best_offset_ms,
++        "before": round(overlap_antes, 4),
++        "after": round(overlap_depois, 4),
++    }
++
++    if overlap_depois < 0.55 or overlap_depois < (overlap_antes + 0.05):
++        return None, stats
++
++    new_blocks = []
++    for idx, (s, e, text) in enumerate(target_blocks, 1):
++        ns = max(0, int(round(s * best_ratio + best_offset_ms)))
++        ne = max(0, int(round(e * best_ratio + best_offset_ms)))
++        if ne <= ns:
++            ne = ns + max(1, e - s)
++        new_blocks.append(
++            f"{idx}\n{_format_time(ns)} --> {_format_time(ne)}\n{text}\n"
++        )
++    new_srt = "\n".join(new_blocks) + "\n"
++    return new_srt, stats
++
++
++def align_srt(target_srt: str, reference_srt: str) -> tuple[str, dict] | None:
++    res_srt, stats = align_srt_detail(target_srt, reference_srt)
++    if res_srt is None:
++        return None
++    return res_srt, stats
+diff --git a/comet/services/subtitles.py b/comet/services/subtitles.py
+new file mode 100644
+index 0000000..04c67e9
+--- /dev/null
++++ b/comet/services/subtitles.py
+@@ -0,0 +1,1113 @@
++import asyncio
++import base64
++from datetime import datetime, timezone, timedelta
++import gzip
++import hashlib
++import io
++import math
++import os
++import re
++import time
++from typing import Any
++import zipfile
++from curl_cffi.requests import AsyncSession
++
++from comet.core.logger import logger
++from comet.core.models import settings
++
++SUBS_CACHE_DIR = "/opt/comet/data/subs_cache"
++RAW_CACHE_TTL = 6 * 3600
++DISK_CACHE_TTL = 30 * 86400
++
++_RAW_CACHE: dict[tuple, tuple] = {}
++_RAW_CACHE_LOCK = asyncio.Lock()
++
++_OS_TOKEN: str | None = None
++_OS_TOKEN_EXPIRES_AT: float = 0.0
++_OS_TOKEN_LOCK = asyncio.Lock()
++
++_OS_REMAINING: int | None = None
++_OS_RESET_AT: datetime | None = None
++
++
++def _parse_reset_time(val: Any) -> datetime | None:
++    if not val:
++        return None
++    if isinstance(val, (int, float)):
++        return datetime.fromtimestamp(val, tz=timezone.utc)
++    if isinstance(val, str):
++        val = val.strip()
++        for fmt in (
++            "%Y-%m-%d %H:%M:%S",
++            "%Y-%m-%dT%H:%M:%S",
++            "%Y-%m-%dT%H:%M:%SZ",
++            "%Y-%m-%dT%H:%M:%S.%fZ",
++        ):
++            try:
++                dt = datetime.strptime(val, fmt)
++                return dt.replace(tzinfo=timezone.utc)
++            except ValueError:
++                pass
++        try:
++            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
++            if dt.tzinfo is None:
++                dt = dt.replace(tzinfo=timezone.utc)
++            return dt.astimezone(timezone.utc)
++        except Exception:
++            pass
++    return None
++
++
++def _update_os_quota(status_code: int, data: dict):
++    global _OS_REMAINING, _OS_RESET_AT
++    remaining = data.get("remaining")
++    reset_val = data.get("reset_time_utc") or data.get("reset_time")
++    reset_dt = _parse_reset_time(reset_val)
++    if not reset_dt:
++        now = datetime.now(timezone.utc)
++        reset_dt = (now + timedelta(days=1)).replace(
++            hour=0, minute=0, second=0, microsecond=0
++        )
++
++    if status_code == 406 or (remaining is not None and int(remaining) <= 0):
++        _OS_REMAINING = 0
++        _OS_RESET_AT = reset_dt
++        logger.warning(
++            f"OpenSubtitles quota exhausted (status={status_code}, remaining={remaining}) until {_OS_RESET_AT.isoformat()}"
++        )
++    elif status_code == 200 and remaining is not None:
++        try:
++            _OS_REMAINING = int(remaining)
++        except (ValueError, TypeError):
++            pass
++        _OS_RESET_AT = reset_dt
++
++
++def _is_os_exhausted() -> bool:
++    if _OS_RESET_AT:
++        now = datetime.now(timezone.utc)
++        if now < _OS_RESET_AT and (_OS_REMAINING is not None and _OS_REMAINING <= 0):
++            return True
++    return False
++
++
++def get_os_remaining() -> int | None:
++    return _OS_REMAINING
++
++
++def _is_cached(provider: str, sub_id: str, season: int, episode: int) -> bool:
++    hash_key = hashlib.sha1(f"{sub_id}{season}{episode}".encode("utf-8")).hexdigest()
++    cache_file = os.path.join(SUBS_CACHE_DIR, f"{provider}-{hash_key}.srt")
++    if os.path.exists(cache_file):
++        try:
++            mtime = os.path.getmtime(cache_file)
++            if (time.time() - mtime) < DISK_CACHE_TTL:
++                return True
++        except Exception:
++            pass
++    return False
++
++
++def _ass_to_srt(ass_text: str) -> str:
++    lines = ass_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
++    dialogues = []
++    format_indices = {}
++    in_events = False
++
++    for line in lines:
++        line_clean = line.strip()
++        if line_clean.lower() == "[events]":
++            in_events = True
++            continue
++        if in_events:
++            if line_clean.lower().startswith("format:"):
++                headers = [h.strip().lower() for h in line_clean[7:].split(",")]
++                format_indices = {h: i for i, h in enumerate(headers)}
++            elif line_clean.lower().startswith("dialogue:"):
++                payload = line_clean[9:].strip()
++                num_fields = len(format_indices) if format_indices else 10
++                parts = payload.split(",", num_fields - 1)
++                start = None
++                end = None
++                text = ""
++                if (
++                    format_indices
++                    and "start" in format_indices
++                    and "end" in format_indices
++                    and "text" in format_indices
++                ):
++                    si = format_indices["start"]
++                    ei = format_indices["end"]
++                    ti = format_indices["text"]
++                    if len(parts) > max(si, ei, ti):
++                        start = parts[si].strip()
++                        end = parts[ei].strip()
++                        text = parts[ti].strip()
++                else:
++                    if len(parts) >= 10:
++                        start = parts[1].strip()
++                        end = parts[2].strip()
++                        text = parts[9].strip()
++                if start and end and text:
++                    dialogues.append((start, end, text))
++
++    def convert_time(t_str: str) -> str:
++        parts = t_str.split(":")
++        if len(parts) == 3:
++            h, m, rest = parts
++        elif len(parts) == 2:
++            h, m, rest = "0", parts[0], parts[1]
++        else:
++            return "00:00:00,000"
++        if "." in rest:
++            s, cs = rest.split(".", 1)
++            ms = (cs + "000")[:3]
++        else:
++            s, ms = rest, "000"
++        return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{ms}"
++
++    srt_blocks = []
++    idx = 1
++    for start, end, text in dialogues:
++        clean_text = re.sub(r"\{[^}]*\}", "", text)
++        clean_text = (
++            clean_text.replace(r"\N", "\n")
++            .replace(r"\n", "\n")
++            .replace(r"\h", " ")
++            .strip()
++        )
++        if not clean_text:
++            continue
++        start_srt = convert_time(start)
++        end_srt = convert_time(end)
++        srt_blocks.append(f"{idx}\n{start_srt} --> {end_srt}\n{clean_text}\n")
++        idx += 1
++    return "\n".join(srt_blocks)
++
++
++def _vtt_to_srt(vtt_text: str) -> str:
++    lines = vtt_text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
++    srt_blocks = []
++    idx = 1
++    i = 0
++    while i < len(lines):
++        line = lines[i].strip()
++        if "-->" in line:
++            parts = line.split("-->")
++            start = parts[0].strip().split()[0].replace(".", ",")
++            end = parts[1].strip().split()[0].replace(".", ",")
++            if start.count(":") == 1:
++                start = "00:" + start
++            if end.count(":") == 1:
++                end = "00:" + end
++            i += 1
++            text_lines = []
++            while i < len(lines) and lines[i].strip():
++                t = re.sub(r"<[^>]+>", "", lines[i].strip())
++                if t:
++                    text_lines.append(t)
++                i += 1
++            if text_lines:
++                srt_blocks.append(
++                    f"{idx}\n{start} --> {end}\n" + "\n".join(text_lines) + "\n"
++                )
++                idx += 1
++        i += 1
++    return "\n".join(srt_blocks)
++
++
++def _score_release(
++    rel: str,
++    fn: str | None,
++    is_series: bool,
++    season: int,
++    episode: int,
++    is_pack: bool,
++    downloads: int,
++    from_trusted: bool,
++    moviehash_match: bool,
++) -> tuple[float, bool] | None:
++    score = 0.0
++
++    if is_series:
++        ep_matches = re.findall(r"[sS](\d{1,2})[eE](\d{1,2})", rel)
++        if not ep_matches:
++            ep_matches = re.findall(r"\b(\d{1,2})x(\d{1,2})\b", rel)
++        if ep_matches:
++            if any(int(s) == season and int(e) == episode for s, e in ep_matches):
++                score += 50.0
++            else:
++                return None
++        else:
++            score -= 50.0
++
++    if from_trusted:
++        score += 20.0
++
++    score += math.log10(downloads + 1)
++
++    if not fn:
++        return score, False
++
++    if moviehash_match:
++        score += 1000.0
++
++    def _get_group(name: str) -> str | None:
++        base = re.sub(r"\.[a-zA-Z0-9]{2,4}$", "", name.strip())
++        if "-" in base:
++            grp = base.rsplit("-", 1)[1].strip()
++            grp = re.split(r"[\s\[\(\_\.]", grp)[0]
++            if grp:
++                return grp.lower()
++        return None
++
++    grp_fn = _get_group(fn)
++    grp_sub = _get_group(rel)
++    same_group = bool(grp_fn and grp_sub and grp_fn == grp_sub)
++    if same_group:
++        score += 300.0
++
++    def _detect_source(name: str) -> tuple[str | None, str | None]:
++        low = name.lower()
++        for s in ("amzn", "nf", "dsnp", "hmax", "max", "atvp", "pcok", "hulu"):
++            if re.search(rf"\b{s}\b", low):
++                srv = "max" if s == "hmax" else s
++                return srv, "WEB"
++        if re.search(r"\b(web-?dl|webrip|web)\b", low):
++            return None, "WEB"
++        if re.search(r"\b(bluray|bdrip|brrip|remux)\b", low):
++            return None, "BLURAY"
++        if re.search(r"\bhdtv\b", low):
++            return None, "HDTV"
++        return None, None
++
++    srv_fn, cat_fn = _detect_source(fn)
++    srv_sub, cat_sub = _detect_source(rel)
++    same_source = bool(
++        cat_fn is not None and cat_sub is not None and cat_fn == cat_sub
++    )
++    if cat_fn and cat_sub:
++        if srv_fn and srv_sub and srv_fn == srv_sub:
++            score += 150.0
++        elif cat_fn == cat_sub:
++            score += 100.0
++        else:
++            score -= 100.0
++
++    is_exact = bool(moviehash_match or (same_group and same_source))
++
++    def _detect_res(name: str) -> str | None:
++        low = name.lower()
++        for r in ("2160p", "4k", "1080p", "720p", "480p"):
++            if r in low:
++                return "2160p" if r == "4k" else r
++        return None
++
++    res_fn = _detect_res(fn)
++    res_sub = _detect_res(rel)
++    if res_fn and res_sub and res_fn == res_sub:
++        score += 30.0
++
++    title_m = re.split(r"[sS]\d{1,2}[eE]\d{1,2}|\b(19\d\d|20\d\d)\b", fn)
++    title_raw = title_m[0] if title_m else fn
++    title_toks = set(
++        t for t in re.split(r"[^a-zA-Z0-9]+", title_raw.lower()) if t
++    )
++
++    toks_fn = set(
++        t
++        for t in re.split(r"[^a-zA-Z0-9]+", fn.lower())
++        if len(t) > 1 and t not in title_toks
++    )
++    toks_sub = set(
++        t
++        for t in re.split(r"[^a-zA-Z0-9]+", rel.lower())
++        if len(t) > 1 and t not in title_toks
++    )
++    union = toks_fn | toks_sub
++    if union:
++        jaccard = len(toks_fn & toks_sub) / len(union)
++        score += 100.0 * jaccard
++
++    return score, is_exact
++
++
++def _score_item(
++    item: dict,
++    fn: str | None,
++    is_series: bool,
++    season: int,
++    episode: int,
++) -> tuple[float, str, bool] | None:
++    rel_list = item.get("releases") or [item.get("release", "")]
++    best_score = -999999.0
++    best_rel = None
++    best_exact = False
++
++    for rel_name in rel_list:
++        res = _score_release(
++            rel=rel_name,
++            fn=fn,
++            is_series=is_series,
++            season=season,
++            episode=episode,
++            is_pack=bool(item.get("is_pack")),
++            downloads=item.get("downloads", 0),
++            from_trusted=bool(item.get("from_trusted")),
++            moviehash_match=bool(item.get("moviehash_match")),
++        )
++        if res is not None:
++            s, exact = res
++            if s > best_score or (s == best_score and exact and not best_exact):
++                best_score = s
++                best_rel = rel_name
++                best_exact = exact
++
++    if best_rel is None:
++        return None
++
++    # OpenSubtitles disk cache bonus (+40)
++    if item.get("provider") == "opensubtitles":
++        s_code = season if is_series else 0
++        e_code = episode if is_series else 0
++        if _is_cached("opensubtitles", str(item.get("id")), s_code, e_code):
++            best_score += 40.0
++
++    return best_score, best_rel, best_exact
++
++
++async def _fetch_opensubtitles(
++    session: AsyncSession,
++    media_type: str,
++    imdb_id: str,
++    season: int,
++    episode: int,
++    video_hash: str | None,
++) -> list[dict]:
++    if not (
++        settings.OPENSUBTITLES_API_KEY
++        and settings.OPENSUBTITLES_USERNAME
++        and settings.OPENSUBTITLES_PASSWORD
++    ):
++        return []
++
++    headers = {
++        "Api-Key": settings.OPENSUBTITLES_API_KEY,
++        "User-Agent": "CometA71 v1.0",
++        "Content-Type": "application/json",
++        "Accept": "application/json",
++    }
++    clean_id = imdb_id.lower().replace("tt", "").lstrip("0")
++    if not clean_id:
++        return []
++
++    params = {"languages": "pt-br"}
++    if media_type == "series":
++        params["parent_imdb_id"] = clean_id
++        params["season_number"] = season
++        params["episode_number"] = episode
++    else:
++        params["imdb_id"] = clean_id
++
++    if video_hash:
++        params["moviehash"] = video_hash
++
++    try:
++        r = await session.get(
++            "https://api.opensubtitles.com/api/v1/subtitles",
++            headers=headers,
++            params=params,
++            timeout=10.0,
++        )
++        if r.status_code != 200:
++            logger.warning(f"OpenSubtitles search returned status {r.status_code}")
++            return []
++        data = r.json().get("data", [])
++        items = []
++        for entry in data:
++            attr = entry.get("attributes", {})
++            if attr.get("ai_translated") or attr.get("machine_translated"):
++                continue
++            files = attr.get("files", [])
++            if not files or not files[0].get("file_id"):
++                continue
++            file_id = str(files[0]["file_id"])
++            release = attr.get("release") or ""
++            items.append(
++                {
++                    "provider": "opensubtitles",
++                    "id": file_id,
++                    "release": release,
++                    "downloads": int(attr.get("download_count") or 0),
++                    "from_trusted": bool(attr.get("from_trusted")),
++                    "moviehash_match": bool(attr.get("moviehash_match")),
++                    "season": season,
++                    "episode": episode,
++                }
++            )
++        return items
++    except Exception as e:
++        logger.warning(f"OpenSubtitles search failed: {type(e).__name__}")
++        return []
++
++
++async def _fetch_subsource(
++    session: AsyncSession,
++    media_type: str,
++    imdb_id: str,
++    season: int,
++    episode: int,
++    language: str = "brazilian_portuguese",
++) -> list[dict]:
++    if not settings.SUBSOURCE_API_KEY:
++        return []
++
++    headers = {"X-API-Key": settings.SUBSOURCE_API_KEY}
++    search_url = f"https://api.subsource.net/api/v1/movies/search?searchType=imdb&imdb={imdb_id}"
++    if media_type == "series":
++        search_url += f"&season={season}"
++
++    try:
++        r = await session.get(search_url, headers=headers, timeout=10.0)
++        if r.status_code != 200:
++            logger.warning(f"SubSource movie search returned status {r.status_code}")
++            return []
++        movie_data = r.json().get("data", [])
++        movie_id = None
++        if media_type == "series":
++            for m in movie_data:
++                if str(m.get("season")) == str(season):
++                    movie_id = m.get("movieId")
++                    break
++        else:
++            if movie_data:
++                movie_id = movie_data[0].get("movieId")
++
++        if not movie_id:
++            return []
++
++        subs_url = f"https://api.subsource.net/api/v1/subtitles?movieId={movie_id}&language={language}"
++        r_subs = await session.get(subs_url, headers=headers, timeout=10.0)
++        if r_subs.status_code != 200:
++            logger.warning(f"SubSource subtitles search returned status {r_subs.status_code}")
++            return []
++
++        res_json = r_subs.json()
++        raw_subs = res_json.get("data", [])
++        pages = int(res_json.get("pagination", {}).get("pages") or 1)
++        for page in range(2, min(pages + 1, 4)):
++            try:
++                r_p = await session.get(
++                    f"{subs_url}&page={page}",
++                    headers=headers,
++                    timeout=10.0,
++                )
++                if r_p.status_code == 200:
++                    raw_subs.extend(r_p.json().get("data", []))
++            except Exception:
++                break
++
++        items = []
++        for entry in raw_subs:
++            sub_id = entry.get("subtitleId")
++            if not sub_id:
++                continue
++            rel_info = entry.get("releaseInfo", [])
++            if isinstance(rel_info, str):
++                rel_info = [rel_info]
++            elif not isinstance(rel_info, list):
++                rel_info = []
++
++            if media_type == "series":
++                has_target = False
++                has_other = False
++                for r_name in rel_info:
++                    matches = re.findall(r"[sS](\d{1,2})[eE](\d{1,2})", r_name)
++                    if not matches:
++                        matches = re.findall(r"\b(\d{1,2})x(\d{1,2})\b", r_name)
++                    for s_str, e_str in matches:
++                        if int(s_str) == season and int(e_str) == episode:
++                            has_target = True
++                        else:
++                            has_other = True
++                if has_target:
++                    is_pack = False
++                elif not has_target and not has_other:
++                    is_pack = True
++                else:
++                    continue
++            else:
++                is_pack = False
++
++            first_rel = rel_info[0] if rel_info else ""
++            items.append(
++                {
++                    "provider": "subsource",
++                    "id": str(sub_id),
++                    "release": first_rel,
++                    "releases": rel_info,
++                    "downloads": int(entry.get("downloads") or 0),
++                    "from_trusted": False,
++                    "moviehash_match": False,
++                    "season": season,
++                    "episode": episode,
++                    "is_pack": is_pack,
++                }
++            )
++        return items
++    except Exception as e:
++        logger.warning(f"SubSource search failed: {type(e).__name__}")
++        return []
++
++
++async def _fetch_subdl(
++    session: AsyncSession,
++    media_type: str,
++    imdb_id: str,
++    season: int,
++    episode: int,
++    languages: str = "BR_PT",
++) -> list[dict]:
++    if not settings.SUBDL_API_KEY:
++        return []
++
++    params = {
++        "api_key": settings.SUBDL_API_KEY,
++        "imdb_id": imdb_id,
++        "type": "tv" if media_type == "series" else "movie",
++        "languages": languages,
++        "subs_per_page": 30,
++    }
++    if media_type == "series":
++        params["season_number"] = season
++        params["episode_number"] = episode
++
++    try:
++        r = await session.get(
++            "https://api.subdl.com/api/v1/subtitles",
++            params=params,
++            timeout=10.0,
++        )
++        if r.status_code != 200:
++            logger.warning(f"SubDL search returned status {r.status_code}")
++            return []
++        subdl_data = r.json().get("subtitles", [])
++        items = []
++        for entry in subdl_data:
++            url_val = entry.get("url") or ""
++            if not url_val:
++                continue
++            clean_path = url_val.split("?")[0]
++            sub_id = (
++                base64.urlsafe_b64encode(clean_path.encode("utf-8"))
++                .decode("utf-8")
++                .rstrip("=")
++            )
++            items.append(
++                {
++                    "provider": "subdl",
++                    "id": sub_id,
++                    "release": entry.get("release_name") or "",
++                    "downloads": 0,
++                    "from_trusted": False,
++                    "moviehash_match": False,
++                    "season": season,
++                    "episode": episode,
++                    "is_pack": bool(entry.get("full_season")),
++                }
++            )
++        return items
++    except Exception as e:
++        logger.warning(f"SubDL search failed: {type(e).__name__}")
++        return []
++
++
++async def search_subtitles(
++    media_type: str,
++    media_id: str,
++    filename: str | None = None,
++    video_hash: str | None = None,
++    base_url: str = "",
++) -> list[dict]:
++    if not settings.SUBTITLES_ENABLED:
++        return []
++
++    if not media_id or not media_id.startswith("tt"):
++        return []
++
++    is_series = media_type == "series"
++    if is_series:
++        parts = media_id.split(":")
++        if len(parts) < 3:
++            return []
++        imdb_id = parts[0]
++        try:
++            season = int(parts[1])
++            episode = int(parts[2])
++        except ValueError:
++            return []
++    elif media_type == "movie":
++        imdb_id = media_id.split(":")[0]
++        season = 0
++        episode = 0
++    else:
++        return []
++
++    cache_key_pt = (media_type, media_id)
++    cache_key_en = ("ref_en", media_type, media_id)
++    now = time.time()
++
++    async with _RAW_CACHE_LOCK:
++        cached_pt = _RAW_CACHE.get(cache_key_pt)
++        cached_en = _RAW_CACHE.get(cache_key_en)
++
++    need_pt = not (cached_pt and (now - cached_pt[0]) < RAW_CACHE_TTL)
++    need_en = bool(filename) and not (
++        cached_en and (now - cached_en[0]) < RAW_CACHE_TTL
++    )
++
++    if need_pt or need_en:
++        async with AsyncSession(impersonate="chrome") as session:
++            tasks = []
++            if need_pt:
++                tasks.append(
++                    _fetch_opensubtitles(
++                        session, media_type, imdb_id, season, episode, video_hash
++                    )
++                )
++                tasks.append(
++                    _fetch_subsource(
++                        session,
++                        media_type,
++                        imdb_id,
++                        season,
++                        episode,
++                        language="brazilian_portuguese",
++                    )
++                )
++                tasks.append(
++                    _fetch_subdl(
++                        session,
++                        media_type,
++                        imdb_id,
++                        season,
++                        episode,
++                        languages="BR_PT",
++                    )
++                )
++            if need_en:
++                tasks.append(
++                    _fetch_subsource(
++                        session,
++                        media_type,
++                        imdb_id,
++                        season,
++                        episode,
++                        language="english",
++                    )
++                )
++                tasks.append(
++                    _fetch_subdl(
++                        session,
++                        media_type,
++                        imdb_id,
++                        season,
++                        episode,
++                        languages="EN",
++                    )
++                )
++
++            results_fetch = await asyncio.gather(*tasks)
++            t_idx = 0
++            async with _RAW_CACHE_LOCK:
++                if need_pt:
++                    res_os = results_fetch[t_idx]
++                    t_idx += 1
++                    res_ss = results_fetch[t_idx]
++                    t_idx += 1
++                    res_subdl = results_fetch[t_idx]
++                    t_idx += 1
++                    raw_items_pt = res_os + res_ss + res_subdl
++                    os_count = len(res_os)
++                    ss_count = len(res_ss)
++                    subdl_count = len(res_subdl)
++                    _RAW_CACHE[cache_key_pt] = (
++                        now,
++                        raw_items_pt,
++                        os_count,
++                        ss_count,
++                        subdl_count,
++                    )
++                else:
++                    _, raw_items_pt, os_count, ss_count, subdl_count = cached_pt
++
++                if need_en:
++                    res_ss_en = results_fetch[t_idx]
++                    t_idx += 1
++                    res_subdl_en = results_fetch[t_idx]
++                    t_idx += 1
++                    raw_items_en = res_ss_en + res_subdl_en
++                    _RAW_CACHE[cache_key_en] = (
++                        now,
++                        raw_items_en,
++                        0,
++                        len(res_ss_en),
++                        len(res_subdl_en),
++                    )
++                else:
++                    raw_items_en = cached_en[1] if cached_en else []
++    else:
++        _, raw_items_pt, os_count, ss_count, subdl_count = cached_pt
++        raw_items_en = cached_en[1] if cached_en else []
++
++    s_code = season if is_series else 0
++    e_code = episode if is_series else 0
++
++    is_exhausted = _is_os_exhausted()
++    filtered_raw_pt = []
++    for item in raw_items_pt:
++        if item.get("provider") == "opensubtitles" and is_exhausted:
++            if not _is_cached(
++                "opensubtitles", str(item.get("id")), s_code, e_code
++            ):
++                continue
++        filtered_raw_pt.append(item)
++
++    scored_ptbr = []
++    seen_pt = set()
++    for item in filtered_raw_pt:
++        key = (item.get("provider"), item.get("id"))
++        if key in seen_pt:
++            continue
++        score_res = _score_item(item, filename, is_series, season, episode)
++        if score_res is not None:
++            seen_pt.add(key)
++            score, chosen_rel, is_exact = score_res
++            scored_ptbr.append((score, chosen_rel, is_exact, item))
++
++    scored_ptbr.sort(key=lambda x: x[0], reverse=True)
++
++    if not base_url:
++        base_url = settings.PUBLIC_BASE_URL or "http://127.0.0.1:8000"
++    base_url = base_url.rstrip("/")
++
++    sync_variants = []
++    first_is_exact = scored_ptbr[0][2] if scored_ptbr else False
++
++    if filename and scored_ptbr and not first_is_exact:
++        ref_candidates = []
++        for s_val, c_rel, exact_val, it in scored_ptbr:
++            if exact_val and it.get("provider") != "opensubtitles":
++                ref_candidates.append((s_val, it))
++
++        for it_en in raw_items_en:
++            if it_en.get("provider") == "opensubtitles":
++                continue
++            en_res = _score_item(it_en, filename, is_series, season, episode)
++            if en_res is not None:
++                s_en, _, exact_en = en_res
++                if exact_en:
++                    ref_candidates.append((s_en, it_en))
++
++        if ref_candidates:
++            ref_candidates.sort(key=lambda x: x[0], reverse=True)
++            best_ref_item = ref_candidates[0][1]
++            ref_provider = best_ref_item["provider"]
++            ref_id = best_ref_item["id"]
++
++            non_exact_ptbr = [entry for entry in scored_ptbr if not entry[2]]
++            for _, _, _, t_item in non_exact_ptbr[:2]:
++                sync_url = (
++                    f"{base_url}/subs/sync/{t_item['provider']}/{t_item['id']}/"
++                    f"{s_code}/{e_code}/{ref_provider}/{ref_id}.srt"
++                )
++                sync_variants.append(
++                    {
++                        "id": f"sync-{t_item['provider']}-{t_item['id']}",
++                        "url": sync_url,
++                        "lang": "pob",
++                    }
++                )
++
++    top_release = "none"
++    if scored_ptbr:
++        top_release = (
++            scored_ptbr[0][1] or scored_ptbr[0][3].get("release") or "unknown"
++        )
++
++    results = []
++    results.extend(sync_variants)
++
++    seen = set()
++    for score, chosen_rel, is_exact, item in scored_ptbr:
++        key = (item["provider"], item["id"])
++        if key in seen:
++            continue
++        seen.add(key)
++        sub_url = (
++            f"{base_url}/subs/{item['provider']}/{item['id']}/{s_code}/{e_code}.srt"
++        )
++        results.append(
++            {
++                "id": f"{item['provider']}-{item['id']}",
++                "url": sub_url,
++                "lang": "pob",
++            }
++        )
++        if len(results) >= 12:
++            break
++
++    results = results[:12]
++
++    logger.info(
++        f"🗒️ Legendas {media_id}: OS {os_count}, SubSource {ss_count}, SubDL {subdl_count} → {len(results)} (top: {top_release})"
++    )
++    return results
++
++
++async def _get_opensubtitles_token(session: AsyncSession) -> str | None:
++    global _OS_TOKEN, _OS_TOKEN_EXPIRES_AT
++    now = time.time()
++    if _OS_TOKEN and now < _OS_TOKEN_EXPIRES_AT:
++        return _OS_TOKEN
++
++    async with _OS_TOKEN_LOCK:
++        now = time.time()
++        if _OS_TOKEN and now < _OS_TOKEN_EXPIRES_AT:
++            return _OS_TOKEN
++        if not (
++            settings.OPENSUBTITLES_API_KEY
++            and settings.OPENSUBTITLES_USERNAME
++            and settings.OPENSUBTITLES_PASSWORD
++        ):
++            return None
++        try:
++            r = await session.post(
++                "https://api.opensubtitles.com/api/v1/login",
++                json={
++                    "username": settings.OPENSUBTITLES_USERNAME,
++                    "password": settings.OPENSUBTITLES_PASSWORD,
++                },
++                headers={
++                    "Api-Key": settings.OPENSUBTITLES_API_KEY,
++                    "User-Agent": "CometA71 v1.0",
++                    "Content-Type": "application/json",
++                    "Accept": "application/json",
++                },
++                timeout=10.0,
++            )
++            if r.status_code == 200:
++                data = r.json()
++                _OS_TOKEN = data.get("token")
++                _OS_TOKEN_EXPIRES_AT = time.time() + 12 * 3600
++                return _OS_TOKEN
++            else:
++                logger.warning(
++                    f"OpenSubtitles login returned status {r.status_code}"
++                )
++                return None
++        except Exception as e:
++            logger.warning(f"OpenSubtitles login failed: {type(e).__name__}")
++            return None
++
++
++async def fetch_subtitle(
++    provider: str,
++    sub_id: str,
++    season: int,
++    episode: int,
++) -> bytes | None:
++    os.makedirs(SUBS_CACHE_DIR, exist_ok=True)
++    hash_key = hashlib.sha1(f"{sub_id}{season}{episode}".encode("utf-8")).hexdigest()
++    cache_file = os.path.join(SUBS_CACHE_DIR, f"{provider}-{hash_key}.srt")
++
++    if os.path.exists(cache_file):
++        try:
++            mtime = os.path.getmtime(cache_file)
++            if (time.time() - mtime) < DISK_CACHE_TTL:
++                with open(cache_file, "rb") as f:
++                    return f.read()
++        except Exception:
++            pass
++
++    raw_content = None
++    async with AsyncSession(impersonate="chrome") as session:
++        try:
++            if provider == "opensubtitles":
++                if _is_os_exhausted():
++                    logger.warning("OpenSubtitles download skipped: quota currently exhausted")
++                    return None
++                token = await _get_opensubtitles_token(session)
++                if not token:
++                    return None
++                headers = {
++                    "Api-Key": settings.OPENSUBTITLES_API_KEY,
++                    "Authorization": f"Bearer {token}",
++                    "User-Agent": "CometA71 v1.0",
++                    "Content-Type": "application/json",
++                    "Accept": "application/json",
++                }
++                r = await session.post(
++                    "https://api.opensubtitles.com/api/v1/download",
++                    json={"file_id": int(sub_id)},
++                    headers=headers,
++                    timeout=10.0,
++                )
++                res_data = {}
++                try:
++                    res_data = r.json()
++                except Exception:
++                    pass
++                _update_os_quota(r.status_code, res_data)
++
++                if r.status_code != 200:
++                    logger.warning(
++                        f"OpenSubtitles download failed with status {r.status_code}"
++                    )
++                    return None
++                dl_link = res_data.get("link")
++                if not dl_link:
++                    return None
++                r_file = await session.get(dl_link, timeout=15.0)
++                if r_file.status_code == 200:
++                    raw_content = r_file.content
++
++            elif provider == "subsource":
++                headers = {"X-API-Key": settings.SUBSOURCE_API_KEY}
++                r = await session.get(
++                    f"https://api.subsource.net/api/v1/subtitles/{sub_id}/download",
++                    headers=headers,
++                    timeout=15.0,
++                )
++                if r.status_code == 200:
++                    raw_content = r.content
++
++            elif provider == "subdl":
++                pad = len(sub_id) % 4
++                clean_path = base64.urlsafe_b64decode(
++                    sub_id + ("=" * (4 - pad) if pad else "")
++                ).decode("utf-8")
++                if not clean_path.startswith("/"):
++                    clean_path = "/" + clean_path
++                url = f"https://dl.subdl.com{clean_path}?api_key={settings.SUBDL_API_KEY}"
++                r = await session.get(url, timeout=15.0)
++                if r.status_code == 200:
++                    raw_content = r.content
++        except Exception as e:
++            logger.warning(
++                f"Fetch subtitle network error ({provider}): {type(e).__name__}"
++            )
++            return None
++
++    if not raw_content:
++        return None
++
++    if raw_content.startswith(b"\x1f\x8b"):
++        try:
++            raw_content = gzip.decompress(raw_content)
++        except Exception:
++            pass
++
++    sub_bytes = None
++    sub_ext = ".srt"
++    if raw_content.startswith(b"PK\x03\x04") or zipfile.is_zipfile(
++        io.BytesIO(raw_content)
++    ):
++        try:
++            zf = zipfile.ZipFile(io.BytesIO(raw_content))
++            namelist = [
++                n
++                for n in zf.namelist()
++                if not n.startswith("__MACOSX")
++                and not n.endswith("/")
++                and not os.path.basename(n).startswith(".")
++            ]
++            candidates = [
++                n
++                for n in namelist
++                if n.lower().endswith((".srt", ".ass", ".ssa", ".vtt"))
++            ]
++            if not candidates:
++                return None
++
++            selected_file = None
++            if season > 0 and episode > 0:
++                pat1 = f"s{season:02d}e{episode:02d}"
++                pat2 = f"{season}x{episode:02d}"
++                pat3 = f"s{season}e{episode}"
++                matching_srts = [
++                    f
++                    for f in candidates
++                    if f.lower().endswith(".srt")
++                    and (pat1 in f.lower() or pat2 in f.lower() or pat3 in f.lower())
++                ]
++                if matching_srts:
++                    matching_srts.sort(
++                        key=lambda x: zf.getinfo(x).file_size, reverse=True
++                    )
++                    selected_file = matching_srts[0]
++                else:
++                    matching_any = [
++                        f
++                        for f in candidates
++                        if (
++                            pat1 in f.lower()
++                            or pat2 in f.lower()
++                            or pat3 in f.lower()
++                        )
++                    ]
++                    if matching_any:
++                        matching_any.sort(
++                            key=lambda x: zf.getinfo(x).file_size, reverse=True
++                        )
++                        selected_file = matching_any[0]
++
++            if not selected_file:
++                all_srts = [f for f in candidates if f.lower().endswith(".srt")]
++                if all_srts:
++                    all_srts.sort(
++                        key=lambda x: zf.getinfo(x).file_size, reverse=True
++                    )
++                    selected_file = all_srts[0]
++                else:
++                    candidates.sort(
++                        key=lambda x: zf.getinfo(x).file_size, reverse=True
++                    )
++                    selected_file = candidates[0]
++
++            sub_bytes = zf.read(selected_file)
++            sub_ext = os.path.splitext(selected_file)[1].lower()
++        except Exception as e:
++            logger.warning(f"Error extracting zip subtitle: {type(e).__name__}")
++            return None
++    else:
++        sub_bytes = raw_content
++
++    text = None
++    for enc in ("utf-8-sig", "cp1252", "latin-1"):
++        try:
++            text = sub_bytes.decode(enc)
++            break
++        except UnicodeDecodeError:
++            continue
++    if text is None:
++        text = sub_bytes.decode("latin-1", errors="replace")
++
++    if sub_ext in (".ass", ".ssa"):
++        text = _ass_to_srt(text)
++    elif sub_ext == ".vtt":
++        text = _vtt_to_srt(text)
++
++    text = text.replace("\r\n", "\n").replace("\r", "\n")
++
++    if text.count("-->") < 20:
++        return None
++
++    final_bytes = text.encode("utf-8")
++    try:
++        with open(cache_file, "wb") as f:
++            f.write(final_bytes)
++    except Exception:
++        pass
++
++    return final_bytes
 diff --git a/comet/utils/parsing.py b/comet/utils/parsing.py
 index 63f895c..bc3c3c0 100644
 --- a/comet/utils/parsing.py
