@@ -1,28 +1,139 @@
 diff --git a/comet/api/app.py b/comet/api/app.py
-index f7832d1..305c367 100644
+index f7832d1..b375b29 100644
 --- a/comet/api/app.py
 +++ b/comet/api/app.py
-@@ -20,6 +20,7 @@ from comet.api.endpoints import (
+@@ -11,6 +11,7 @@ from starlette.requests import Request
+ from comet.api.endpoints import (
+     admin,
+     base,
++    catalog,
+     chilllink,
+     cometnet,
+     cometnet_ui,
+@@ -18,8 +19,10 @@ from comet.api.endpoints import (
+     debrid_sync,
+     kodi,
      manifest,
++    meta,
      playback,
      prometheus,
 +    subtitles,
      torznab,
  )
  from comet.api.endpoints import stream as streams_router
-@@ -270,6 +271,7 @@ stremio_routers = (
+@@ -270,6 +273,9 @@ stremio_routers = (
      streams_router.streams,
      torznab.router,
      chilllink.router,
 +    subtitles.router,
++    catalog.router,
++    meta.router,
  )
  
  for stremio_router in stremio_routers:
+diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
+new file mode 100644
+index 0000000..8311d24
+--- /dev/null
++++ b/comet/api/endpoints/catalog.py
+@@ -0,0 +1,84 @@
++import urllib.parse
++from fastapi import APIRouter, Request
++from fastapi.responses import JSONResponse
++
++from comet.core.config_validation import config_check
++from comet.core.logger import logger
++from comet.core.models import settings
++from comet.services.catalogs import get_catalog
++
++router = APIRouter()
++
++
++@router.get(
++    "/catalog/{type}/{id}.json",
++    tags=["Stremio"],
++    summary="Catalog Provider",
++    description="Returns catalog metadata for the specified media.",
++)
++@router.get(
++    "/catalog/{type}/{id}/{extra}.json",
++    tags=["Stremio"],
++    summary="Catalog Provider",
++    description="Returns catalog metadata with extra parameters.",
++)
++@router.get(
++    "/{b64config}/catalog/{type}/{id}.json",
++    tags=["Stremio"],
++    summary="Catalog Provider",
++    description="Returns catalog metadata with configuration.",
++)
++@router.get(
++    "/{b64config}/catalog/{type}/{id}/{extra}.json",
++    tags=["Stremio"],
++    summary="Catalog Provider",
++    description="Returns catalog metadata with configuration and extra parameters.",
++)
++async def get_catalog_endpoint(
++    request: Request,
++    type: str,
++    id: str,
++    extra: str | None = None,
++    b64config: str | None = None,
++):
++    if not settings.CATALOGS_ENABLED:
++        return JSONResponse(
++            content={"metas": []},
++            headers={"Cache-Control": "public, max-age=3600"},
++        )
++
++    try:
++        if b64config:
++            config = config_check(b64config)
++            if not config:
++                return JSONResponse(
++                    content={"metas": []},
++                    headers={"Cache-Control": "public, max-age=3600"},
++                )
++
++        extra_dict = {}
++        if extra:
++            parsed = urllib.parse.parse_qs(extra)
++            for k, v in parsed.items():
++                if v:
++                    extra_dict[k] = v[0]
++
++        for k, v in request.query_params.items():
++            if k not in extra_dict:
++                extra_dict[k] = v
++
++        metas = await get_catalog(
++            media_type=type,
++            catalog_id=id,
++            extra=extra_dict,
++        )
++        return JSONResponse(
++            content={"metas": metas},
++            headers={"Cache-Control": "public, max-age=3600"},
++        )
++    except Exception as e:
++        logger.warning(f"Error handling catalog request: {type(e).__name__}")
++        return JSONResponse(
++            content={"metas": []},
++            headers={"Cache-Control": "public, max-age=3600"},
++        )
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
-index bce0fec..9244c02 100644
+index bce0fec..e106d6a 100644
 --- a/comet/api/endpoints/manifest.py
 +++ b/comet/api/endpoints/manifest.py
-@@ -39,6 +39,15 @@ async def manifest(request: Request, b64config: str | None = None):
+@@ -3,6 +3,7 @@ from fastapi import APIRouter, Request
+ from comet.core.config_validation import config_check
+ from comet.core.models import settings
+ from comet.debrid.manager import build_addon_name
++from comet.services.catalogs import build_manifest_catalogs
+ from comet.utils.cache import CachePolicies, cached_json_response
+ 
+ router = APIRouter()
+@@ -39,6 +40,26 @@ async def manifest(request: Request, b64config: str | None = None):
          "behaviorHints": {"configurable": True, "configurationRequired": False},
      }
  
@@ -35,9 +146,83 @@ index bce0fec..9244c02 100644
 +            }
 +        )
 +
++    if settings.CATALOGS_ENABLED:
++        base_manifest["catalogs"] = build_manifest_catalogs()
++        base_manifest["resources"].append("catalog")
++        base_manifest["resources"].append(
++            {
++                "name": "meta",
++                "types": ["movie", "series"],
++                "idPrefixes": ["tt"],
++            }
++        )
++
      config = config_check(b64config, strict_b64config=True)
      if not config:
          base_manifest["name"] = "❌ | Comet"
+diff --git a/comet/api/endpoints/meta.py b/comet/api/endpoints/meta.py
+new file mode 100644
+index 0000000..0b24340
+--- /dev/null
++++ b/comet/api/endpoints/meta.py
+@@ -0,0 +1,57 @@
++from fastapi import APIRouter, Request
++from fastapi.responses import JSONResponse
++
++from comet.core.config_validation import config_check
++from comet.core.logger import logger
++from comet.services.meta_ptbr import get_meta_ptbr
++
++router = APIRouter()
++
++
++@router.get(
++    "/meta/{type}/{id}.json",
++    tags=["Stremio"],
++    summary="Meta Provider",
++    description="Returns metadata in PT-BR for the specified media.",
++)
++@router.get(
++    "/{b64config}/meta/{type}/{id}.json",
++    tags=["Stremio"],
++    summary="Meta Provider",
++    description="Returns metadata in PT-BR with configuration.",
++)
++async def get_meta_endpoint(
++    request: Request,
++    type: str,
++    id: str,
++    b64config: str | None = None,
++):
++    clean_id = id.removesuffix(".json")
++    if type not in ("movie", "series") or not clean_id.startswith("tt"):
++        return JSONResponse(
++            content={"meta": None},
++            headers={"Cache-Control": "public, max-age=21600"},
++        )
++
++    try:
++        if b64config:
++            config = config_check(b64config)
++            if not config:
++                return JSONResponse(
++                    content={"meta": None},
++                    headers={"Cache-Control": "public, max-age=21600"},
++                )
++
++        meta = await get_meta_ptbr(type, clean_id)
++        return JSONResponse(
++            content={"meta": meta},
++            headers={"Cache-Control": "public, max-age=21600"},
++        )
++    except Exception as e:
++        logger.warning(
++            f"Error handling meta request for {type}/{id}: {type(e).__name__}"
++        )
++        return JSONResponse(
++            content={"meta": None},
++            headers={"Cache-Control": "public, max-age=21600"},
++        )
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
 index 35b1121..c0e91cf 100644
 --- a/comet/api/endpoints/playback.py
@@ -304,11 +489,12 @@ index 35b1121..c0e91cf 100644
          if not download_url:
              return build_status_video_response(
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..491fa0f 100644
+index 94f56ae..79337a1 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
-@@ -1,13 +1,21 @@
+@@ -1,13 +1,23 @@
 +import asyncio
++import datetime
  from collections import defaultdict
  from urllib.parse import quote
  
@@ -320,6 +506,7 @@ index 94f56ae..491fa0f 100644
 +    build_json_list_membership_predicate,
 +    encode_json_param,
 +)
++from comet.services.subtitles import remember_pt_filename
 +from comet.core.models import database, settings
  from comet.debrid.manager import get_debrid_extension
  from comet.observability import metrics
@@ -330,7 +517,7 @@ index 94f56ae..491fa0f 100644
  from comet.services.trackers import trackers
  from comet.utils.cache import CachePolicies, cached_json_response
  from comet.utils.formatting import (
-@@ -33,6 +41,19 @@ RESOLUTION_TO_DIMENSIONS = {
+@@ -33,6 +43,19 @@ RESOLUTION_TO_DIMENSIONS = {
      "240P": (240, 320),
  }
  
@@ -350,7 +537,7 @@ index 94f56ae..491fa0f 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -125,6 +146,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +148,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -388,7 +575,7 @@ index 94f56ae..491fa0f 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +184,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +186,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -397,7 +584,7 @@ index 94f56ae..491fa0f 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +207,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +209,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -488,7 +675,7 @@ index 94f56ae..491fa0f 100644
      return selected_info_hashes
  
  
-@@ -247,6 +349,22 @@ async def stream(
+@@ -247,6 +351,22 @@ async def stream(
              cache_policy=response_cache_policy,
          )
  
@@ -511,7 +698,7 @@ index 94f56ae..491fa0f 100644
      search_result = await search_media(
          media_type,
          media_id,
-@@ -257,6 +375,8 @@ async def stream(
+@@ -257,6 +377,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -520,11 +707,20 @@ index 94f56ae..491fa0f 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +390,80 @@ async def stream(
+@@ -270,53 +392,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
 -        return _stream_response(
++        if search_result.air_date:
++            try:
++                d = datetime.date.fromisoformat(search_result.air_date).strftime("%d/%m/%Y")
++                desc = "Episódio ainda não lançado." + chr(10) + f"Estreia em {d}."
++            except Exception:
++                desc = "Episódio ainda não lançado." + chr(10) + f"Estreia em {search_result.air_date}."
++        else:
++            desc = "Ainda não lançado."
++
 +        notice = [
              {
 -                "streams": [
@@ -535,25 +731,29 @@ index 94f56ae..491fa0f 100644
 -                        "description": "Content not digitally released yet.",
 -                        "url": "https://comet.feels.legal",
 -                    }
--                ]
--            },
 +                "name": _stream_notice_name(
-+                    kodi, "[🚫] Comet", "[BLOCKED] Comet"
++                    kodi, "[⏳] Comet", "[UNRELEASED] Comet"
 +                ),
-+                "description": "Content not digitally released yet.",
++                "description": desc,
 +                "url": "https://comet.feels.legal",
 +            }
 +        ]
-+        direct_streams = await _get_direct_streams()
-+        if direct_streams:
-+            clean_direct = [
-+                {k: v for k, v in s.items() if k != "_is_pt"}
-+                for s in direct_streams
-+            ]
-+            return _stream_response(
-+                {"streams": notice + clean_direct},
-+                is_empty=False,
-+            )
++        if not (media_type == "series" and search_result.air_date):
++            direct_streams = await _get_direct_streams()
++            if direct_streams:
++                clean_direct = [
++                    {k: v for k, v in s.items() if k != "_is_pt"}
++                    for s in direct_streams
+                 ]
+-            },
++                return _stream_response(
++                    {"streams": notice + clean_direct},
++                    is_empty=False,
++                )
++        else:
++            if direct_task and not direct_task.done():
++                direct_task.cancel()
++
 +        return _stream_response(
 +            {"streams": notice},
              is_empty=True,
@@ -637,7 +837,7 @@ index 94f56ae..491fa0f 100644
              is_empty=True,
          )
  
-@@ -329,7 +476,7 @@ async def stream(
+@@ -329,7 +492,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -646,7 +846,7 @@ index 94f56ae..491fa0f 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +484,7 @@ async def stream(
+@@ -337,6 +500,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -654,7 +854,7 @@ index 94f56ae..491fa0f 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +496,7 @@ async def stream(
+@@ -348,7 +512,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -663,7 +863,7 @@ index 94f56ae..491fa0f 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +526,7 @@ async def stream(
+@@ -378,7 +542,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -672,7 +872,7 @@ index 94f56ae..491fa0f 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +541,40 @@ async def stream(
+@@ -393,8 +557,40 @@ async def stream(
                  }
              )
  
@@ -714,7 +914,7 @@ index 94f56ae..491fa0f 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +582,29 @@ async def stream(
+@@ -402,18 +598,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -736,6 +936,8 @@ index 94f56ae..491fa0f 100644
          torrent = torrents[info_hash]
          rtn_data = torrent["parsed"]
 +        is_pt = "pt" in (getattr(rtn_data, "languages", None) or ())
++        if is_pt:
++            remember_pt_filename(rtn_data.raw_title)
 +        is_cam = bool(settings.DEMOTE_CAM and is_cam_release(rtn_data))
 +        res_rank = _PTBR_RESOLUTION_ORDER.get(
 +            str(getattr(rtn_data, "resolution", "")).lower(), 8
@@ -746,7 +948,7 @@ index 94f56ae..491fa0f 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -432,6 +623,82 @@ async def stream(
+@@ -432,6 +641,82 @@ async def stream(
          for entry_index, service, debrid_extension in debrid_stream_specs:
              if service in debrid_errors:
                  continue
@@ -829,7 +1031,7 @@ index 94f56ae..491fa0f 100644
  
              is_cached = (
                  info_hash_cache_status.get(service, False)
-@@ -463,12 +730,21 @@ async def stream(
+@@ -463,12 +748,21 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -851,7 +1053,7 @@ index 94f56ae..491fa0f 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(
-@@ -479,23 +755,35 @@ async def stream(
+@@ -479,23 +773,35 @@ async def stream(
              file_index_str = (
                  str(file_index) if is_cached and file_index is not None else "n"
              )
@@ -890,7 +1092,7 @@ index 94f56ae..491fa0f 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|torrent|{info_hash}",
-@@ -515,6 +803,10 @@ async def stream(
+@@ -515,6 +821,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -901,7 +1103,7 @@ index 94f56ae..491fa0f 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +814,11 @@ async def stream(
+@@ -522,6 +832,11 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -913,7 +1115,7 @@ index 94f56ae..491fa0f 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +830,117 @@ async def stream(
+@@ -533,12 +848,117 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -921,7 +1123,9 @@ index 94f56ae..491fa0f 100644
 +            cached_results.append(
 +                (the_stream, is_pt, res_rank, 1, rank_idx, seed_key, is_cam)
 +            )
-+
+ 
+-    if sort_mixed:
+-        final_streams = cached_results
 +    ordered_entries = (
 +        cached_results if sort_mixed else cached_results + non_cached_results
 +    )
@@ -936,9 +1140,7 @@ index 94f56ae..491fa0f 100644
 +        for s in direct_streams
 +        if not s.get("_is_pt")
 +    ]
- 
--    if sort_mixed:
--        final_streams = cached_results
++
 +    if settings.DEMOTE_CAM:
 +        if settings.PTBR_FIRST:
 +            pt_good = [entry for entry in ordered_entries if entry[1] and not entry[6]]
@@ -1037,10 +1239,10 @@ index 94f56ae..491fa0f 100644
  
 diff --git a/comet/api/endpoints/subtitles.py b/comet/api/endpoints/subtitles.py
 new file mode 100644
-index 0000000..96f748d
+index 0000000..8b4bca0
 --- /dev/null
 +++ b/comet/api/endpoints/subtitles.py
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,296 @@
 +import asyncio
 +import hashlib
 +import os
@@ -1049,6 +1251,10 @@ index 0000000..96f748d
 +from fastapi import APIRouter, HTTPException, Request, Response
 +from fastapi.responses import JSONResponse
 +
++from RTN import parse
++
++from comet.services.subtitles import is_known_pt_filename
++from comet.services.filtering import apply_ptbr_detection
 +from comet.core.config_validation import config_check
 +from comet.core.logger import logger
 +from comet.core.models import settings
@@ -1122,6 +1328,25 @@ index 0000000..96f748d
 +            filename = request.query_params.get("filename")
 +        if not video_hash and "videoHash" in request.query_params:
 +            video_hash = request.query_params.get("videoHash")
++
++        if filename:
++            is_pt = ".direct.PTBR" in filename or is_known_pt_filename(filename)
++            if not is_pt:
++                try:
++                    rtn_data = parse(filename)
++                    try:
++                        apply_ptbr_detection(rtn_data, filename)
++                    except Exception:
++                        pass
++                    is_pt = "pt" in (getattr(rtn_data, "languages", None) or ())
++                except Exception:
++                    is_pt = False
++            if is_pt:
++                logger.info(f"🗒️ Legendas puladas (áudio PT): {filename[:80]}")
++                return JSONResponse(
++                    content={"subtitles": []},
++                    headers={"Cache-Control": "max-age=3600"},
++                )
 +
 +        base_url = (
 +            settings.PUBLIC_BASE_URL
@@ -1315,7 +1540,7 @@ index 0000000..96f748d
 +            },
 +        )
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..36bb362 100644
+index 835a975..ffab4e6 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -1339,7 +1564,7 @@ index 835a975..36bb362 100644
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -317,6 +324,21 @@ class AppSettings(ServerSettings):
+@@ -317,6 +324,34 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -1358,18 +1583,51 @@ index 835a975..36bb362 100644
 +    OPENSUBTITLES_API_KEY: str | None = None
 +    OPENSUBTITLES_USERNAME: str | None = None
 +    OPENSUBTITLES_PASSWORD: str | None = None
++    CATALOGS_ENABLED: bool = True
++    CATALOG_REGION: str = "BR"
++    CATALOG_LANGUAGE: str = "pt-BR"
++    CATALOG_PROVIDERS: str | list[str] = [
++        "netflix",
++        "prime",
++        "disney",
++        "max",
++        "apple",
++        "paramount",
++        "globoplay",
++        "crunchyroll",
++    ]
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,6 +675,8 @@ class AppSettings(ServerSettings):
+@@ -653,12 +688,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
 +        "ADDONS_URL",
 +        "DIRECT_ADDONS_URL",
++        "CATALOG_PROVIDERS",
      )
      def normalize_urls(cls, v):
          if isinstance(v, str):
++            v_stripped = v.strip()
++            if v_stripped.startswith("[") and v_stripped.endswith("]"):
++                try:
++                    import json
++
++                    parsed = json.loads(v_stripped)
++                    if isinstance(parsed, list):
++                        return [str(u).rstrip("/") for u in parsed]
++                except Exception:
++                    pass
++            elif "," in v:
++                return [p.strip().rstrip("/") for p in v.split(",") if p.strip()]
+             return v.rstrip("/")
+         elif isinstance(v, list):
+-            return [url.rstrip("/") for url in v]
++            return [url.rstrip("/") if isinstance(url, str) else url for url in v]
+         return v
+ 
+     def is_scraper_enabled(self, scraper_setting: bool | str, context: str):
 diff --git a/comet/core/schema_migrations.py b/comet/core/schema_migrations.py
 index 7fe4809..4ebb34e 100644
 --- a/comet/core/schema_migrations.py
@@ -1767,6 +2025,175 @@ index 7521a09..54a81d6 100644
 +            return int(count)
 +
 +        return None
+diff --git a/comet/metadata/siblings.py b/comet/metadata/siblings.py
+new file mode 100644
+index 0000000..316c696
+--- /dev/null
++++ b/comet/metadata/siblings.py
+@@ -0,0 +1,163 @@
++import asyncio
++import time
++import urllib.parse
++
++from curl_cffi.requests import AsyncSession
++
++from comet.core.logger import logger
++from comet.metadata.manager import MetadataScraper
++from comet.services.anime import anime_mapper
++from comet.services.filtering import scrub
++from comet.utils.http_client import http_client_manager
++from comet.utils.languages import merge_aliases
++
++_CACHE_TTL = 86400.0  # 24 hours
++_cache: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
++_locks: dict[tuple[str, str], asyncio.Lock] = {}
++
++
++async def get_blocked_titles(
++    media_type: str, imdb_id: str, title: str
++) -> frozenset[str]:
++    if (
++        not imdb_id
++        or not isinstance(imdb_id, str)
++        or not imdb_id.startswith("tt")
++        or not title
++        or not isinstance(title, str)
++        or media_type not in ("series", "movie")
++    ):
++        return frozenset()
++
++    cache_key = (media_type, imdb_id)
++    now = time.time()
++    cached = _cache.get(cache_key)
++    if cached is not None and (now - cached[0]) < _CACHE_TTL:
++        return cached[1]
++
++    lock = _locks.get(cache_key)
++    if lock is None:
++        lock = asyncio.Lock()
++        _locks[cache_key] = lock
++
++    async with lock:
++        now = time.time()
++        cached = _cache.get(cache_key)
++        if cached is not None and (now - cached[0]) < _CACHE_TTL:
++            return cached[1]
++
++        base_scrub = scrub(title)
++        if not base_scrub:
++            empty = frozenset()
++            _cache[cache_key] = (now, empty)
++            return empty
++
++        prefix = base_scrub + " "
++        encoded_query = urllib.parse.quote_plus(title)
++        url = f"https://v3-cinemeta.strem.io/catalog/{media_type}/top/search={encoded_query}.json"
++
++        try:
++            async with AsyncSession(impersonate="chrome") as session:
++                resp = await session.get(url, timeout=6.0)
++                if resp.status_code != 200:
++                    logger.warning(
++                        f"Cinemeta search failed with HTTP {resp.status_code} for {imdb_id} ({title})"
++                    )
++                    empty = frozenset()
++                    _cache[cache_key] = (now, empty)
++                    return empty
++                payload = resp.json()
++        except Exception as exc:
++            logger.warning(
++                f"Cinemeta search failed for {imdb_id} ({title}): {exc}"
++            )
++            empty = frozenset()
++            _cache[cache_key] = (now, empty)
++            return empty
++
++        metas = payload.get("metas") if isinstance(payload, dict) else None
++        if not isinstance(metas, list) or not metas:
++            empty = frozenset()
++            _cache[cache_key] = (now, empty)
++            return empty
++
++        siblings: list[dict] = []
++        for meta in metas:
++            if not isinstance(meta, dict):
++                continue
++            meta_id = meta.get("id") or meta.get("imdb_id")
++            meta_name = meta.get("name") or ""
++            if not meta_id or meta_id == imdb_id:
++                continue
++            meta_type = meta.get("type")
++            if meta_type and meta_type != media_type:
++                continue
++            meta_scrub = scrub(meta_name)
++            if meta_scrub.startswith(prefix):
++                siblings.append(
++                    {"id": meta_id, "name": meta_name, "scrub": meta_scrub}
++                )
++                if len(siblings) == 6:
++                    break
++
++        if not siblings:
++            empty = frozenset()
++            _cache[cache_key] = (now, empty)
++            return empty
++
++        blocked: set[str] = set()
++        for sib in siblings:
++            blocked.add(sib["scrub"])
++
++        session = await http_client_manager.get_session()
++        scraper = MetadataScraper(session)
++
++        async def _fetch_sibling_aliases(sib_id: str) -> dict:
++            try:
++                _, aliases = await scraper.fetch_metadata_and_aliases(
++                    media_type, sib_id
++                )
++            except Exception as e:
++                logger.warning(
++                    f"Failed fetching aliases for sibling {sib_id}: {e}"
++                )
++                aliases = {}
++
++            if anime_mapper.is_loaded():
++                try:
++                    kids = anime_mapper.get_kitsu_ids_from_imdb(sib_id)
++                    for kid in kids:
++                        k_aliases = await anime_mapper.get_aliases(f"kitsu:{kid}")
++                        if k_aliases:
++                            aliases = merge_aliases(aliases, k_aliases)
++                except Exception:
++                    pass
++
++            return aliases if isinstance(aliases, dict) else {}
++
++        sibling_aliases_list = await asyncio.gather(
++            *(_fetch_sibling_aliases(s["id"]) for s in siblings),
++            return_exceptions=True,
++        )
++
++        for aliases in sibling_aliases_list:
++            if isinstance(aliases, dict):
++                for titles in aliases.values():
++                    if isinstance(titles, list):
++                        for t in titles:
++                            if isinstance(t, str):
++                                st = scrub(t)
++                                if st.startswith(prefix):
++                                    blocked.add(st)
++
++        result = frozenset(blocked)
++        _cache[cache_key] = (time.time(), result)
++
++        if result:
++            sibs_str = ", ".join(f"{s['id']} {s['name']}" for s in siblings)
++            logger.log(
++                "FILTER",
++                f"🧬 Irmãos de {imdb_id} ({title}): {sibs_str} → {len(result)} nomes bloqueados",
++            )
++
++        return result
 diff --git a/comet/scrapers/addons.py b/comet/scrapers/addons.py
 new file mode 100644
 index 0000000..969ec80
@@ -2809,6 +3236,663 @@ index 13cfaa3..a0455a0 100644
      def is_loaded(self):
          return self.loaded
  
+diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
+new file mode 100644
+index 0000000..0a0d546
+--- /dev/null
++++ b/comet/services/catalogs.py
+@@ -0,0 +1,651 @@
++import asyncio
++import datetime
++import json
++import os
++import time
++import urllib.parse
++
++import aiohttp
++
++from comet.core.logger import logger
++from comet.core.models import settings
++from comet.metadata.tmdb import TMDBApi
++
++PROVIDERS = {
++    "netflix": ("Netflix", 8),
++    "prime": ("Prime Video", 119),
++    "disney": ("Disney+", 337),
++    "max": ("HBO Max", 1899),
++    "apple": ("Apple TV+", 350),
++    "paramount": ("Paramount+", 531),
++    "globoplay": ("Globoplay", 307),
++    "crunchyroll": ("Crunchyroll", 283),
++}
++
++MOVIE_GENRE_MAP = {
++    "Ação": 28,
++    "Aventura": 12,
++    "Animação": 16,
++    "Comédia": 35,
++    "Crime": 80,
++    "Documentário": 99,
++    "Drama": 18,
++    "Família": 10751,
++    "Fantasia": 14,
++    "História": 36,
++    "Terror": 27,
++    "Música": 10402,
++    "Mistério": 9648,
++    "Romance": 10749,
++    "Ficção científica": 878,
++    "Cinema TV": 10770,
++    "Thriller": 53,
++    "Guerra": 10752,
++    "Faroeste": 37,
++}
++MOVIE_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(MOVIE_GENRE_MAP.keys())
++
++TV_GENRE_MAP = {
++    "Ação e Aventura": 10759,
++    "Animação": 16,
++    "Comédia": 35,
++    "Crime": 80,
++    "Documentário": 99,
++    "Drama": 18,
++    "Família": 10751,
++    "Infantil": 10762,
++    "Mistério": 9648,
++    "Reality": 10764,
++    "Ficção científica e Fantasia": 10765,
++    "Novela": 10766,
++    "Guerra e Política": 10768,
++    "Faroeste": 37,
++}
++TV_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(TV_GENRE_MAP.keys())
++
++IMDB_CACHE_DIR = "/opt/comet/data/catalog_cache"
++IMDB_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "imdb_map.json")
++
++_IMDB_MAP: dict[str, str] = {}
++_IMDB_MAP_LOADED = False
++
++_CATALOG_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
++_CATALOG_CACHE_MAX = 300
++_CATALOG_CACHE_TTL = 6 * 3600  # 6 hours
++
++
++def _ensure_imdb_map_loaded():
++    global _IMDB_MAP, _IMDB_MAP_LOADED
++    if not _IMDB_MAP_LOADED:
++        if os.path.exists(IMDB_CACHE_FILE):
++            try:
++                with open(IMDB_CACHE_FILE, "r", encoding="utf-8") as f:
++                    data = json.load(f)
++                    if isinstance(data, dict):
++                        _IMDB_MAP.update(data)
++            except Exception as e:
++                logger.warning(f"Error loading imdb_map.json: {e}")
++        _IMDB_MAP_LOADED = True
++
++
++def _save_imdb_map():
++    try:
++        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
++        data_to_save = dict(_IMDB_MAP)
++        tmp_path = f"{IMDB_CACHE_FILE}.tmp.{os.getpid()}"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(data_to_save, f)
++        os.replace(tmp_path, IMDB_CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving imdb_map.json: {e}")
++
++
++def _get_providers_list() -> list[str]:
++    raw = getattr(settings, "CATALOG_PROVIDERS", list(PROVIDERS.keys()))
++    if isinstance(raw, str):
++        s = raw.strip()
++        if s.startswith("[") and s.endswith("]"):
++            try:
++                parsed = json.loads(s)
++                if isinstance(parsed, list):
++                    return [str(p).strip().lower() for p in parsed if str(p).strip()]
++            except Exception:
++                pass
++        return [p.strip().lower() for p in s.split(",") if p.strip()]
++    elif isinstance(raw, list):
++        return [str(p).strip().lower() for p in raw if str(p).strip()]
++    return list(PROVIDERS.keys())
++
++
++def build_manifest_catalogs() -> list[dict]:
++    catalogs = [
++        {
++            "type": "movie",
++            "id": "comet_trending",
++            "name": "Em alta",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        },
++        {
++            "type": "series",
++            "id": "comet_trending",
++            "name": "Em alta",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        },
++    ]
++
++    for p in _get_providers_list():
++        if p not in PROVIDERS:
++            continue
++        name, _ = PROVIDERS[p]
++        # Serie primeiro, depois filme
++        catalogs.append(
++            {
++                "type": "series",
++                "id": f"comet_{p}",
++                "name": name,
++                "extra": [
++                    {"name": "genre", "options": TV_GENRE_OPTIONS, "isRequired": False},
++                    {"name": "skip", "isRequired": False},
++                ],
++            }
++        )
++        catalogs.append(
++            {
++                "type": "movie",
++                "id": f"comet_{p}",
++                "name": name,
++                "extra": [
++                    {"name": "genre", "options": MOVIE_GENRE_OPTIONS, "isRequired": False},
++                    {"name": "skip", "isRequired": False},
++                ],
++            }
++        )
++
++    catalogs.append(
++        {
++            "type": "series",
++            "id": "comet_anime",
++            "name": "Animes",
++            "extra": [
++                {"name": "genre", "options": TV_GENRE_OPTIONS, "isRequired": False},
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++    )
++
++    catalogs.append(
++        {
++            "type": "movie",
++            "id": "comet_search",
++            "name": "Busca",
++            "extra": [
++                {"name": "search", "isRequired": True},
++            ],
++        }
++    )
++    catalogs.append(
++        {
++            "type": "series",
++            "id": "comet_search",
++            "name": "Busca",
++            "extra": [
++                {"name": "search", "isRequired": True},
++            ],
++        }
++    )
++
++    return catalogs
++
++
++def _get_cached_catalog(key: tuple) -> list[dict] | None:
++    now = time.time()
++    if key in _CATALOG_CACHE:
++        ts, metas = _CATALOG_CACHE[key]
++        if now - ts < _CATALOG_CACHE_TTL:
++            return metas
++        del _CATALOG_CACHE[key]
++    return None
++
++
++def _set_cached_catalog(key: tuple, metas: list[dict]):
++    now = time.time()
++    if len(_CATALOG_CACHE) >= _CATALOG_CACHE_MAX:
++        sorted_keys = sorted(_CATALOG_CACHE.keys(), key=lambda k: _CATALOG_CACHE[k][0])
++        for k in sorted_keys[:50]:
++            _CATALOG_CACHE.pop(k, None)
++    _CATALOG_CACHE[key] = (now, metas)
++
++
++def _build_tmdb_path_and_params(
++    media_type: str, catalog_id: str, genre: str | None, page: int
++) -> tuple[str, dict] | None:
++    region = getattr(settings, "CATALOG_REGION", "BR")
++    language = getattr(settings, "CATALOG_LANGUAGE", "pt-BR")
++    tmdb_type = "movie" if media_type == "movie" else "tv"
++    today_str = datetime.date.today().isoformat()
++
++    if catalog_id == "comet_trending":
++        path = f"trending/{tmdb_type}/week"
++        params = {
++            "language": language,
++            "page": page,
++        }
++        return path, params
++
++    if catalog_id == "comet_anime":
++        path = "discover/tv"
++        params = {
++            "language": language,
++            "page": page,
++            "with_original_language": "ja",
++        }
++        if genre in ("Lançamentos", "Lancamentos"):
++            params["sort_by"] = "first_air_date.desc"
++            params["vote_count.gte"] = 10
++            params["first_air_date.lte"] = today_str
++            params["with_genres"] = 16
++        elif genre in ("Mais bem avaliados", "Mais Bem Avaliados"):
++            params["sort_by"] = "vote_average.desc"
++            params["vote_count.gte"] = 500
++            params["with_genres"] = 16
++        elif genre and genre in TV_GENRE_MAP:
++            gid = TV_GENRE_MAP[genre]
++            params["with_genres"] = f"16,{gid}" if gid != 16 else 16
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 50
++        else:
++            params["with_genres"] = 16
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 50
++        return path, params
++
++    if catalog_id.startswith("comet_"):
++        provider_key = catalog_id[len("comet_"):]
++        if provider_key not in PROVIDERS:
++            return None
++        _, provider_id = PROVIDERS[provider_key]
++        path = f"discover/{tmdb_type}"
++        params = {
++            "watch_region": region,
++            "with_watch_providers": provider_id,
++            "language": language,
++            "page": page,
++        }
++        if genre in ("Lançamentos", "Lancamentos"):
++            if media_type == "movie":
++                params["sort_by"] = "primary_release_date.desc"
++                params["vote_count.gte"] = 10
++                params["primary_release_date.lte"] = today_str
++            else:
++                params["sort_by"] = "first_air_date.desc"
++                params["vote_count.gte"] = 10
++                params["first_air_date.lte"] = today_str
++        elif genre in ("Mais bem avaliados", "Mais Bem Avaliados"):
++            params["sort_by"] = "vote_average.desc"
++            params["vote_count.gte"] = 500
++        elif genre and genre in (MOVIE_GENRE_MAP if media_type == "movie" else TV_GENRE_MAP):
++            gid = (MOVIE_GENRE_MAP if media_type == "movie" else TV_GENRE_MAP)[genre]
++            params["with_genres"] = gid
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 50
++        else:
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 50
++            if media_type == "movie":
++                params["primary_release_date.gte"] = (datetime.date.today() - datetime.timedelta(days=4 * 365)).isoformat()
++            else:
++                params["air_date.gte"] = (datetime.date.today() - datetime.timedelta(days=2 * 365)).isoformat()
++                params["vote_count.gte"] = 200
++                # sem jornal, reality, novela e talk show (luta livre, programas diarios)
++                params["without_genres"] = "10763,10764,10766,10767"
++        return path, params
++
++    return None
++
++
++async def _fetch_catalog_items(
++    media_type: str, catalog_id: str, genre: str | None, skip: int
++) -> list[dict]:
++    _ensure_imdb_map_loaded()
++    page1 = (skip // 40) * 2 + 1
++    page2 = page1 + 1
++
++    query1 = _build_tmdb_path_and_params(media_type, catalog_id, genre, page1)
++    query2 = _build_tmdb_path_and_params(media_type, catalog_id, genre, page2)
++    if not query1 or not query2:
++        return []
++
++    path1, params1 = query1
++    path2, params2 = query2
++    url1 = f"{path1}?{urllib.parse.urlencode(params1)}"
++    url2 = f"{path2}?{urllib.parse.urlencode(params2)}"
++
++    timeout = aiohttp.ClientTimeout(total=8.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++        res1, res2 = await asyncio.gather(
++            tmdb._get_json(url1, f"catalog {catalog_id} p{page1}"),
++            tmdb._get_json(url2, f"catalog {catalog_id} p{page2}"),
++            return_exceptions=True,
++        )
++
++        raw_items = []
++        if isinstance(res1, dict) and isinstance(res1.get("results"), list):
++            raw_items.extend(res1["results"])
++        if isinstance(res2, dict) and isinstance(res2.get("results"), list):
++            raw_items.extend(res2["results"])
++
++        unique_raw_items = []
++        seen_tmdb_ids = set()
++        today_str = datetime.date.today().isoformat()
++        is_lancamentos = genre in ("Lançamentos", "Lancamentos")
++
++        for item in raw_items:
++            if not isinstance(item, dict):
++                continue
++            tid = item.get("id")
++            poster = item.get("poster_path")
++            if not tid or not poster or tid in seen_tmdb_ids:
++                continue
++            # If Lancamentos, guarantee no future releases
++            if is_lancamentos:
++                rel_date = (
++                    item.get("release_date")
++                    if media_type == "movie"
++                    else item.get("first_air_date")
++                )
++                if rel_date and rel_date > today_str:
++                    continue
++            seen_tmdb_ids.add(tid)
++            unique_raw_items.append(item)
++
++        tmdb_type = "movie" if media_type == "movie" else "tv"
++        sem = asyncio.Semaphore(10)
++        cache_updated = False
++
++        async def resolve_imdb(tmdb_id: int) -> str | None:
++            nonlocal cache_updated
++            cache_key = f"{tmdb_type}:{tmdb_id}"
++            if cache_key in _IMDB_MAP:
++                return _IMDB_MAP[cache_key]
++
++            async with sem:
++                data = await tmdb._get_json(
++                    f"{tmdb_type}/{tmdb_id}/external_ids",
++                    f"{tmdb_type} external_ids {tmdb_id}",
++                )
++                if isinstance(data, dict):
++                    imdb_id = data.get("imdb_id")
++                    if isinstance(imdb_id, str) and imdb_id.startswith("tt"):
++                        _IMDB_MAP[cache_key] = imdb_id
++                        cache_updated = True
++                        return imdb_id
++            return None
++
++        imdb_ids = await asyncio.gather(
++            *[resolve_imdb(it["id"]) for it in unique_raw_items],
++            return_exceptions=True,
++        )
++
++        if cache_updated:
++            await asyncio.to_thread(_save_imdb_map)
++
++        metas = []
++        seen_imdb = set()
++        for it, imdb_id in zip(unique_raw_items, imdb_ids):
++            if (
++                not isinstance(imdb_id, str)
++                or not imdb_id.startswith("tt")
++                or imdb_id in seen_imdb
++            ):
++                continue
++            seen_imdb.add(imdb_id)
++            poster_path = it.get("poster_path")
++            backdrop_path = it.get("backdrop_path")
++            name = (
++                it.get("title") or it.get("original_title") or ""
++                if media_type == "movie"
++                else it.get("name") or it.get("original_name") or ""
++            )
++            date_str = (
++                it.get("release_date")
++                if media_type == "movie"
++                else it.get("first_air_date")
++            )
++            year = date_str[:4] if date_str and len(date_str) >= 4 else ""
++            vote_avg = it.get("vote_average")
++            rating_str = f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++
++            meta = {
++                "id": imdb_id,
++                "type": media_type,
++                "name": name,
++                "poster": f"https://image.tmdb.org/t/p/w342{poster_path}",
++                "background": (
++                    f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
++                    if backdrop_path
++                    else None
++                ),
++                "description": it.get("overview") or "",
++                "releaseInfo": year,
++                "imdbRating": rating_str,
++            }
++            metas.append(meta)
++
++        return metas
++
++
++_SEARCH_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
++_SEARCH_CACHE_MAX = 300
++_SEARCH_CACHE_TTL = 3600.0  # 1 hour
++
++
++def _get_cached_search(key: tuple) -> list[dict] | None:
++    now = time.time()
++    if key in _SEARCH_CACHE:
++        ts, items = _SEARCH_CACHE[key]
++        if now - ts < _SEARCH_CACHE_TTL:
++            return items
++        _SEARCH_CACHE.pop(key, None)
++    return None
++
++
++def _set_cached_search(key: tuple, items: list[dict]) -> None:
++    while len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
++        oldest_key = min(_SEARCH_CACHE.keys(), key=lambda k: _SEARCH_CACHE[k][0])
++        _SEARCH_CACHE.pop(oldest_key, None)
++    _SEARCH_CACHE[key] = (time.time(), items)
++
++
++async def _fetch_search_items(media_type: str, query: str) -> list[dict]:
++    _ensure_imdb_map_loaded()
++    tmdb_type = "movie" if media_type == "movie" else "tv"
++    q_encoded = urllib.parse.quote(query)
++
++    timeout = aiohttp.ClientTimeout(total=8.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++
++        async def fetch_tmdb():
++            return await tmdb._get_json(
++                f"search/{tmdb_type}?query={q_encoded}&language=pt-BR&page=1",
++                f"search {tmdb_type} {query}",
++            )
++
++        async def fetch_cinemeta():
++            cm_url = f"https://v3-cinemeta.strem.io/catalog/{media_type}/top/search={q_encoded}.json"
++            try:
++                async with session.get(cm_url) as resp:
++                    if resp.status == 200:
++                        data = await resp.json()
++                        if isinstance(data, dict):
++                            return data.get("metas", [])
++            except Exception as e:
++                logger.warning(f"Cinemeta search failed for {query}: {e}")
++            return []
++
++        tmdb_data, cinemeta_metas = await asyncio.gather(
++            fetch_tmdb(), fetch_cinemeta(), return_exceptions=True
++        )
++
++        results = []
++        seen_imdb = set()
++
++        if isinstance(tmdb_data, dict) and isinstance(tmdb_data.get("results"), list):
++            unique_raw_items = []
++            seen_tmdb_ids = set()
++            for item in tmdb_data["results"]:
++                if not isinstance(item, dict):
++                    continue
++                tid = item.get("id")
++                if not tid or tid in seen_tmdb_ids:
++                    continue
++                seen_tmdb_ids.add(tid)
++                unique_raw_items.append(item)
++
++            sem = asyncio.Semaphore(10)
++            cache_updated = False
++
++            async def resolve_imdb(tmdb_id: int) -> str | None:
++                nonlocal cache_updated
++                cache_key = f"{tmdb_type}:{tmdb_id}"
++                if cache_key in _IMDB_MAP:
++                    return _IMDB_MAP[cache_key]
++
++                async with sem:
++                    data = await tmdb._get_json(
++                        f"{tmdb_type}/{tmdb_id}/external_ids",
++                        f"{tmdb_type} external_ids {tmdb_id}",
++                    )
++                    if isinstance(data, dict):
++                        imdb_id = data.get("imdb_id")
++                        if isinstance(imdb_id, str) and imdb_id.startswith("tt"):
++                            _IMDB_MAP[cache_key] = imdb_id
++                            cache_updated = True
++                            return imdb_id
++                return None
++
++            imdb_ids = await asyncio.gather(
++                *[resolve_imdb(it["id"]) for it in unique_raw_items],
++                return_exceptions=True,
++            )
++
++            if cache_updated:
++                await asyncio.to_thread(_save_imdb_map)
++
++            for it, imdb_id in zip(unique_raw_items, imdb_ids):
++                if (
++                    not isinstance(imdb_id, str)
++                    or not imdb_id.startswith("tt")
++                    or imdb_id in seen_imdb
++                ):
++                    continue
++                seen_imdb.add(imdb_id)
++                poster_path = it.get("poster_path")
++                backdrop_path = it.get("backdrop_path")
++                name = (
++                    it.get("title") or it.get("original_title") or ""
++                    if media_type == "movie"
++                    else it.get("name") or it.get("original_name") or ""
++                )
++                date_str = (
++                    it.get("release_date")
++                    if media_type == "movie"
++                    else it.get("first_air_date")
++                )
++                year = date_str[:4] if date_str and len(date_str) >= 4 else ""
++                vote_avg = it.get("vote_average")
++                rating_str = (
++                    f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++                )
++
++                meta = {
++                    "id": imdb_id,
++                    "type": media_type,
++                    "name": name,
++                    "poster": (
++                        f"https://image.tmdb.org/t/p/w342{poster_path}"
++                        if poster_path
++                        else None
++                    ),
++                    "background": (
++                        f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
++                        if backdrop_path
++                        else None
++                    ),
++                    "description": it.get("overview") or "",
++                    "releaseInfo": year,
++                    "imdbRating": rating_str,
++                }
++                results.append(meta)
++
++        if isinstance(cinemeta_metas, list):
++            for cm_item in cinemeta_metas:
++                if not isinstance(cm_item, dict):
++                    continue
++                cid = cm_item.get("id")
++                if cid and cid not in seen_imdb:
++                    seen_imdb.add(cid)
++                    results.append(cm_item)
++
++        return results
++
++
++async def get_catalog(
++    media_type: str, catalog_id: str, extra: dict | None = None
++) -> list[dict]:
++    if catalog_id == "comet_search":
++        extra = extra or {}
++        search_query = extra.get("search")
++        if not search_query or not str(search_query).strip():
++            return []
++        q = str(search_query).strip()
++        search_cache_key = (media_type, "comet_search", q.lower())
++        cached_search = _get_cached_search(search_cache_key)
++        if cached_search is not None:
++            return cached_search
++        try:
++            async with asyncio.timeout(10.0):
++                metas = await _fetch_search_items(media_type, q)
++                if metas:
++                    _set_cached_search(search_cache_key, metas)
++                return metas
++        except TimeoutError:
++            logger.warning(f"Search catalog timeout for {media_type}/{q}")
++            return []
++        except Exception as e:
++            logger.warning(
++                f"Search catalog error for {media_type}/{q}: {type(e).__name__}"
++            )
++            return []
++    extra = extra or {}
++    genre = extra.get("genre")
++    skip_raw = extra.get("skip", 0)
++    try:
++        skip = int(skip_raw)
++    except (ValueError, TypeError):
++        skip = 0
++
++    cache_key = (media_type, catalog_id, genre, skip)
++    cached = _get_cached_catalog(cache_key)
++    if cached is not None:
++        return cached
++
++    try:
++        async with asyncio.timeout(10.0):
++            metas = await _fetch_catalog_items(media_type, catalog_id, genre, skip)
++            if metas:
++                _set_cached_catalog(cache_key, metas)
++            return metas
++    except TimeoutError:
++        logger.warning(f"Catalog timeout for {media_type}/{catalog_id}")
++        return []
++    except Exception as e:
++        logger.warning(
++            f"Catalog error for {media_type}/{catalog_id}: {type(e).__name__}"
++        )
++        return []
 diff --git a/comet/services/debrid.py b/comet/services/debrid.py
 index 819551b..23202e1 100644
 --- a/comet/services/debrid.py
@@ -2843,6 +3927,26 @@ index 819551b..23202e1 100644
                  update["parsed"] = merged_parsed
  
          file_index = cls._coerce_file_index(file_index)
+diff --git a/comet/services/debrid_account_scraper.py b/comet/services/debrid_account_scraper.py
+index c7d08bd..6b4aa07 100644
+--- a/comet/services/debrid_account_scraper.py
++++ b/comet/services/debrid_account_scraper.py
+@@ -586,6 +586,7 @@ async def get_account_torrents_for_media(
+     remove_adult_content: bool,
+     target_air_date: str | None = None,
+     reject_unknown_episode_files: bool = False,
++    blocked_titles: tuple[str, ...] = (),
+ ):
+     account_torrents = {}
+     service_cache_status = {}
+@@ -672,6 +673,7 @@ async def get_account_torrents_for_media(
+             media_type,
+             aliases,
+             remove_adult_content,
++            blocked_titles,
+         )
+ 
+         for torrent in filtered_torrents:
 diff --git a/comet/services/debrid_precheck.py b/comet/services/debrid_precheck.py
 new file mode 100644
 index 0000000..4c2b0a7
@@ -3030,10 +4134,10 @@ index 0000000..4c2b0a7
 +                break
 diff --git a/comet/services/direct_addons.py b/comet/services/direct_addons.py
 new file mode 100644
-index 0000000..22834c7
+index 0000000..167ea5e
 --- /dev/null
 +++ b/comet/services/direct_addons.py
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,191 @@
 +import asyncio
 +import re
 +import time
@@ -3199,6 +4303,8 @@ index 0000000..22834c7
 +                    dict(orig_hints) if isinstance(orig_hints, dict) else {}
 +                )
 +                behavior_hints["bingeGroup"] = f"comet|direct|{curto}|{res}"
++                if not behavior_hints.get("filename"):
++                    behavior_hints["filename"] = f"{curto}.direct.{'PTBR' if is_pt else 'XX'}"
 +
 +                clean_stream = {
 +                    "name": new_name,
@@ -3224,7 +4330,7 @@ index 0000000..22834c7
 +        logger.warning(f"fetch_direct_streams unexpected error: {e}")
 +        return []
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
-index b844e5e..e40bb76 100644
+index b844e5e..e64b730 100644
 --- a/comet/services/filtering.py
 +++ b/comet/services/filtering.py
 @@ -1,6 +1,7 @@
@@ -3334,7 +4440,85 @@ index b844e5e..e40bb76 100644
  
  if settings.RTN_FILTER_DEBUG:
  
-@@ -355,6 +448,7 @@ def filter_worker(
+@@ -96,6 +189,7 @@ class TitleMatcher:
+         "_matches_cache",
+         "aliases",
+         "aliases_normalized",
++        "blocked_titles",
+         "max_year",
+         "min_year",
+         "title",
+@@ -103,17 +197,36 @@ class TitleMatcher:
+         "year_end",
+     )
+ 
+-    def __init__(self, title, year, year_end, media_type, aliases):
++    def __init__(
++        self,
++        title,
++        year,
++        year_end,
++        media_type,
++        aliases,
++        blocked_titles: Collection[str] = frozenset(),
++    ):
+         self._matches_cache = None
+         self.title = title
+         self.year = year
+         self.year_end = year_end
++        self.blocked_titles = (
++            frozenset(blocked_titles) if blocked_titles else frozenset()
++        )
+         self.aliases = _normalize_aliases(aliases)
++        if self.blocked_titles:
++            filtered_aliases = {}
++            for country, titles in self.aliases.items():
++                kept = [t for t in titles if scrub(t) not in self.blocked_titles]
++                if kept:
++                    filtered_aliases[country] = kept
++            self.aliases = filtered_aliases
++
+         self.aliases_normalized = frozenset(
+             normalized
+             for titles in self.aliases.values()
+             for alias in titles
+-            if (normalized := scrub(alias))
++            if (normalized := scrub(alias)) and normalized not in self.blocked_titles
+         )
+ 
+         self.min_year = 0
+@@ -129,6 +242,8 @@ class TitleMatcher:
+                 self.max_year = year + 1
+ 
+     def matches_title(self, torrent_title: str, parsed_title: str) -> bool:
++        if self.blocked_titles and scrub(parsed_title) in self.blocked_titles:
++            return False
+         if exact_alias_match(scrub(parsed_title), self.aliases_normalized):
+             return True
+         return title_match(
+@@ -295,10 +410,19 @@ def _do_parse_and_cache(
+ 
+ 
+ def filter_worker(
+-    torrents, title, year, year_end, media_type, aliases, remove_adult_content
++    torrents,
++    title,
++    year,
++    year_end,
++    media_type,
++    aliases,
++    remove_adult_content,
++    blocked_titles=(),
+ ):
+     results = []
+-    matcher = TitleMatcher(title, year, year_end, media_type, aliases)
++    matcher = TitleMatcher(
++        title, year, year_end, media_type, aliases, blocked_titles
++    )
+     aliases = matcher.aliases
+ 
+     country_aliases = {}
+@@ -355,6 +479,7 @@ def filter_worker(
                  )
                  parsed.languages.append(language)
  
@@ -3380,10 +4564,43 @@ index 81fb382..f1528ef 100644
                      settings.PROWLARR_INDEXERS = active_ids
  
 diff --git a/comet/services/media_search.py b/comet/services/media_search.py
-index a111c8c..aaa8b9d 100644
+index a111c8c..364b582 100644
 --- a/comet/services/media_search.py
 +++ b/comet/services/media_search.py
-@@ -462,9 +462,16 @@ async def search_media(
+@@ -1,4 +1,5 @@
+ import asyncio
++import datetime
+ from collections import defaultdict
+ from collections.abc import Callable, Mapping
+ from dataclasses import dataclass, field
+@@ -11,6 +12,7 @@ from comet.core.scrape import ScrapeContext
+ from comet.debrid.exceptions import DebridAuthError
+ from comet.metadata.episode_index import EpisodeIndexService
+ from comet.metadata.filter import release_filter
++from comet.metadata.siblings import get_blocked_titles
+ from comet.metadata.manager import MetadataScraper
+ from comet.observability import metrics
+ from comet.services.anime import anime_mapper
+@@ -57,6 +59,7 @@ class MediaSearchResult:
+     sort_mixed: bool = False
+     show_account_sync_trigger: bool = False
+     use_account_scrape: bool = False
++    air_date: str | None = None
+ 
+ 
+ def episode_matching_policy(
+@@ -401,6 +404,10 @@ async def search_media(
+     season = metadata["season"]
+     episode = metadata["episode"]
+ 
++    blocked_titles_task = asyncio.create_task(
++        get_blocked_titles(media_type, media_only_id, title)
++    )
++
+     log_title = f"({media_id}) {title}"
+     if media_type == "series" and season is not None and episode is not None:
+         log_title += f" S{season:02d}E{episode:02d}"
+@@ -462,9 +469,16 @@ async def search_media(
          has_debrid=bool(debrid_entries),
          enable_torrent=enable_torrent,
      )
@@ -3401,7 +4618,34 @@ index a111c8c..aaa8b9d 100644
              media_only_id,
              search_season,
              search_episode,
-@@ -482,6 +489,24 @@ async def search_media(
+@@ -475,6 +489,26 @@ async def search_media(
+                 f"📅 Episode target air date: {target_air_date} for "
+                 f"{media_only_id} S{search_season:02d}E{search_episode:02d}",
+             )
++            if media_type == "series":
++                try:
++                    parsed_air_date = datetime.date.fromisoformat(target_air_date)
++                    if parsed_air_date > datetime.date.today():
++                        logger.log(
++                            "SCRAPER",
++                            f"⏳ {media_id} ainda não lançado (estreia {target_air_date})",
++                        )
++                        return MediaSearchResult(
++                            MediaSearchStatus.UNRELEASED,
++                            media_scope=media_scope,
++                            media_only_id=media_only_id,
++                            search_season=season,
++                            search_episode=episode,
++                            is_torrent_only=is_torrent_only,
++                            use_account_scrape=use_account_scrape,
++                            air_date=target_air_date,
++                        )
++                except ValueError:
++                    pass
+         else:
+             logger.log(
+                 "SCRAPER",
+@@ -482,7 +516,26 @@ async def search_media(
                  f"S{search_season:02d}E{search_episode:02d}",
              )
  
@@ -3424,20 +4668,228 @@ index a111c8c..aaa8b9d 100644
 +        absolute_episode = search_episode
 +
      remove_adult_content = settings.REMOVE_ADULT_CONTENT and config["removeTrash"]
++    blocked_titles = await blocked_titles_task
      torrent_manager = TorrentManager(
          media_type,
-@@ -501,6 +526,9 @@ async def search_media(
+         media_id,
+@@ -501,6 +554,10 @@ async def search_media(
          target_air_date=target_air_date,
          reject_unknown_episode_files=reject_unknown_episode_files,
          media_scope=media_scope,
 +        is_anime=is_anime,
 +        absolute_episode=absolute_episode,
 +        anime_arcs=anime_arcs,
++        blocked_titles=blocked_titles,
      )
  
      await torrent_manager.get_cached_torrents()
+@@ -602,6 +659,7 @@ async def search_media(
+             remove_adult_content,
+             target_air_date=target_air_date,
+             reject_unknown_episode_files=reject_unknown_episode_files,
++            blocked_titles=tuple(blocked_titles),
+         )
+ 
+         for info_hash, account_torrent in account_torrents.items():
+diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
+new file mode 100644
+index 0000000..d058d11
+--- /dev/null
++++ b/comet/services/meta_ptbr.py
+@@ -0,0 +1,191 @@
++import asyncio
++import copy
++import re
++import time
++import aiohttp
++
++from comet.core.logger import logger
++from comet.metadata.tmdb import TMDBApi
++
++_GENERIC_EPISODE_RE = re.compile(
++    r"^(?:epis[oó]dio|episode|cap[ií]tulo)\s+\d+$", re.IGNORECASE
++)
++
++_META_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
++_META_CACHE_TTL = 12 * 3600.0  # 12 hours
++_META_CACHE_MAX = 500
++
++
++def _is_generic_title(title: str) -> bool:
++    if not title:
++        return True
++    return bool(_GENERIC_EPISODE_RE.match(title.strip()))
++
++
++def _save_to_cache(cache_key: tuple[str, str], meta: dict) -> None:
++    while len(_META_CACHE) >= _META_CACHE_MAX:
++        oldest_key = min(_META_CACHE.keys(), key=lambda k: _META_CACHE[k][0])
++        _META_CACHE.pop(oldest_key, None)
++    _META_CACHE[cache_key] = (time.time(), copy.deepcopy(meta))
++
++
++async def get_meta_ptbr(media_type: str, media_id: str) -> dict | None:
++    if media_type not in ("movie", "series") or not media_id.startswith("tt"):
++        return None
++
++    cache_key = (media_type, media_id)
++    now = time.time()
++    if cache_key in _META_CACHE:
++        ts, cached = _META_CACHE[cache_key]
++        if now - ts < _META_CACHE_TTL:
++            return copy.deepcopy(cached)
++        _META_CACHE.pop(cache_key, None)
++
++    # 1. Fetch Cinemeta base
++    timeout = aiohttp.ClientTimeout(total=8.0)
++    cinemeta_url = f"https://v3-cinemeta.strem.io/meta/{media_type}/{media_id}.json"
++    try:
++        async with aiohttp.ClientSession(timeout=timeout) as session:
++            async with session.get(cinemeta_url) as resp:
++                if resp.status != 200:
++                    logger.warning(
++                        f"Cinemeta meta HTTP {resp.status} for {media_id}"
++                    )
++                    return None
++                data = await resp.json()
++                if not isinstance(data, dict) or not isinstance(data.get("meta"), dict):
++                    return None
++                base_meta = data["meta"]
++    except Exception as e:
++        logger.warning(f"Cinemeta fetch error for {media_id}: {e}")
++        return None
++
++    # 2. TMDB overlay
++    try:
++        async with aiohttp.ClientSession(timeout=timeout) as session:
++            tmdb = TMDBApi(session)
++            tmdb_id = await tmdb.get_tmdb_id_from_imdb(media_id, media_type)
++            if not tmdb_id:
++                logger.info(
++                    f"TMDB ID not found for {media_id}, returning Cinemeta meta"
++                )
++                _save_to_cache(cache_key, base_meta)
++                return copy.deepcopy(base_meta)
++
++            if media_type == "movie":
++                tmdb_movie = await tmdb._get_json(
++                    f"movie/{tmdb_id}?language=pt-BR", f"movie {tmdb_id}"
++                )
++                if isinstance(tmdb_movie, dict):
++                    tmdb_name = tmdb_movie.get("title") or tmdb_movie.get("name")
++                    if tmdb_name and tmdb_name.strip():
++                        base_meta["name"] = tmdb_name.strip()
++                    overview = tmdb_movie.get("overview")
++                    if overview and overview.strip():
++                        base_meta["description"] = overview.strip()
++                    poster_path = tmdb_movie.get("poster_path")
++                    if poster_path:
++                        base_meta["poster"] = (
++                            f"https://image.tmdb.org/t/p/w500{poster_path}"
++                        )
++                    genres = tmdb_movie.get("genres")
++                    if isinstance(genres, list) and genres:
++                        base_meta["genres"] = [
++                            g["name"]
++                            for g in genres
++                            if isinstance(g, dict) and g.get("name")
++                        ]
++            elif media_type == "series":
++                tmdb_tv = await tmdb._get_json(
++                    f"tv/{tmdb_id}?language=pt-BR", f"tv {tmdb_id}"
++                )
++                if isinstance(tmdb_tv, dict):
++                    tmdb_name = tmdb_tv.get("name") or tmdb_tv.get("title")
++                    if tmdb_name and tmdb_name.strip():
++                        base_meta["name"] = tmdb_name.strip()
++                    overview = tmdb_tv.get("overview")
++                    if overview and overview.strip():
++                        base_meta["description"] = overview.strip()
++                    poster_path = tmdb_tv.get("poster_path")
++                    if poster_path:
++                        base_meta["poster"] = (
++                            f"https://image.tmdb.org/t/p/w500{poster_path}"
++                        )
++                    genres = tmdb_tv.get("genres")
++                    if isinstance(genres, list) and genres:
++                        base_meta["genres"] = [
++                            g["name"]
++                            for g in genres
++                            if isinstance(g, dict) and g.get("name")
++                        ]
++
++                # Series episodes overlay
++                cinemeta_videos = base_meta.get("videos")
++                if isinstance(cinemeta_videos, list) and cinemeta_videos:
++                    seasons_set = set()
++                    for v in cinemeta_videos:
++                        if isinstance(v, dict):
++                            s = v.get("season")
++                            try:
++                                s_int = int(s)
++                                if s_int >= 1:
++                                    seasons_set.add(s_int)
++                            except (TypeError, ValueError):
++                                pass
++
++                    sem = asyncio.Semaphore(5)
++
++                    async def fetch_and_overlay_season(season_num: int):
++                        async with sem:
++                            s_data = await tmdb._get_json(
++                                f"tv/{tmdb_id}/season/{season_num}?language=pt-BR",
++                                f"tv season {tmdb_id}:{season_num}",
++                            )
++                            if not isinstance(s_data, dict):
++                                return
++                            tmdb_episodes = s_data.get("episodes")
++                            if not isinstance(tmdb_episodes, list):
++                                return
++
++                            cm_season_videos = [
++                                v
++                                for v in cinemeta_videos
++                                if isinstance(v, dict) and v.get("season") == season_num
++                            ]
++                            if len(tmdb_episodes) != len(cm_season_videos):
++                                return
++
++                            tmdb_ep_map = {}
++                            for ep in tmdb_episodes:
++                                if isinstance(ep, dict):
++                                    ep_num = ep.get("episode_number")
++                                    if ep_num is not None:
++                                        tmdb_ep_map[ep_num] = ep
++
++                            for v in cm_season_videos:
++                                ep_num = v.get("episode")
++                                tmdb_ep = tmdb_ep_map.get(ep_num)
++                                if tmdb_ep:
++                                    ep_name = (tmdb_ep.get("name") or "").strip()
++                                    if ep_name and not _is_generic_title(ep_name):
++                                        v["name"] = ep_name
++                                        v["title"] = ep_name
++                                    ep_overview = (
++                                        tmdb_ep.get("overview") or ""
++                                    ).strip()
++                                    if ep_overview:
++                                        v["overview"] = ep_overview
++                                        if "description" in v:
++                                            v["description"] = ep_overview
++
++                    await asyncio.gather(
++                        *[fetch_and_overlay_season(s) for s in sorted(seasons_set)],
++                        return_exceptions=True,
++                    )
++    except Exception as e:
++        logger.warning(
++            f"TMDB overlay error for {media_id}, returning Cinemeta meta: {e}"
++        )
++
++    _save_to_cache(cache_key, base_meta)
++    return copy.deepcopy(base_meta)
 diff --git a/comet/services/orchestration.py b/comet/services/orchestration.py
-index aa43646..5b4013a 100644
+index aa43646..722ba5b 100644
 --- a/comet/services/orchestration.py
 +++ b/comet/services/orchestration.py
 @@ -1,5 +1,7 @@
@@ -3453,21 +4905,38 @@ index aa43646..5b4013a 100644
  from comet.scrapers.manager import scraper_manager
  from comet.scrapers.models import ScrapeRequest
 -from comet.services.filtering import filter_worker
-+from comet.services.filtering import apply_ptbr_detection, filter_worker
++from comet.services.filtering import TitleMatcher, apply_ptbr_detection, filter_worker
  from comet.services.ranking import rank_worker
  from comet.services.torrent_manager import torrent_update_queue
  from comet.utils.languages import select_indexer_titles
-@@ -76,6 +78,9 @@ class TorrentManager:
+@@ -76,6 +78,10 @@ class TorrentManager:
          target_air_date: str | None = None,
          reject_unknown_episode_files: bool = False,
          media_scope: MediaScope | None = None,
 +        is_anime: bool = False,
 +        absolute_episode: int | None = None,
 +        anime_arcs: list[tuple[int, set[str]]] | None = None,
++        blocked_titles: frozenset[str] = frozenset(),
      ):
          self.media_type = media_type
          self.media_id = media_full_id
-@@ -101,6 +106,16 @@ class TorrentManager:
+@@ -94,6 +100,15 @@ class TorrentManager:
+             else media_scope
+         )
+         self.aliases = aliases
++        self.blocked_titles = blocked_titles
++        self.title_matcher = TitleMatcher(
++            self.title,
++            self.year,
++            self.year_end,
++            self.media_type,
++            self.aliases,
++            self.blocked_titles,
++        )
+         self.remove_adult_content = remove_adult_content
+         self.is_kitsu = is_kitsu
+         self.cache_media_ids = normalize_cache_media_ids(
+@@ -101,6 +116,16 @@ class TorrentManager:
          )
          self.target_air_date = target_air_date
          self.reject_unknown_episode_files = reject_unknown_episode_files
@@ -3484,7 +4953,7 @@ index aa43646..5b4013a 100644
  
          self.seen_hashes = set()
          self.torrents = {}
-@@ -109,6 +124,49 @@ class TorrentManager:
+@@ -109,6 +134,49 @@ class TorrentManager:
          self.primary_cached = False
          self.live_result_timestamp = time.time()
  
@@ -3534,7 +5003,7 @@ index aa43646..5b4013a 100644
      def _matches_requested_scope(
          self,
          parsed: ParsedData,
-@@ -116,6 +174,17 @@ class TorrentManager:
+@@ -116,6 +184,17 @@ class TorrentManager:
          reject_unknown_override: bool | None = None,
          scope_is_known: bool = False,
      ) -> bool:
@@ -3552,7 +5021,7 @@ index aa43646..5b4013a 100644
          reject_unknown = (
              self.reject_unknown_episode_files
              if reject_unknown_override is None
-@@ -128,6 +197,8 @@ class TorrentManager:
+@@ -128,6 +207,8 @@ class TorrentManager:
              target_air_date=self.target_air_date,
              reject_unknown_episode_files=reject_unknown,
              scope_is_known=scope_is_known,
@@ -3561,7 +5030,7 @@ index aa43646..5b4013a 100644
          )
  
      async def scrape_torrents(
-@@ -170,7 +241,7 @@ class TorrentManager:
+@@ -170,7 +251,7 @@ class TorrentManager:
                  continue
  
              info_hash = torrent["infoHash"]
@@ -3570,7 +5039,7 @@ index aa43646..5b4013a 100644
                  "fileIndex": torrent["fileIndex"],
                  "title": torrent["title"],
                  "seeders": torrent["seeders"],
-@@ -180,6 +251,29 @@ class TorrentManager:
+@@ -180,6 +261,29 @@ class TorrentManager:
                  "parsed": torrent["parsed"],
                  "updatedAt": self.live_result_timestamp,
              }
@@ -3600,7 +5069,7 @@ index aa43646..5b4013a 100644
  
      async def _fetch_cached_rows(self, media_id: str):
          where_clause, params = build_torrent_cache_where(
-@@ -204,7 +298,18 @@ class TorrentManager:
+@@ -204,7 +308,18 @@ class TorrentManager:
          )
          for cache_media_id, cache_rows in zip(self.cache_media_ids, cache_row_groups):
              if cache_rows and cache_media_id == self.media_only_id:
@@ -3620,15 +5089,22 @@ index aa43646..5b4013a 100644
              rows.extend(cache_rows)
  
          if rows:
-@@ -244,6 +349,7 @@ class TorrentManager:
+@@ -244,8 +359,14 @@ class TorrentManager:
                      f"Skipping torrent cache row with invalid parsed data: {row['info_hash']}"
                  )
                  continue
 +            apply_ptbr_detection(parsed_data, row["title"], row["tracker"])
              ensure_multi_language(parsed_data)
  
++            if not parsed_data.parsed_title or not self.title_matcher.matches_title(
++                row["title"], parsed_data.parsed_title
++            ):
++                continue
++
              target_season = self.search_season
-@@ -286,11 +392,27 @@ class TorrentManager:
+             if (
+                 target_season is not None
+@@ -286,11 +407,27 @@ class TorrentManager:
          parsed_episodes = parsed.episodes or [None]
  
          if self.reject_unknown_episode_files and self.search_episode is not None:
@@ -3661,6 +5137,14 @@ index aa43646..5b4013a 100644
  
          episode = None if len(parsed_episodes) > 1 else parsed_episodes[0]
          info_hash = torrent["infoHash"]
+@@ -383,6 +520,7 @@ class TorrentManager:
+                 self.media_type,
+                 self.aliases,
+                 self.remove_adult_content,
++                tuple(self.blocked_titles),
+             )
+             for i in range(0, len(new_torrents), chunk_size)
+         ]
 diff --git a/comet/services/subtitle_sync.py b/comet/services/subtitle_sync.py
 new file mode 100644
 index 0000000..114c872
@@ -3857,10 +5341,11 @@ index 0000000..114c872
 +    return res_srt, stats
 diff --git a/comet/services/subtitles.py b/comet/services/subtitles.py
 new file mode 100644
-index 0000000..04c67e9
+index 0000000..809d7fa
 --- /dev/null
 +++ b/comet/services/subtitles.py
-@@ -0,0 +1,1113 @@
+@@ -0,0 +1,1133 @@
++import collections
 +import asyncio
 +import base64
 +from datetime import datetime, timezone, timedelta
@@ -4974,6 +6459,25 @@ index 0000000..04c67e9
 +        pass
 +
 +    return final_bytes
++
++
++# Arquivos que o Comet ja marcou como audio PT-BR na lista de streams (inclui DUAL de fonte BR,
++# que pelo nome sozinho nao da para saber). O pedido de legenda do Stremio traz esse filename.
++_PT_FILENAMES: "collections.OrderedDict[str, None]" = collections.OrderedDict()
++
++
++def remember_pt_filename(name: str | None) -> None:
++    if not name:
++        return
++    key = name.strip().lower()
++    _PT_FILENAMES[key] = None
++    _PT_FILENAMES.move_to_end(key)
++    while len(_PT_FILENAMES) > 50000:
++        _PT_FILENAMES.popitem(last=False)
++
++
++def is_known_pt_filename(name: str | None) -> bool:
++    return bool(name) and name.strip().lower() in _PT_FILENAMES
 diff --git a/comet/utils/parsing.py b/comet/utils/parsing.py
 index 63f895c..bc3c3c0 100644
 --- a/comet/utils/parsing.py

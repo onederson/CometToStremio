@@ -78,6 +78,8 @@
 - [ ] (Opcional) Usuário instalar o addon Store no Stremio; desinstalar FenixFlix/FrostStream, que agora vêm pelo Comet
 - [ ] Achar mais addons de link direto (como FenixFlix/FrostStream) e somar em `DIRECT_ADDONS_URL`
 - [x] Legendas PT-BR no próprio Comet (OpenSubtitles + SubSource + SubDL, escolha pela release do arquivo e sincronia automática)
+- [x] Frontpage estilo Netflix: fileiras por streaming (Netflix, Prime, Disney+, HBO Max, Apple TV+, Paramount+, Globoplay, Crunchyroll) em PT-BR
+- [ ] Usuário: reinstalar o Comet, desinstalar Cinemeta, Trakt, OpenSubtitles v3/PRO, FenixFlix e FrostStream (Comet faz tudo)
 - [ ] Usuário reinstalar o Comet no Stremio (recurso de legendas), tirar o OpenSubtitles PRO e trocar a chave do SubDL
 
 ---
@@ -101,7 +103,7 @@
 | `config/Caddyfile` | `/data/debian/etc/caddy/Caddyfile` | ✅ Instalado (`644`) | Configuração do reverse proxy Caddy HTTPS com Let's Encrypt DNS-01 (DuckDNS) |
 | `comet-ui/index.html` | `/data/debian/opt/comet/comet/templates/index.html` | ✅ Instalado (`644`) | Página `/configure` traduzida para PT-BR com explicações detalhadas (backup original em `index.html.orig`) |
 | `scripts/deploy_ui.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-ui/index.html` no A71 (mantendo `index.html.orig`) e reinicia o Comet |
-| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (27 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix, melhorias no Prowlarr, CAM no fim (`DEMOTE_CAM`) scrapers `BRSites` e `Addons` links diretos mesclados (`DIRECT_ADDONS_URL`) e legendas PT-BR com sincronia (`subtitles`) |
+| `comet-patches/ptbr-first.patch` | *(aplicado em `/data/debian/opt/comet`)* | ✅ Aplicado | Patch Python consolidado (33 arquivos): detecção/ordenação `PTBR_FIRST` (`🇧🇷 PT-BR`), trackers genéricos, filtro 451 + fallback P2P + precheck + troca automática, séries/packs PT-BR, anime absoluto com filtro de arcos, busca ao vivo por episódio, MediaFusion/Peerflix, melhorias no Prowlarr, CAM no fim (`DEMOTE_CAM`) scrapers `BRSites` e `Addons` links diretos mesclados (`DIRECT_ADDONS_URL`) legendas PT-BR com sincronia (`subtitles`) bloqueio de spin-offs pelo Cinemeta (`siblings.py`) catálogos estilo Netflix por streaming (`catalogs.py`), página do título e busca em PT-BR no lugar do Cinemeta (`meta_ptbr.py`), aviso de episódio não lançado e legenda só sem áudio PT |
 | `scripts/deploy_patches.ps1` | *(apenas no PC)* | ✅ Pronto | Reaplica `comet-patches/ptbr-first.patch` no A71 (pula se já aplicado) e reinicia o Comet |
 
 > ⚠️ **Pegadinhas importantes (leia antes de mexer):**
