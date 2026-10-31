@@ -264,10 +264,14 @@ index 35b1121..c0e91cf 100644
          if not download_url:
              return build_status_video_response(
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..d95e0e7 100644
+index 94f56ae..491fa0f 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
-@@ -4,10 +4,16 @@ from urllib.parse import quote
+@@ -1,13 +1,21 @@
++import asyncio
+ from collections import defaultdict
+ from urllib.parse import quote
+ 
  from fastapi import APIRouter, BackgroundTasks, Request
  
  from comet.core.config_validation import config_check
@@ -279,13 +283,14 @@ index 94f56ae..d95e0e7 100644
 +from comet.core.models import database, settings
  from comet.debrid.manager import get_debrid_extension
  from comet.observability import metrics
++from comet.services.direct_addons import fetch_direct_streams
  from comet.services.media_search import MediaSearchStatus, search_media
 +from comet.services.debrid_precheck import run_debrid_precheck
 +from comet.services.filtering import is_cam_release
  from comet.services.trackers import trackers
  from comet.utils.cache import CachePolicies, cached_json_response
  from comet.utils.formatting import (
-@@ -33,6 +39,19 @@ RESOLUTION_TO_DIMENSIONS = {
+@@ -33,6 +41,19 @@ RESOLUTION_TO_DIMENSIONS = {
      "240P": (240, 320),
  }
  
@@ -305,7 +310,7 @@ index 94f56ae..d95e0e7 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -125,6 +144,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +146,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -343,7 +348,7 @@ index 94f56ae..d95e0e7 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +182,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +184,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -352,7 +357,7 @@ index 94f56ae..d95e0e7 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +205,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +207,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -443,7 +448,156 @@ index 94f56ae..d95e0e7 100644
      return selected_info_hashes
  
  
-@@ -329,7 +429,7 @@ async def stream(
+@@ -247,6 +349,22 @@ async def stream(
+             cache_policy=response_cache_policy,
+         )
+ 
++    direct_task = (
++        asyncio.create_task(fetch_direct_streams(media_type, media_id))
++        if settings.DIRECT_ADDONS_URL
++        else None
++    )
++
++    async def _get_direct_streams():
++        if not direct_task:
++            return []
++        try:
++            return await asyncio.wait_for(
++                direct_task, settings.DIRECT_ADDONS_TIMEOUT + 2
++            )
++        except Exception:
++            return []
++
+     search_result = await search_media(
+         media_type,
+         media_id,
+@@ -257,6 +375,8 @@ async def stream(
+     stream_cache_state = search_result.cache_state
+ 
+     if search_result.status is MediaSearchStatus.INVALID:
++        if direct_task and not direct_task.done():
++            direct_task.cancel()
+         return _stream_response({"streams": []}, is_empty=True)
+ 
+     if search_result.status is MediaSearchStatus.DISABLED:
+@@ -270,53 +390,80 @@ async def stream(
+         return _stream_response({"streams": [placeholder_stream]})
+ 
+     if search_result.status is MediaSearchStatus.UNRELEASED:
+-        return _stream_response(
++        notice = [
+             {
+-                "streams": [
+-                    {
+-                        "name": _stream_notice_name(
+-                            kodi, "[🚫] Comet", "[BLOCKED] Comet"
+-                        ),
+-                        "description": "Content not digitally released yet.",
+-                        "url": "https://comet.feels.legal",
+-                    }
+-                ]
+-            },
++                "name": _stream_notice_name(
++                    kodi, "[🚫] Comet", "[BLOCKED] Comet"
++                ),
++                "description": "Content not digitally released yet.",
++                "url": "https://comet.feels.legal",
++            }
++        ]
++        direct_streams = await _get_direct_streams()
++        if direct_streams:
++            clean_direct = [
++                {k: v for k, v in s.items() if k != "_is_pt"}
++                for s in direct_streams
++            ]
++            return _stream_response(
++                {"streams": notice + clean_direct},
++                is_empty=False,
++            )
++        return _stream_response(
++            {"streams": notice},
+             is_empty=True,
+         )
+ 
+     if search_result.status is MediaSearchStatus.METADATA_UNAVAILABLE:
+-        return _stream_response(
++        notice = [
+             {
+-                "streams": [
+-                    {
+-                        "name": _stream_notice_name(
+-                            kodi, "[⚠️] Comet", "[WARN] Comet"
+-                        ),
+-                        "description": "Unable to get metadata.",
+-                        "url": "https://comet.feels.legal",
+-                    }
+-                ]
+-            },
++                "name": _stream_notice_name(
++                    kodi, "[⚠️] Comet", "[WARN] Comet"
++                ),
++                "description": "Unable to get metadata.",
++                "url": "https://comet.feels.legal",
++            }
++        ]
++        direct_streams = await _get_direct_streams()
++        if direct_streams:
++            clean_direct = [
++                {k: v for k, v in s.items() if k != "_is_pt"}
++                for s in direct_streams
++            ]
++            return _stream_response(
++                {"streams": notice + clean_direct},
++                is_empty=False,
++            )
++        return _stream_response(
++            {"streams": notice},
+             is_empty=True,
+         )
+ 
+     if search_result.status is MediaSearchStatus.BUSY:
+-        return _stream_response(
++        notice = [
+             {
+-                "streams": [
+-                    {
+-                        "name": _stream_notice_name(
+-                            kodi, "[🔄] Comet", "[INFO] Comet"
+-                        ),
+-                        "description": (
+-                            "Scraping in progress, please try again in a few "
+-                            "seconds..."
+-                        ),
+-                        "url": "https://comet.feels.legal",
+-                    }
+-                ]
+-            },
++                "name": _stream_notice_name(
++                    kodi, "[🔄] Comet", "[INFO] Comet"
++                ),
++                "description": (
++                    "Scraping in progress, please try again in a few "
++                    "seconds..."
++                ),
++                "url": "https://comet.feels.legal",
++            }
++        ]
++        direct_streams = await _get_direct_streams()
++        if direct_streams:
++            clean_direct = [
++                {k: v for k, v in s.items() if k != "_is_pt"}
++                for s in direct_streams
++            ]
++            return _stream_response(
++                {"streams": notice + clean_direct},
++                is_empty=False,
++            )
++        return _stream_response(
++            {"streams": notice},
+             is_empty=True,
+         )
+ 
+@@ -329,7 +476,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -452,7 +606,7 @@ index 94f56ae..d95e0e7 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +437,7 @@ async def stream(
+@@ -337,6 +484,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -460,7 +614,7 @@ index 94f56ae..d95e0e7 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +449,7 @@ async def stream(
+@@ -348,7 +496,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -469,7 +623,7 @@ index 94f56ae..d95e0e7 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +479,7 @@ async def stream(
+@@ -378,7 +526,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -478,7 +632,7 @@ index 94f56ae..d95e0e7 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +494,40 @@ async def stream(
+@@ -393,8 +541,40 @@ async def stream(
                  }
              )
  
@@ -520,7 +674,7 @@ index 94f56ae..d95e0e7 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +535,29 @@ async def stream(
+@@ -402,18 +582,29 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -552,7 +706,7 @@ index 94f56ae..d95e0e7 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -432,6 +576,82 @@ async def stream(
+@@ -432,6 +623,82 @@ async def stream(
          for entry_index, service, debrid_extension in debrid_stream_specs:
              if service in debrid_errors:
                  continue
@@ -635,7 +789,7 @@ index 94f56ae..d95e0e7 100644
  
              is_cached = (
                  info_hash_cache_status.get(service, False)
-@@ -463,12 +683,21 @@ async def stream(
+@@ -463,12 +730,21 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -657,7 +811,7 @@ index 94f56ae..d95e0e7 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(
-@@ -479,23 +708,35 @@ async def stream(
+@@ -479,23 +755,35 @@ async def stream(
              file_index_str = (
                  str(file_index) if is_cached and file_index is not None else "n"
              )
@@ -696,7 +850,7 @@ index 94f56ae..d95e0e7 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|torrent|{info_hash}",
-@@ -515,6 +756,10 @@ async def stream(
+@@ -515,6 +803,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -707,7 +861,7 @@ index 94f56ae..d95e0e7 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +767,11 @@ async def stream(
+@@ -522,6 +814,11 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -719,7 +873,7 @@ index 94f56ae..d95e0e7 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +783,88 @@ async def stream(
+@@ -533,12 +830,117 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -727,12 +881,24 @@ index 94f56ae..d95e0e7 100644
 +            cached_results.append(
 +                (the_stream, is_pt, res_rank, 1, rank_idx, seed_key, is_cam)
 +            )
- 
--    if sort_mixed:
--        final_streams = cached_results
++
 +    ordered_entries = (
 +        cached_results if sort_mixed else cached_results + non_cached_results
 +    )
++    direct_streams = await _get_direct_streams()
++    direct_pt = [
++        {k: v for k, v in s.items() if k != "_is_pt"}
++        for s in direct_streams
++        if s.get("_is_pt")
++    ]
++    direct_other = [
++        {k: v for k, v in s.items() if k != "_is_pt"}
++        for s in direct_streams
++        if not s.get("_is_pt")
++    ]
+ 
+-    if sort_mixed:
+-        final_streams = cached_results
 +    if settings.DEMOTE_CAM:
 +        if settings.PTBR_FIRST:
 +            pt_good = [entry for entry in ordered_entries if entry[1] and not entry[6]]
@@ -741,10 +907,15 @@ index 94f56ae..d95e0e7 100644
 +            other_cam = [entry for entry in ordered_entries if not entry[1] and entry[6]]
 +            pt_good.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
 +            pt_cam.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
++            pt_good_rd = [entry[0] for entry in pt_good if "url" in entry[0] and entry[3] == 0]
++            pt_good_p2p = [entry[0] for entry in pt_good if not ("url" in entry[0] and entry[3] == 0)]
 +            final_streams = (
 +                notice_streams
-+                + [entry[0] for entry in pt_good]
++                + pt_good_rd
++                + direct_pt
++                + pt_good_p2p
 +                + [entry[0] for entry in other_good]
++                + direct_other
 +                + [entry[0] for entry in pt_cam]
 +                + [entry[0] for entry in other_cam]
 +            )
@@ -753,21 +924,33 @@ index 94f56ae..d95e0e7 100644
 +            cam_entries = [entry for entry in ordered_entries if entry[6]]
 +            final_streams = (
 +                notice_streams
++                + direct_pt
 +                + [entry[0] for entry in good_entries]
++                + direct_other
 +                + [entry[0] for entry in cam_entries]
 +            )
 +    elif settings.PTBR_FIRST:
 +        pt_entries = [entry for entry in ordered_entries if entry[1]]
 +        other_entries = [entry for entry in ordered_entries if not entry[1]]
 +        pt_entries.sort(key=lambda entry: (entry[2], entry[3], entry[5], entry[4]))
++        pt_rd = [entry[0] for entry in pt_entries if "url" in entry[0] and entry[3] == 0]
++        pt_p2p = [entry[0] for entry in pt_entries if not ("url" in entry[0] and entry[3] == 0)]
 +        final_streams = (
 +            notice_streams
-+            + [entry[0] for entry in pt_entries]
++            + pt_rd
++            + direct_pt
++            + pt_p2p
 +            + [entry[0] for entry in other_entries]
++            + direct_other
 +        )
      else:
 -        final_streams = cached_results + non_cached_results
-+        final_streams = notice_streams + [entry[0] for entry in ordered_entries]
++        final_streams = (
++            notice_streams
++            + direct_pt
++            + [entry[0] for entry in ordered_entries]
++            + direct_other
++        )
 +
 +    if settings.DEBRID_PRECHECK and not debrid_errors:
 +        rd_tokens = [
@@ -813,26 +996,31 @@ index 94f56ae..d95e0e7 100644
      has_results = len(final_streams) > 0
  
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..2e4ca10 100644
+index 835a975..eecf5db 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
-@@ -60,6 +60,7 @@ _SCRAPER_MODE_FIELDS = (
+@@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
      "SCRAPE_TORBOX",
      "SCRAPE_TORRENTSDB",
      "SCRAPE_PEERFLIX",
++    "SCRAPE_ADDONS",
 +    "SCRAPE_BRSITES",
  )
  _POSITIVE_WORK_COUNT_FIELDS = (
      "EXECUTOR_MAX_WORKERS",
-@@ -248,6 +249,7 @@ class AppSettings(ServerSettings):
+@@ -248,6 +250,11 @@ class AppSettings(ServerSettings):
      TORBOX_API_KEY: str | None = None
      SCRAPE_TORRENTSDB: bool | str = False
      SCRAPE_PEERFLIX: bool | str = False
++    SCRAPE_ADDONS: bool | str = False
++    ADDONS_URL: str | list[str] = []
++    DIRECT_ADDONS_URL: str | list[str] = []
++    DIRECT_ADDONS_TIMEOUT: float = 8.0
 +    SCRAPE_BRSITES: bool | str = False
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -317,6 +319,15 @@ class AppSettings(ServerSettings):
+@@ -317,6 +324,15 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -848,6 +1036,15 @@ index 835a975..2e4ca10 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
+@@ -653,6 +669,8 @@ class AppSettings(ServerSettings):
+         "JACKETT_URL",
+         "PROWLARR_URL",
+         "PUBLIC_BASE_URL",
++        "ADDONS_URL",
++        "DIRECT_ADDONS_URL",
+     )
+     def normalize_urls(cls, v):
+         if isinstance(v, str):
 diff --git a/comet/core/schema_migrations.py b/comet/core/schema_migrations.py
 index 7fe4809..4ebb34e 100644
 --- a/comet/core/schema_migrations.py
@@ -1245,6 +1442,212 @@ index 7521a09..54a81d6 100644
 +            return int(count)
 +
 +        return None
+diff --git a/comet/scrapers/addons.py b/comet/scrapers/addons.py
+new file mode 100644
+index 0000000..969ec80
+--- /dev/null
++++ b/comet/scrapers/addons.py
+@@ -0,0 +1,200 @@
++import re
++import unicodedata
++import urllib.parse
++from RTN import parse
++
++from comet.core.logger import log_scraper_error
++from comet.scrapers.base import BaseScraper
++from comet.scrapers.models import ScrapeRequest
++from comet.utils.formatting import size_to_bytes
++
++SIZE_PATTERN = re.compile(r"💾 ([\d.]+ [KMGT]B)")
++SEEDERS_PATTERN = re.compile(r"👤 (\d+)")
++
++
++def _strip_leading_icons(line: str) -> str:
++    while line:
++        ch = line[0]
++        cat = unicodedata.category(ch)
++        if cat in ("So", "Sk", "Sm", "Cn", "Mn", "Me") or ch.isspace():
++            line = line[1:]
++        else:
++            break
++    return line.strip()
++
++
++def _has_rtn_resolution(parsed) -> bool:
++    res = str(getattr(parsed, "resolution", "") or "").lower()
++    return bool(res and res not in ("", "unknown", "none"))
++
++
++def _has_rtn_quality(parsed) -> bool:
++    qual = str(getattr(parsed, "quality", "") or "").lower()
++    return bool(qual and qual not in ("", "unknown", "none"))
++
++
++def _get_short_host(url: str | None) -> str:
++    if not url:
++        return "Addons"
++    try:
++        host = urllib.parse.urlparse(url).netloc.split(":")[0].lower()
++    except Exception:
++        return "Addons"
++    if "stremio-betor" in host:
++        return "BeTor"
++    elif "bestcine" in host:
++        return "BestCine"
++    parts = host.split(".")
++    return parts[0] if parts and parts[0] else "Addons"
++
++
++class AddonsScraper(BaseScraper):
++    impersonate = "chrome"
++
++    def __init__(self, manager, session, url: str):
++        super().__init__(manager, session, url)
++
++    def _parse_stream(
++        self, stream: dict, request: ScrapeRequest | None = None
++    ) -> dict | None:
++        if not isinstance(stream, dict):
++            return None
++
++        info_hash = stream.get("infoHash")
++        if not isinstance(info_hash, str) or not info_hash.strip():
++            return None
++        info_hash = info_hash.strip().lower()
++
++        file_index = stream.get("fileIdx")
++        if not isinstance(file_index, int):
++            file_index = None
++
++        sources = stream.get("sources")
++        if not isinstance(sources, list):
++            sources = []
++
++        full_title = stream.get("title") or ""
++        full_desc = stream.get("description") or ""
++        name = stream.get("name") or ""
++        text_combined = f"{full_title}\n{full_desc}"
++        all_text = f"{name}\n{full_title}\n{full_desc}"
++
++        seeders_match = SEEDERS_PATTERN.search(text_combined)
++        seeders = int(seeders_match.group(1)) if seeders_match else None
++
++        size = None
++        size_match = SIZE_PATTERN.search(text_combined)
++        if size_match:
++            size = size_to_bytes(size_match.group(1))
++        if size is None:
++            behavior_hints = stream.get("behaviorHints")
++            if isinstance(behavior_hints, dict):
++                video_size = behavior_hints.get("videoSize")
++                if isinstance(video_size, (int, float)):
++                    size = int(video_size)
++
++        raw_text = full_title if full_title else full_desc
++        first_line = raw_text.split("\n")[0].strip() if raw_text else ""
++        cleaned_line = _strip_leading_icons(first_line)
++
++        parsed_line = parse(cleaned_line)
++        if not _has_rtn_resolution(parsed_line) and not _has_rtn_quality(parsed_line):
++            behavior_hints = stream.get("behaviorHints")
++            filename = (
++                behavior_hints.get("filename")
++                if isinstance(behavior_hints, dict)
++                else None
++            )
++            if (
++                isinstance(filename, str)
++                and filename.strip()
++                and _has_rtn_resolution(parse(filename.strip()))
++            ):
++                final_title = filename.strip()
++            else:
++                ep_tag = ""
++                if not parsed_line.episodes:
++                    m_ep = re.search(
++                        r"\b[ST](\d+)[·.xE](\d+)\b", text_combined, re.IGNORECASE
++                    )
++                    if m_ep:
++                        ep_tag = f"S{int(m_ep.group(1)):02d}E{int(m_ep.group(2)):02d}"
++                    elif (
++                        request
++                        and request.media_type == "series"
++                        and request.season is not None
++                        and request.episode is not None
++                    ):
++                        ep_tag = f"S{request.season:02d}E{request.episode:02d}"
++
++                name_lines = name.split("\n")[1:]
++                name_rest = " ".join(name_lines)
++                res = ""
++                if re.search(r"\b(?:4k|2160p)\b", name_rest, re.IGNORECASE):
++                    res = "2160p"
++                elif re.search(r"\b1080p\b", name_rest, re.IGNORECASE):
++                    res = "1080p"
++                elif re.search(r"\b720p\b", name_rest, re.IGNORECASE):
++                    res = "720p"
++                elif re.search(r"\b480p\b", name_rest, re.IGNORECASE):
++                    res = "480p"
++
++                # Rotulos de idioma do addon (Dual/Dublado) nao entram no titulo: o BestCine
++                # marca como Dual releases YTS/FLUX em ingles, o que contaminava a deteccao PT-BR.
++
++                # Titulo sintetico com o nome original da midia: o titulo traduzido do addon
++                # ("Transformers: O Inicio") fazia a deteccao de idioma marcar PT-BR em
++                # releases em ingles, e a marca contaminava o mesmo hash nas outras fontes.
++                base_title = request.title if request and request.title else cleaned_line
++                if request and request.media_type == "movie" and request.year:
++                    base_title = f"{base_title} {request.year}"
++                parts = [base_title]
++                if ep_tag:
++                    parts.append(ep_tag)
++                if res:
++                    parts.append(res)
++                final_title = " ".join(parts).strip()
++        else:
++            final_title = cleaned_line
++
++        if not final_title:
++            return None
++
++        short_host = _get_short_host(self.url)
++        # O rotulo entre colchetes do addon (ex.: BeTor "[bludv]") nao e confiavel:
++        # aparece ate em releases YTS em ingles. Nao entra no tracker para nao
++        # disparar a deteccao PT-BR por tracker BR.
++        tracker = f"Addons|{short_host}"
++
++        return {
++            "title": final_title,
++            "infoHash": info_hash,
++            "fileIndex": file_index,
++            "seeders": seeders,
++            "size": size,
++            "tracker": tracker,
++            "sources": sources,
++        }
++
++    async def scrape(self, request: ScrapeRequest):
++        torrents = []
++        try:
++            url = f"{self.url}/stream/{request.media_type}/{request.media_id}.json"
++            async with self.session.get(url) as response:
++                if response.status != 200:
++                    return []
++                results = await response.json()
++
++            if not isinstance(results, dict) or not isinstance(
++                results.get("streams"), list
++            ):
++                return []
++
++            for stream in results["streams"]:
++                parsed = self._parse_stream(stream, request)
++                if parsed is not None:
++                    torrents.append(parsed)
++        except Exception as e:
++            log_scraper_error("Addons", self.url, request.media_id, e)
++
++        return torrents
 diff --git a/comet/scrapers/brsites.py b/comet/scrapers/brsites.py
 new file mode 100644
 index 0000000..c6c18de
@@ -2300,6 +2703,201 @@ index 0000000..4c2b0a7
 +                )
 +                _cooldown_until = time.time() + 1800
 +                break
+diff --git a/comet/services/direct_addons.py b/comet/services/direct_addons.py
+new file mode 100644
+index 0000000..22834c7
+--- /dev/null
++++ b/comet/services/direct_addons.py
+@@ -0,0 +1,189 @@
++import asyncio
++import re
++import time
++from urllib.parse import urlparse
++
++from curl_cffi.requests import AsyncSession
++
++from comet.core.logger import logger
++from comet.core.models import settings
++
++_CACHE: dict[tuple[str, str], tuple[float, list[dict]]] = {}
++_CACHE_TTL = 600.0  # 10 min
++_CACHE_MAX_SIZE = 500
++
++RES_RANKS = {
++    "4K": 0,
++    "1080p": 1,
++    "720p": 2,
++    "480p": 3,
++}
++
++PT_KEYWORDS = (
++    "dublado",
++    "dual",
++    "pt-br",
++    "ptbr",
++    "português",
++    "portugues",
++    "nacional",
++    "🇧🇷",
++)
++
++
++def _get_short_name(base_url: str) -> str:
++    parsed = urlparse(base_url)
++    host = (parsed.hostname or "").lower()
++    if "fenixflix" in host:
++        return "FenixFlix"
++    if "froststream" in host:
++        return "FrostStream"
++    first_label = host.split(".")[0] if host else "Direct"
++    return first_label.capitalize()
++
++
++def _extract_res(texto: str) -> str:
++    m = re.search(r"(?i)\b(2160p|4k|1080p|720p|480p)\b", texto)
++    if not m:
++        return ""
++    val = m.group(1).lower()
++    if val in ("2160p", "4k"):
++        return "4K"
++    elif val == "1080p":
++        return "1080p"
++    elif val == "720p":
++        return "720p"
++    elif val == "480p":
++        return "480p"
++    return ""
++
++
++async def _fetch_addon(
++    session: AsyncSession, base_url: str, media_type: str, media_id: str
++) -> list[dict]:
++    url = f"{base_url}/stream/{media_type}/{media_id}.json"
++    try:
++        resp = await session.get(url, timeout=settings.DIRECT_ADDONS_TIMEOUT)
++        if resp.status_code == 200:
++            data = resp.json()
++            streams = data.get("streams", [])
++            if isinstance(streams, list):
++                return streams
++            return []
++        else:
++            logger.warning(
++                f"Direct addon {base_url} returned HTTP {resp.status_code}"
++            )
++    except Exception as e:
++        logger.warning(f"Direct addon {base_url} failed: {e}")
++    return []
++
++
++async def fetch_direct_streams(media_type: str, media_id: str) -> list[dict]:
++    try:
++        raw_urls = settings.DIRECT_ADDONS_URL
++        if isinstance(raw_urls, str):
++            urls = [raw_urls.rstrip("/")] if raw_urls else []
++        elif isinstance(raw_urls, list):
++            urls = [u.rstrip("/") for u in raw_urls if u]
++        else:
++            urls = []
++
++        if not urls:
++            return []
++
++        cache_key = (media_type, media_id)
++        now = time.time()
++        if cache_key in _CACHE:
++            cached_time, cached_items = _CACHE[cache_key]
++            if now - cached_time < _CACHE_TTL:
++                return cached_items
++            else:
++                _CACHE.pop(cache_key, None)
++
++        try:
++            async with AsyncSession(impersonate="chrome") as session:
++                tasks = [
++                    _fetch_addon(session, base, media_type, media_id)
++                    for base in urls
++                ]
++                responses = await asyncio.gather(*tasks, return_exceptions=True)
++        except Exception as e:
++            logger.warning(f"Direct addons session error: {e}")
++            return []
++
++        converted_items = []
++        order_idx = 0
++
++        for base, res_streams in zip(urls, responses):
++            if not isinstance(res_streams, list):
++                continue
++            curto = _get_short_name(base)
++            for s in res_streams:
++                if not isinstance(s, dict):
++                    continue
++                orig_url = s.get("url")
++                if (
++                    not orig_url
++                    or not isinstance(orig_url, str)
++                    or not orig_url.startswith("http")
++                ):
++                    continue
++
++                orig_name = str(s.get("name") or "")
++                orig_desc = str(s.get("title") or s.get("description") or "")
++                texto = f"{orig_name}\n{orig_desc}"
++
++                texto_lower = texto.lower()
++                is_pt = any(kw in texto_lower for kw in PT_KEYWORDS)
++
++                res = _extract_res(texto)
++                res_rank = RES_RANKS.get(res, 4)
++
++                new_name = (
++                    ("🇧🇷 PT-BR\n" if is_pt else "")
++                    + f"🌐 {curto}"
++                    + (f"\n{res}" if res else "")
++                )
++
++                desc_lines = orig_desc.strip().splitlines()[:6]
++                trimmed_desc = "\n".join(desc_lines)
++                if trimmed_desc:
++                    new_desc = (
++                        f"{trimmed_desc}\n🌐 Link direto ({curto}): "
++                        "não usa o Real-Debrid"
++                    )
++                else:
++                    new_desc = (
++                        f"🌐 Link direto ({curto}): não usa o Real-Debrid"
++                    )
++
++                orig_hints = s.get("behaviorHints")
++                behavior_hints = (
++                    dict(orig_hints) if isinstance(orig_hints, dict) else {}
++                )
++                behavior_hints["bingeGroup"] = f"comet|direct|{curto}|{res}"
++
++                clean_stream = {
++                    "name": new_name,
++                    "description": new_desc,
++                    "url": orig_url,
++                    "behaviorHints": behavior_hints,
++                    "_is_pt": is_pt,
++                }
++                converted_items.append((clean_stream, is_pt, res_rank, order_idx))
++                order_idx += 1
++
++        converted_items.sort(key=lambda x: (0 if x[1] else 1, x[2], x[3]))
++        results = [item[0] for item in converted_items]
++
++        if results:
++            while len(_CACHE) >= _CACHE_MAX_SIZE:
++                oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][0])
++                _CACHE.pop(oldest_key, None)
++            _CACHE[cache_key] = (now, results)
++
++        return results
++    except Exception as e:
++        logger.warning(f"fetch_direct_streams unexpected error: {e}")
++        return []
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
 index b844e5e..e40bb76 100644
 --- a/comet/services/filtering.py

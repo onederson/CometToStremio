@@ -96,8 +96,9 @@ Comet, StremThru, Prowlarr, Caddy e AdGuard **não podem ser fechados pelo Andro
 | Nyaa | anime only | Ativo |
 | SeaDex | anime only | ✅ Ativo |
 | Peerflix | — | ✅ Ativo (`impersonate="chrome"`) |
-| Comet | feels.legal | ✅ Ativo (`comet.feels.legal`) |
+| Comet | feels.legal + Midnight | ✅ Ativo: `COMET_URL=["https://comet.feels.legal","https://cometfortheweebs.midnightignite.me"]`. A Midnight tem índice próprio (inclui BitMagnet/DHT): GoT `7:2` 771→1059 (PT-BR 14→18), Ben 10 `1:2` PT-BR 17→22, sem custo de tempo |
 | Prowlarr | `PROWLARR_INDEXERS=["1","2","3"]` | Ativo |
+| Addons | `SCRAPE_ADDONS=live`, `ADDONS_URL=[BeTor v3, BestCine]` | ✅ Ativo (`comet/scrapers/addons.py`). Ganho pequeno (+1 por título). O BestCine põe o título em PT ("Transformers: O Início") e marca "Dual" até em YTS em inglês: por isso o título sintético usa `request.title` e não leva rótulos de idioma, e o rótulo `[bludv]` do BeTor não entra no tracker. Sem isso, os falsos PT-BR contaminavam o mesmo hash nas outras fontes (Transformers One 4→16 falsos) |
 | BRSites | `SCRAPE_BRSITES=live` | ✅ Ativo: scraper próprio (`comet/scrapers/brsites.py`) de `filmestorrent.tv` e `apachetorrents.com`, todos os magnets de cada post |
 
 Flags importantes do `.env`:
@@ -155,6 +156,8 @@ Flags importantes do `.env`:
     - Experimento de indexadores sem ganho, desfeito (Seção 7, item 5).
 12. **CAM no fim da lista** (`DEMOTE_CAM=True`): `filtering.py::is_cam_release` (usa `parsed.quality` do RTN: `CAM`, `TeleSync`, `TeleCine`, `SCR`). Em `stream.py`, a ordem fica avisos → PT bons → outros bons → PT CAM → outros CAM, com `🎦 CAM` no nome e aviso na descrição; o corte por resolução e o precheck também os deixam por último. Em `playback.py`, a troca do 451 só usa CAM se não houver outro candidato (antes ela escolhia CAMRip com marca d'água "1xbet"). Com "Remover lixo" ligado no `/configure` (o usuário usa assim), os CAM nem aparecem na lista, mas a troca do 451 lê o banco direto.
 13. **Biblioteca do RD:** StremThru com o addon Store ligado e exposto pelo Caddy em `:8443` (`config/Caddyfile`, `scripts/watchdog.sh`).
+15. **Mais fontes (30/10/2026, noite):** Comet Midnight como 2ª instância (ganho real) e scraper `Addons` (BeTor v3 + BestCine, ganho pequeno). Testados e descartados: Torrentio com todos os provedores (o padrão já inclui os BR), Brazuca Torrents (fora do ar), NekoBT (zero ganho, +11 s no One Piece), AnimeTosho (API fechada, 403; `feed.animetosho.org` não existe mais), DMM ingest (baixa GBs e duplica o Zilean), MediaFusion ElfHosted (0 resultados), BitMagnet próprio (a Comet Midnight já traz BitMagnet), outros addons BR mortos (KingVOD, Magneto, BluDV stream, Animes BR, Skyflix, AnimesDigital, MyCine, CineTorrent e Mico-Leão vazios).
+16. **Links diretos dentro do Comet (`DIRECT_ADDONS_URL`):** FenixFlix (`https://fenixflix.fenixhub.online`) e FrostStream (`https://froststream.cloutteam.com`) servem vídeo HTTP direto (não é torrent nem RD, então o 451 não se aplica). Em vez de instalá-los no Stremio, o Comet busca os streams deles ao vivo, em paralelo com o scraping (`comet/services/direct_addons.py`, cache em memória de 10 min, nada no banco, timeout `DIRECT_ADDONS_TIMEOUT=8`), e os mescla com rótulo `🌐 <addon>`. Ordem: PT-BR em cache no RD (⚡) → diretos PT-BR → PT-BR não cacheados/P2P → outros → diretos não PT → CAM. Conferido: Ben 10 Omniverse `1:2` passa a abrir com 5 dublados diretos no topo (antes só RD⬇️ bloqueados), Devoradores de Estrelas com 20 diretos (4K dublado), Demon Slayer `1:1` com 12. Se os links mudarem/caírem, basta tirar a URL do `.env`.
 14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
 
 **O patch Python inteiro** (tudo menos `comet/templates/index.html`) está em `comet-patches/ptbr-first.patch` (LF). Para reaplicar depois de atualizar o Comet: `.\scripts\deploy_ui.ps1` e `.\scripts\deploy_patches.ps1`. Para regenerar a partir do A71: no chroot, `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /tmp/x.patch`, copie para `/data/local/tmp` e faça `adb pull`.
@@ -224,7 +227,13 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 **Testado pelo usuário em 30/10/2026:** lançamento dublado funcionou, mas pela troca do 451 caiu num CAMRip com marca d'água (resolvido no item 12); Demon Slayer T1 e T5 ok; One Piece sem PT-BR (limite das fontes: quase tudo é legendado); Ben 10 Omniverse: todos os dublados estão bloqueados (451) no RD e só o P2P sobra, que tem poucos seeders.
 
-**Pendente do lado do usuário:** instalar o addon Store (`https://a71comet.duckdns.org:8443/stremio/store/configure`, Real-Debrid + chave do RD).
+**Pendente do lado do usuário:** instalar o addon Store (`https://a71comet.duckdns.org:8443/stremio/store/configure`, Real-Debrid + chave do RD) (FenixFlix e FrostStream **não** precisam mais ser instalados: já vêm dentro do Comet, item 16 da Seção 4).
+
+**O Store é opcional:** ele só mostra como catálogo os torrents que já estão na conta do RD (135 em 30/10/2026, quase todos adicionados pelo próprio Comet ao dar play). O usuário achava que não tinha nada lá.
+
+**Próximos passos que o usuário quer:**
+1. **Mais fontes de link direto como FenixFlix/FrostStream:** procurar outros addons Stremio que servem vídeo HTTP direto com dublado e acrescentar a URL em `DIRECT_ADDONS_URL` (nada de código). Critério para entrar: o `GET /stream/...json` traz `url`, o link responde `200/206 video/*` com `Range`, e há dublado em títulos que o RD bloqueia (teste com Ben 10 Omniverse `tt2293002:1:2`).
+2. **Legendas melhores que o OpenSubtitles PRO** (ele erra a legenda e a sincronia): em andamento, ver item 17 da Seção 4 quando existir.
 
 Se ele relatar problema, comece pelos logs (`/data/comet/comet.log`: procure `🚫 RD bloqueou`, `🔁 451 em`).
 
