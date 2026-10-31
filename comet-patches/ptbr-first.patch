@@ -122,10 +122,15 @@ index 0000000..8311d24
 +            headers={"Cache-Control": "public, max-age=3600"},
 +        )
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
-index bce0fec..e106d6a 100644
+index bce0fec..80388bd 100644
 --- a/comet/api/endpoints/manifest.py
 +++ b/comet/api/endpoints/manifest.py
-@@ -3,6 +3,7 @@ from fastapi import APIRouter, Request
+@@ -1,8 +1,12 @@
++import hashlib
++import json
++
+ from fastapi import APIRouter, Request
+ 
  from comet.core.config_validation import config_check
  from comet.core.models import settings
  from comet.debrid.manager import build_addon_name
@@ -133,7 +138,7 @@ index bce0fec..e106d6a 100644
  from comet.utils.cache import CachePolicies, cached_json_response
  
  router = APIRouter()
-@@ -39,6 +40,26 @@ async def manifest(request: Request, b64config: str | None = None):
+@@ -39,6 +43,37 @@ async def manifest(request: Request, b64config: str | None = None):
          "behaviorHints": {"configurable": True, "configurationRequired": False},
      }
  
@@ -156,6 +161,17 @@ index bce0fec..e106d6a 100644
 +                "idPrefixes": ["tt"],
 +            }
 +        )
++
++    catalog_resource_payload = base_manifest["catalogs"] + base_manifest["resources"]
++    n = int(
++        hashlib.sha1(
++            json.dumps(
++                catalog_resource_payload, sort_keys=True, ensure_ascii=False
++            ).encode()
++        ).hexdigest()[:6],
++        16,
++    )
++    base_manifest["version"] = f"2.1.{n}"
 +
      config = config_check(b64config, strict_b64config=True)
      if not config:
@@ -1540,7 +1556,7 @@ index 0000000..8b4bca0
 +            },
 +        )
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..ffab4e6 100644
+index 835a975..092c91a 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -1564,7 +1580,7 @@ index 835a975..ffab4e6 100644
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -317,6 +324,34 @@ class AppSettings(ServerSettings):
+@@ -317,6 +324,36 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -1586,6 +1602,8 @@ index 835a975..ffab4e6 100644
 +    CATALOGS_ENABLED: bool = True
 +    CATALOG_REGION: str = "BR"
 +    CATALOG_LANGUAGE: str = "pt-BR"
++    CATALOG_ORIGINALS: bool = True
++    CATALOG_LANDSCAPE: bool = True
 +    CATALOG_PROVIDERS: str | list[str] = [
 +        "netflix",
 +        "prime",
@@ -1599,7 +1617,7 @@ index 835a975..ffab4e6 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +688,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +690,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -3238,10 +3256,10 @@ index 13cfaa3..a0455a0 100644
  
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..0a0d546
+index 0000000..4d9cb2f
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,1118 @@
 +import asyncio
 +import datetime
 +import json
@@ -3264,6 +3282,15 @@ index 0000000..0a0d546
 +    "paramount": ("Paramount+", 531),
 +    "globoplay": ("Globoplay", 307),
 +    "crunchyroll": ("Crunchyroll", 283),
++}
++
++ORIGINAL_NETWORKS = {
++    "netflix": 213,
++    "disney": 2739,
++    "prime": 1024,
++    "max": "3186|49",
++    "apple": 2552,
++    "paramount": 4330,
 +}
 +
 +MOVIE_GENRE_MAP = {
@@ -3309,9 +3336,13 @@ index 0000000..0a0d546
 +
 +IMDB_CACHE_DIR = "/opt/comet/data/catalog_cache"
 +IMDB_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "imdb_map.json")
++LANDSCAPE_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "landscape_map.json")
 +
 +_IMDB_MAP: dict[str, str] = {}
 +_IMDB_MAP_LOADED = False
++
++_LANDSCAPE_MAP: dict[str, str] = {}
++_LANDSCAPE_MAP_LOADED = False
 +
 +_CATALOG_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
 +_CATALOG_CACHE_MAX = 300
@@ -3344,6 +3375,32 @@ index 0000000..0a0d546
 +        logger.warning(f"Error saving imdb_map.json: {e}")
 +
 +
++def _ensure_landscape_map_loaded():
++    global _LANDSCAPE_MAP, _LANDSCAPE_MAP_LOADED
++    if not _LANDSCAPE_MAP_LOADED:
++        if os.path.exists(LANDSCAPE_CACHE_FILE):
++            try:
++                with open(LANDSCAPE_CACHE_FILE, "r", encoding="utf-8") as f:
++                    data = json.load(f)
++                    if isinstance(data, dict):
++                        _LANDSCAPE_MAP.update(data)
++            except Exception as e:
++                logger.warning(f"Error loading landscape_map.json: {e}")
++        _LANDSCAPE_MAP_LOADED = True
++
++
++def _save_landscape_map():
++    try:
++        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
++        data_to_save = dict(_LANDSCAPE_MAP)
++        tmp_path = f"{LANDSCAPE_CACHE_FILE}.tmp.{os.getpid()}"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(data_to_save, f)
++        os.replace(tmp_path, LANDSCAPE_CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving landscape_map.json: {e}")
++
++
 +def _get_providers_list() -> list[str]:
 +    raw = getattr(settings, "CATALOG_PROVIDERS", list(PROVIDERS.keys()))
 +    if isinstance(raw, str):
@@ -3363,10 +3420,24 @@ index 0000000..0a0d546
 +
 +def build_manifest_catalogs() -> list[dict]:
 +    catalogs = [
++        # 1. 🔟 Top 10 de hoje filme, série
++        {
++            "type": "movie",
++            "id": "comet_top10",
++            "name": "🔟 Top 10 de hoje",
++            "extra": [],
++        },
++        {
++            "type": "series",
++            "id": "comet_top10",
++            "name": "🔟 Top 10 de hoje",
++            "extra": [],
++        },
++        # 2. 🔥 Em alta filme, série (deitadas)
 +        {
 +            "type": "movie",
 +            "id": "comet_trending",
-+            "name": "Em alta",
++            "name": "🔥 Em alta",
 +            "extra": [
 +                {"name": "skip", "isRequired": False},
 +            ],
@@ -3374,19 +3445,51 @@ index 0000000..0a0d546
 +        {
 +            "type": "series",
 +            "id": "comet_trending",
-+            "name": "Em alta",
++            "name": "🔥 Em alta",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        },
++        # 3. 🆕 Lançamentos filme, série (deitadas)
++        {
++            "type": "movie",
++            "id": "comet_new",
++            "name": "🆕 Lançamentos",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        },
++        {
++            "type": "series",
++            "id": "comet_new",
++            "name": "🆕 Lançamentos",
 +            "extra": [
 +                {"name": "skip", "isRequired": False},
 +            ],
 +        },
 +    ]
 +
++    # 4. Intercala serviços e temas
++    service_blocks = []
++    originals_enabled = getattr(settings, "CATALOG_ORIGINALS", True)
 +    for p in _get_providers_list():
 +        if p not in PROVIDERS:
 +            continue
 +        name, _ = PROVIDERS[p]
-+        # Serie primeiro, depois filme
-+        catalogs.append(
++        block = []
++        if originals_enabled and p in ORIGINAL_NETWORKS:
++            block.append(
++                {
++                    "type": "series",
++                    "id": f"comet_orig_{p}",
++                    "name": f"⭐ Originais {name}",
++                    "extra": [
++                        {"name": "genre", "options": TV_GENRE_OPTIONS, "isRequired": False},
++                        {"name": "skip", "isRequired": False},
++                    ],
++                }
++            )
++        block.append(
 +            {
 +                "type": "series",
 +                "id": f"comet_{p}",
@@ -3397,7 +3500,7 @@ index 0000000..0a0d546
 +                ],
 +            }
 +        )
-+        catalogs.append(
++        block.append(
 +            {
 +                "type": "movie",
 +                "id": f"comet_{p}",
@@ -3408,12 +3511,134 @@ index 0000000..0a0d546
 +                ],
 +            }
 +        )
++        service_blocks.append(block)
 +
++    theme_blocks = [
++        [
++            {
++                "type": "movie",
++                "id": "comet_br",
++                "name": "🇧🇷 Nacionais",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "series",
++                "id": "comet_br",
++                "name": "🇧🇷 Nacionais",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "movie",
++                "id": "comet_action",
++                "name": "💥 Ação e aventura",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "series",
++                "id": "comet_crime",
++                "name": "🕵️ Crime e suspense",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "movie",
++                "id": "comet_comedy",
++                "name": "😂 Comédias",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "series",
++                "id": "comet_kdrama",
++                "name": "🇰🇷 Doramas",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "movie",
++                "id": "comet_horror",
++                "name": "👻 Terror",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "movie",
++                "id": "comet_family",
++                "name": "🧸 Para a família",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++        [
++            {
++                "type": "movie",
++                "id": "comet_docs",
++                "name": "🌍 Documentários",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ],
++    ]
++
++    max_len = max(len(service_blocks), len(theme_blocks))
++    for i in range(max_len):
++        if i < len(service_blocks):
++            catalogs.extend(service_blocks[i])
++        if i < len(theme_blocks):
++            catalogs.extend(theme_blocks[i])
++
++    # 5. 🏆 Aclamados filme, série
++    catalogs.append(
++        {
++            "type": "movie",
++            "id": "comet_top",
++            "name": "🏆 Aclamados",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++    )
++    catalogs.append(
++        {
++            "type": "series",
++            "id": "comet_top",
++            "name": "🏆 Aclamados",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++    )
++
++    # 6. 🍥 Animes
 +    catalogs.append(
 +        {
 +            "type": "series",
 +            "id": "comet_anime",
-+            "name": "Animes",
++            "name": "🍥 Animes",
 +            "extra": [
 +                {"name": "genre", "options": TV_GENRE_OPTIONS, "isRequired": False},
 +                {"name": "skip", "isRequired": False},
@@ -3421,6 +3646,7 @@ index 0000000..0a0d546
 +        }
 +    )
 +
++    # 7. comet_search filme, série (como hoje)
 +    catalogs.append(
 +        {
 +            "type": "movie",
@@ -3470,13 +3696,137 @@ index 0000000..0a0d546
 +    region = getattr(settings, "CATALOG_REGION", "BR")
 +    language = getattr(settings, "CATALOG_LANGUAGE", "pt-BR")
 +    tmdb_type = "movie" if media_type == "movie" else "tv"
-+    today_str = datetime.date.today().isoformat()
++    today = datetime.date.today()
++    today_str = today.isoformat()
++
++    if catalog_id == "comet_top10":
++        path = f"trending/{tmdb_type}/day"
++        params = {
++            "language": language,
++            "page": page,
++        }
++        return path, params
++
++    if catalog_id in (
++        "comet_br",
++        "comet_action",
++        "comet_comedy",
++        "comet_horror",
++        "comet_crime",
++        "comet_kdrama",
++        "comet_family",
++        "comet_docs",
++    ):
++        all_providers = "|".join(
++            str(PROVIDERS[p][1]) for p in _get_providers_list() if p in PROVIDERS
++        )
++        base_params = {
++            "watch_region": region,
++            "with_watch_providers": all_providers,
++            "language": language,
++            "page": page,
++            "sort_by": "popularity.desc",
++            "vote_count.gte": 200,
++        }
++
++        if catalog_id == "comet_br":
++            base_params["with_origin_country"] = "BR"
++            base_params["vote_count.gte"] = 20
++            return f"discover/{tmdb_type}", base_params
++
++        if catalog_id == "comet_action":
++            base_params["without_genres"] = "16,10751"
++            if media_type != "movie":
++                return None
++            base_params["with_genres"] = "28|12"
++            return "discover/movie", base_params
++
++        if catalog_id == "comet_comedy":
++            base_params["without_genres"] = "16,10751"
++            if media_type != "movie":
++                return None
++            base_params["with_genres"] = 35
++            return "discover/movie", base_params
++
++        if catalog_id == "comet_horror":
++            base_params["without_genres"] = "16,10751"
++            if media_type != "movie":
++                return None
++            base_params["with_genres"] = 27
++            return "discover/movie", base_params
++
++        if catalog_id == "comet_crime":
++            if media_type != "series":
++                return None
++            base_params["with_genres"] = "80|9648"
++            base_params["without_genres"] = "10763,10764,10766,10767"
++            return "discover/tv", base_params
++
++        if catalog_id == "comet_kdrama":
++            if media_type != "series":
++                return None
++            base_params["with_original_language"] = "ko"
++            base_params["without_genres"] = "16,10764,10767"
++            base_params["vote_count.gte"] = 50
++            return "discover/tv", base_params
++
++        if catalog_id == "comet_family":
++            if media_type != "movie":
++                return None
++            base_params["with_genres"] = 10751
++            return "discover/movie", base_params
++
++        if catalog_id == "comet_docs":
++            if media_type != "movie":
++                return None
++            base_params["with_genres"] = 99
++            base_params["vote_count.gte"] = 50
++            return "discover/movie", base_params
 +
 +    if catalog_id == "comet_trending":
 +        path = f"trending/{tmdb_type}/week"
 +        params = {
 +            "language": language,
 +            "page": page,
++        }
++        return path, params
++
++    if catalog_id == "comet_new":
++        all_providers = "|".join(
++            str(PROVIDERS[p][1]) for p in _get_providers_list() if p in PROVIDERS
++        )
++        path = f"discover/{tmdb_type}"
++        past_120_str = (today - datetime.timedelta(days=120)).isoformat()
++        params = {
++            "watch_region": region,
++            "with_watch_providers": all_providers,
++            "language": language,
++            "page": page,
++            "vote_count.gte": 20,
++        }
++        if media_type == "movie":
++            params["primary_release_date.gte"] = past_120_str
++            params["primary_release_date.lte"] = today_str
++            params["sort_by"] = "primary_release_date.desc"
++        else:
++            params["first_air_date.gte"] = past_120_str
++            params["first_air_date.lte"] = today_str
++            params["sort_by"] = "first_air_date.desc"
++        return path, params
++
++    if catalog_id == "comet_top":
++        all_providers = "|".join(
++            str(PROVIDERS[p][1]) for p in _get_providers_list() if p in PROVIDERS
++        )
++        path = f"discover/{tmdb_type}"
++        min_votes = 3000 if media_type == "movie" else 1000
++        params = {
++            "watch_region": region,
++            "with_watch_providers": all_providers,
++            "language": language,
++            "page": page,
++            "sort_by": "vote_average.desc",
++            "vote_count.gte": min_votes,
 +        }
 +        return path, params
 +
@@ -3505,6 +3855,37 @@ index 0000000..0a0d546
 +            params["with_genres"] = 16
 +            params["sort_by"] = "popularity.desc"
 +            params["vote_count.gte"] = 50
++        return path, params
++
++    if catalog_id.startswith("comet_orig_"):
++        if media_type != "series":
++            return None
++        provider_key = catalog_id[len("comet_orig_"):]
++        if provider_key not in ORIGINAL_NETWORKS:
++            return None
++        network_id = ORIGINAL_NETWORKS[provider_key]
++        path = "discover/tv"
++        params = {
++            "with_networks": str(network_id),
++            "without_genres": "10763,10764,10766,10767",
++            "language": language,
++            "page": page,
++        }
++        if genre in ("Lançamentos", "Lancamentos"):
++            params["sort_by"] = "first_air_date.desc"
++            params["vote_count.gte"] = 10
++            params["first_air_date.lte"] = today_str
++        elif genre in ("Mais bem avaliados", "Mais Bem Avaliados"):
++            params["sort_by"] = "vote_average.desc"
++            params["vote_count.gte"] = 500
++        elif genre and genre in TV_GENRE_MAP:
++            gid = TV_GENRE_MAP[genre]
++            params["with_genres"] = gid
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 100
++        else:
++            params["sort_by"] = "popularity.desc"
++            params["vote_count.gte"] = 100
 +        return path, params
 +
 +    if catalog_id.startswith("comet_"):
@@ -3540,9 +3921,9 @@ index 0000000..0a0d546
 +            params["sort_by"] = "popularity.desc"
 +            params["vote_count.gte"] = 50
 +            if media_type == "movie":
-+                params["primary_release_date.gte"] = (datetime.date.today() - datetime.timedelta(days=4 * 365)).isoformat()
++                params["primary_release_date.gte"] = (today - datetime.timedelta(days=4 * 365)).isoformat()
 +            else:
-+                params["air_date.gte"] = (datetime.date.today() - datetime.timedelta(days=2 * 365)).isoformat()
++                params["air_date.gte"] = (today - datetime.timedelta(days=2 * 365)).isoformat()
 +                params["vote_count.gte"] = 200
 +                # sem jornal, reality, novela e talk show (luta livre, programas diarios)
 +                params["without_genres"] = "10763,10764,10766,10767"
@@ -3554,39 +3935,48 @@ index 0000000..0a0d546
 +async def _fetch_catalog_items(
 +    media_type: str, catalog_id: str, genre: str | None, skip: int
 +) -> list[dict]:
++    if catalog_id == "comet_top10" and skip > 0:
++        return []
++
 +    _ensure_imdb_map_loaded()
 +    page1 = (skip // 40) * 2 + 1
 +    page2 = page1 + 1
 +
 +    query1 = _build_tmdb_path_and_params(media_type, catalog_id, genre, page1)
-+    query2 = _build_tmdb_path_and_params(media_type, catalog_id, genre, page2)
-+    if not query1 or not query2:
++    if not query1:
 +        return []
 +
++    query2 = (
++        None
++        if catalog_id == "comet_top10"
++        else _build_tmdb_path_and_params(media_type, catalog_id, genre, page2)
++    )
++
 +    path1, params1 = query1
-+    path2, params2 = query2
 +    url1 = f"{path1}?{urllib.parse.urlencode(params1)}"
-+    url2 = f"{path2}?{urllib.parse.urlencode(params2)}"
++    url2 = (
++        f"{query2[0]}?{urllib.parse.urlencode(query2[1])}" if query2 else None
++    )
 +
 +    timeout = aiohttp.ClientTimeout(total=8.0)
 +    async with aiohttp.ClientSession(timeout=timeout) as session:
 +        tmdb = TMDBApi(session)
-+        res1, res2 = await asyncio.gather(
-+            tmdb._get_json(url1, f"catalog {catalog_id} p{page1}"),
-+            tmdb._get_json(url2, f"catalog {catalog_id} p{page2}"),
-+            return_exceptions=True,
-+        )
++        tasks = [tmdb._get_json(url1, f"catalog {catalog_id} p{page1}")]
++        if url2:
++            tasks.append(tmdb._get_json(url2, f"catalog {catalog_id} p{page2}"))
++        gather_res = await asyncio.gather(*tasks, return_exceptions=True)
 +
 +        raw_items = []
-+        if isinstance(res1, dict) and isinstance(res1.get("results"), list):
-+            raw_items.extend(res1["results"])
-+        if isinstance(res2, dict) and isinstance(res2.get("results"), list):
-+            raw_items.extend(res2["results"])
++        for res in gather_res:
++            if isinstance(res, dict) and isinstance(res.get("results"), list):
++                raw_items.extend(res["results"])
 +
 +        unique_raw_items = []
 +        seen_tmdb_ids = set()
 +        today_str = datetime.date.today().isoformat()
-+        is_lancamentos = genre in ("Lançamentos", "Lancamentos")
++        is_lancamentos = (
++            genre in ("Lançamentos", "Lancamentos") or catalog_id == "comet_new"
++        )
 +
 +        for item in raw_items:
 +            if not isinstance(item, dict):
@@ -3595,7 +3985,7 @@ index 0000000..0a0d546
 +            poster = item.get("poster_path")
 +            if not tid or not poster or tid in seen_tmdb_ids:
 +                continue
-+            # If Lancamentos, guarantee no future releases
++            # If Lancamentos or comet_new, guarantee no future releases
 +            if is_lancamentos:
 +                rel_date = (
 +                    item.get("release_date")
@@ -3606,10 +3996,20 @@ index 0000000..0a0d546
 +                    continue
 +            seen_tmdb_ids.add(tid)
 +            unique_raw_items.append(item)
++            if catalog_id == "comet_top10" and len(unique_raw_items) >= 15:
++                break
 +
 +        tmdb_type = "movie" if media_type == "movie" else "tv"
 +        sem = asyncio.Semaphore(10)
 +        cache_updated = False
++        landscape_cache_updated = False
++
++        is_landscape = catalog_id in (
++            "comet_trending",
++            "comet_new",
++        ) and getattr(settings, "CATALOG_LANDSCAPE", True)
++        if is_landscape:
++            _ensure_landscape_map_loaded()
 +
 +        async def resolve_imdb(tmdb_id: int) -> str | None:
 +            nonlocal cache_updated
@@ -3630,17 +4030,80 @@ index 0000000..0a0d546
 +                        return imdb_id
 +            return None
 +
-+        imdb_ids = await asyncio.gather(
-+            *[resolve_imdb(it["id"]) for it in unique_raw_items],
++        async def resolve_landscape(tmdb_id: int) -> str | None:
++            nonlocal landscape_cache_updated
++            cache_key = f"{tmdb_type}:{tmdb_id}"
++            if cache_key in _LANDSCAPE_MAP:
++                val = _LANDSCAPE_MAP[cache_key]
++                return val if val else None
++
++            async with sem:
++                data = await tmdb._get_json(
++                    f"{tmdb_type}/{tmdb_id}/images?include_image_language=pt,en",
++                    f"{tmdb_type} images {tmdb_id}",
++                )
++                chosen_path = None
++                if isinstance(data, dict):
++                    backdrops = data.get("backdrops")
++                    if isinstance(backdrops, list):
++                        pt_backdrops = [
++                            b.get("file_path")
++                            for b in backdrops
++                            if isinstance(b, dict)
++                            and b.get("iso_639_1") == "pt"
++                            and b.get("file_path")
++                        ]
++                        if pt_backdrops:
++                            chosen_path = pt_backdrops[0]
++                        else:
++                            en_backdrops = [
++                                b.get("file_path")
++                                for b in backdrops
++                                if isinstance(b, dict)
++                                and b.get("iso_639_1") == "en"
++                                and b.get("file_path")
++                            ]
++                            if en_backdrops:
++                                chosen_path = en_backdrops[0]
++
++                _LANDSCAPE_MAP[cache_key] = chosen_path or ""
++                landscape_cache_updated = True
++                return chosen_path
++
++        async def resolve_item(item: dict):
++            tid = item["id"]
++            if is_landscape:
++                imdb_res, landscape_res = await asyncio.gather(
++                    resolve_imdb(tid),
++                    resolve_landscape(tid),
++                    return_exceptions=True,
++                )
++                imdb_id = imdb_res if isinstance(imdb_res, str) else None
++                landscape_img = landscape_res if isinstance(landscape_res, str) else None
++                return imdb_id, landscape_img
++            else:
++                try:
++                    imdb_id = await resolve_imdb(tid)
++                except Exception:
++                    imdb_id = None
++                return imdb_id, None
++
++        resolved_pairs = await asyncio.gather(
++            *[resolve_item(it) for it in unique_raw_items],
 +            return_exceptions=True,
 +        )
 +
 +        if cache_updated:
 +            await asyncio.to_thread(_save_imdb_map)
++        if landscape_cache_updated:
++            await asyncio.to_thread(_save_landscape_map)
 +
 +        metas = []
 +        seen_imdb = set()
-+        for it, imdb_id in zip(unique_raw_items, imdb_ids):
++        for it, pair in zip(unique_raw_items, resolved_pairs):
++            if not isinstance(pair, tuple):
++                continue
++            imdb_id, landscape_img = pair
 +            if (
 +                not isinstance(imdb_id, str)
 +                or not imdb_id.startswith("tt")
@@ -3668,7 +4131,7 @@ index 0000000..0a0d546
 +                "id": imdb_id,
 +                "type": media_type,
 +                "name": name,
-+                "poster": f"https://image.tmdb.org/t/p/w342{poster_path}",
++                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}",
 +                "background": (
 +                    f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
 +                    if backdrop_path
@@ -3678,7 +4141,29 @@ index 0000000..0a0d546
 +                "releaseInfo": year,
 +                "imdbRating": rating_str,
 +            }
++
++            if is_landscape:
++                if landscape_img:
++                    img_p = (
++                        landscape_img
++                        if landscape_img.startswith("/")
++                        else f"/{landscape_img}"
++                    )
++                    meta["poster"] = f"https://image.tmdb.org/t/p/w780{img_p}"
++                    meta["posterShape"] = "landscape"
++                elif backdrop_path:
++                    bp = (
++                        backdrop_path
++                        if backdrop_path.startswith("/")
++                        else f"/{backdrop_path}"
++                    )
++                    meta["poster"] = f"https://image.tmdb.org/t/p/w780{bp}"
++                    meta["posterShape"] = "landscape"
++
 +            metas.append(meta)
++
++        if catalog_id == "comet_top10":
++            metas = metas[:10]
 +
 +        return metas
 +
@@ -3812,7 +4297,7 @@ index 0000000..0a0d546
 +                    "type": media_type,
 +                    "name": name,
 +                    "poster": (
-+                        f"https://image.tmdb.org/t/p/w342{poster_path}"
++                        f"https://image.tmdb.org/t/p/w500{poster_path}"
 +                        if poster_path
 +                        else None
 +                    ),
@@ -4693,10 +5178,10 @@ index a111c8c..364b582 100644
          for info_hash, account_torrent in account_torrents.items():
 diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
 new file mode 100644
-index 0000000..d058d11
+index 0000000..10fda00
 --- /dev/null
 +++ b/comet/services/meta_ptbr.py
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,435 @@
 +import asyncio
 +import copy
 +import re
@@ -4705,6 +5190,11 @@ index 0000000..d058d11
 +
 +from comet.core.logger import logger
 +from comet.metadata.tmdb import TMDBApi
++from comet.services.catalogs import PROVIDERS
++
++_PROVIDER_SHORT_NAMES = {
++    info[1]: info[0] for info in PROVIDERS.values()
++}
 +
 +_GENERIC_EPISODE_RE = re.compile(
 +    r"^(?:epis[oó]dio|episode|cap[ií]tulo)\s+\d+$", re.IGNORECASE
@@ -4715,10 +5205,205 @@ index 0000000..d058d11
 +_META_CACHE_MAX = 500
 +
 +
++_RATING_ICON = {"10": "🔵", "12": "🟡", "14": "🟠", "16": "🔴", "18": "⚫"}
++
 +def _is_generic_title(title: str) -> bool:
 +    if not title:
 +        return True
 +    return bool(_GENERIC_EPISODE_RE.match(title.strip()))
++
++
++def _apply_tmdb_logo_and_trailer(base_meta: dict, tmdb_data: dict) -> None:
++    # 1. Logo do título: pt -> en -> null; maior vote_average; ignora .svg
++    images = tmdb_data.get("images")
++    if isinstance(images, dict):
++        logos = images.get("logos")
++        if isinstance(logos, list):
++            valid_logos = [
++                l
++                for l in logos
++                if isinstance(l, dict)
++                and l.get("file_path")
++                and not str(l["file_path"]).lower().endswith(".svg")
++            ]
++            chosen_logo = None
++            for target_lang in ("pt", "en", None):
++                candidates = [
++                    l
++                    for l in valid_logos
++                    if (
++                        l.get("iso_639_1") == target_lang
++                        or (
++                            target_lang is None
++                            and l.get("iso_639_1") in (None, "null", "")
++                        )
++                    )
++                ]
++                if candidates:
++                    chosen_logo = max(
++                        candidates,
++                        key=lambda x: (
++                            x.get("vote_average") or 0.0,
++                            x.get("vote_count") or 0,
++                        ),
++                    )
++                    break
++            if chosen_logo and chosen_logo.get("file_path"):
++                base_meta["logo"] = (
++                    f"https://image.tmdb.org/t/p/w500{chosen_logo['file_path']}"
++                )
++
++    # 2. Trailer em PT-BR: Trailer pt -> Teaser pt -> Trailer en -> Teaser en
++    videos_obj = tmdb_data.get("videos")
++    if isinstance(videos_obj, dict):
++        videos = videos_obj.get("results")
++        if isinstance(videos, list):
++            yt_videos = [
++                v
++                for v in videos
++                if isinstance(v, dict)
++                and v.get("site") == "YouTube"
++                and v.get("key")
++            ]
++            chosen_vid = None
++            for req_type, req_lang in (
++                ("Trailer", "pt"),
++                ("Teaser", "pt"),
++                ("Trailer", "en"),
++                ("Teaser", "en"),
++            ):
++                matches = [
++                    v
++                    for v in yt_videos
++                    if v.get("type") == req_type and v.get("iso_639_1") == req_lang
++                ]
++                if matches:
++                    chosen_vid = matches[0]
++                    break
++
++            if chosen_vid:
++                vid_name = chosen_vid.get("name") or "Trailer"
++                vid_key = chosen_vid["key"]
++                base_meta["trailerStreams"] = [{"title": vid_name, "ytId": vid_key}]
++                base_meta["trailers"] = [{"source": vid_key, "type": "Trailer"}]
++
++
++def _extract_movie_rating(tmdb_movie: dict) -> str | None:
++    release_dates = tmdb_movie.get("release_dates")
++    if not isinstance(release_dates, dict):
++        return None
++    results = release_dates.get("results")
++    if not isinstance(results, list):
++        return None
++    for r in results:
++        if isinstance(r, dict) and r.get("iso_3166_1") == "BR":
++            rds = r.get("release_dates")
++            if isinstance(rds, list):
++                for rd in rds:
++                    if isinstance(rd, dict):
++                        cert = rd.get("certification")
++                        if cert and str(cert).strip():
++                            c = str(cert).strip()
++                            if c.upper() in ("L", "LIVRE"):
++                                return "🟢 Livre"
++                            return f"{_RATING_ICON.get(str(c).strip(), '🔞')} {c}"
++    return None
++
++
++def _extract_series_rating(tmdb_tv: dict) -> str | None:
++    content_ratings = tmdb_tv.get("content_ratings")
++    if not isinstance(content_ratings, dict):
++        return None
++    results = content_ratings.get("results")
++    if not isinstance(results, list):
++        return None
++    for r in results:
++        if isinstance(r, dict) and r.get("iso_3166_1") == "BR":
++            rating = r.get("rating")
++            if rating and str(rating).strip():
++                c = str(rating).strip()
++                if c.upper() in ("L", "LIVRE"):
++                    return "🟢 Livre"
++                return f"{_RATING_ICON.get(str(c).strip(), '🔞')} {c}"
++    return None
++
++
++def _extract_watch_providers(tmdb_data: dict) -> str | None:
++    wp = tmdb_data.get("watch/providers")
++    if not isinstance(wp, dict):
++        return None
++    results = wp.get("results")
++    if not isinstance(results, dict):
++        return None
++    br = results.get("BR")
++    if not isinstance(br, dict):
++        return None
++    flatrate = br.get("flatrate")
++    if not isinstance(flatrate, list) or not flatrate:
++        return None
++
++    names = []
++    seen = set()
++    for item in flatrate:
++        if not isinstance(item, dict):
++            continue
++        pid = item.get("provider_id")
++        pname = _PROVIDER_SHORT_NAMES.get(pid) or item.get("provider_name")
++        if not pname or not str(pname).strip():
++            continue
++        pname_str = str(pname).strip()
++        if "with ads" in pname_str.lower():
++            continue
++        if pname_str not in seen:
++            seen.add(pname_str)
++            names.append(pname_str)
++        if len(names) == 3:
++            break
++
++    if names:
++        return f"📺 {', '.join(names)}"
++    return None
++
++
++def _build_rich_description(
++    rating_badge: str | None,
++    providers_badge: str | None,
++    overview: str | None,
++    base_description: str | None,
++) -> str:
++    parts = []
++    if rating_badge:
++        parts.append(rating_badge)
++    if providers_badge:
++        parts.append(providers_badge)
++
++    first_line = " · ".join(parts) if parts else ""
++    synopsis = (overview or "").strip() or (base_description or "").strip()
++
++    if first_line and synopsis:
++        return f"{first_line}\n\n{synopsis}"
++    elif first_line:
++        return first_line
++    return synopsis
++
++
++def _format_runtime(runtime_minutes: int | float | None) -> str | None:
++    if not runtime_minutes:
++        return None
++    try:
++        val = int(runtime_minutes)
++    except (ValueError, TypeError):
++        return None
++    if val <= 0:
++        return None
++    h = val // 60
++    m = val % 60
++    if h > 0 and m > 0:
++        return f"{h}h {m}min"
++    elif h > 0:
++        return f"{h}h"
++    else:
++        return f"{m}min"
 +
 +
 +def _save_to_cache(cache_key: tuple[str, str], meta: dict) -> None:
@@ -4773,15 +5458,38 @@ index 0000000..d058d11
 +
 +            if media_type == "movie":
 +                tmdb_movie = await tmdb._get_json(
-+                    f"movie/{tmdb_id}?language=pt-BR", f"movie {tmdb_id}"
++                    f"movie/{tmdb_id}?language=pt-BR&append_to_response=images,videos,watch/providers,release_dates&include_image_language=pt,en,null&include_video_language=pt,en",
++                    f"movie {tmdb_id}",
 +                )
 +                if isinstance(tmdb_movie, dict):
 +                    tmdb_name = tmdb_movie.get("title") or tmdb_movie.get("name")
 +                    if tmdb_name and tmdb_name.strip():
 +                        base_meta["name"] = tmdb_name.strip()
-+                    overview = tmdb_movie.get("overview")
-+                    if overview and overview.strip():
-+                        base_meta["description"] = overview.strip()
++
++                    rating_badge = _extract_movie_rating(tmdb_movie)
++                    providers_badge = _extract_watch_providers(tmdb_movie)
++                    base_meta["description"] = _build_rich_description(
++                        rating_badge,
++                        providers_badge,
++                        tmdb_movie.get("overview"),
++                        base_meta.get("description"),
++                    )
++
++                    formatted_runtime = _format_runtime(tmdb_movie.get("runtime"))
++                    if formatted_runtime:
++                        base_meta["runtime"] = formatted_runtime
++
++                    backdrop_path = tmdb_movie.get("backdrop_path")
++                    if backdrop_path:
++                        bp = (
++                            backdrop_path
++                            if backdrop_path.startswith("/")
++                            else f"/{backdrop_path}"
++                        )
++                        base_meta["background"] = (
++                            f"https://image.tmdb.org/t/p/original{bp}"
++                        )
++
 +                    poster_path = tmdb_movie.get("poster_path")
 +                    if poster_path:
 +                        base_meta["poster"] = (
@@ -4794,17 +5502,37 @@ index 0000000..d058d11
 +                            for g in genres
 +                            if isinstance(g, dict) and g.get("name")
 +                        ]
++                    _apply_tmdb_logo_and_trailer(base_meta, tmdb_movie)
 +            elif media_type == "series":
 +                tmdb_tv = await tmdb._get_json(
-+                    f"tv/{tmdb_id}?language=pt-BR", f"tv {tmdb_id}"
++                    f"tv/{tmdb_id}?language=pt-BR&append_to_response=images,videos,watch/providers,content_ratings&include_image_language=pt,en,null&include_video_language=pt,en",
++                    f"tv {tmdb_id}",
 +                )
 +                if isinstance(tmdb_tv, dict):
 +                    tmdb_name = tmdb_tv.get("name") or tmdb_tv.get("title")
 +                    if tmdb_name and tmdb_name.strip():
 +                        base_meta["name"] = tmdb_name.strip()
-+                    overview = tmdb_tv.get("overview")
-+                    if overview and overview.strip():
-+                        base_meta["description"] = overview.strip()
++
++                    rating_badge = _extract_series_rating(tmdb_tv)
++                    providers_badge = _extract_watch_providers(tmdb_tv)
++                    base_meta["description"] = _build_rich_description(
++                        rating_badge,
++                        providers_badge,
++                        tmdb_tv.get("overview"),
++                        base_meta.get("description"),
++                    )
++
++                    backdrop_path = tmdb_tv.get("backdrop_path")
++                    if backdrop_path:
++                        bp = (
++                            backdrop_path
++                            if backdrop_path.startswith("/")
++                            else f"/{backdrop_path}"
++                        )
++                        base_meta["background"] = (
++                            f"https://image.tmdb.org/t/p/original{bp}"
++                        )
++
 +                    poster_path = tmdb_tv.get("poster_path")
 +                    if poster_path:
 +                        base_meta["poster"] = (
@@ -4817,6 +5545,7 @@ index 0000000..d058d11
 +                            for g in genres
 +                            if isinstance(g, dict) and g.get("name")
 +                        ]
++                    _apply_tmdb_logo_and_trailer(base_meta, tmdb_tv)
 +
 +                # Series episodes overlay
 +                cinemeta_videos = base_meta.get("videos")

@@ -79,7 +79,8 @@
 - [ ] Achar mais addons de link direto (como FenixFlix/FrostStream) e somar em `DIRECT_ADDONS_URL`
 - [x] Legendas PT-BR no próprio Comet (OpenSubtitles + SubSource + SubDL, escolha pela release do arquivo e sincronia automática)
 - [x] Frontpage estilo Netflix: fileiras por streaming (Netflix, Prime, Disney+, HBO Max, Apple TV+, Paramount+, Globoplay, Crunchyroll) em PT-BR
-- [ ] Usuário: reinstalar o Comet, desinstalar Cinemeta, Trakt, OpenSubtitles v3/PRO, FenixFlix e FrostStream (Comet faz tudo)
+- [x] Visual Netflix: originais por serviço, lançamentos, aclamados, fileiras deitadas, logo e trailer PT-BR na página do título
+- [ ] Usuário: reinstalar o Comet, esconder o Cinemeta (Addon Manager: Comet no topo e sem catálogos do Cinemeta), Trakt, OpenSubtitles v3/PRO, FenixFlix e FrostStream (Comet faz tudo)
 - [ ] Usuário reinstalar o Comet no Stremio (recurso de legendas), tirar o OpenSubtitles PRO e trocar a chave do SubDL
 
 ---
