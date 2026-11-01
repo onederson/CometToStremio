@@ -43,6 +43,8 @@ echo "== [5/5] dependencias Python (uv sync) =="
 export CARGO_BUILD_JOBS=6
 export UV_PYTHON_PREFERENCE=only-system
 uv sync --frozen --no-install-project --no-dev
+# Pillow: capas montadas dos catalogos (Top 10 e capa deitada com logo), comet/services/artwork.py
+uv pip install --python .venv/bin/python pillow==11.3.0
 
 mkdir -p /opt/comet/data
 echo "== OK: Comet instalado em /opt/comet =="

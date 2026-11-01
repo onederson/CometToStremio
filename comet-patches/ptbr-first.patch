@@ -1,16 +1,18 @@
 diff --git a/comet/api/app.py b/comet/api/app.py
-index f7832d1..b375b29 100644
+index f7832d1..1d997a4 100644
 --- a/comet/api/app.py
 +++ b/comet/api/app.py
-@@ -11,6 +11,7 @@ from starlette.requests import Request
+@@ -10,7 +10,9 @@ from starlette.requests import Request
+ 
  from comet.api.endpoints import (
      admin,
++    artwork,
      base,
 +    catalog,
      chilllink,
      cometnet,
      cometnet_ui,
-@@ -18,8 +19,10 @@ from comet.api.endpoints import (
+@@ -18,8 +20,10 @@ from comet.api.endpoints import (
      debrid_sync,
      kodi,
      manifest,
@@ -21,22 +23,91 @@ index f7832d1..b375b29 100644
      torznab,
  )
  from comet.api.endpoints import stream as streams_router
-@@ -270,6 +273,9 @@ stremio_routers = (
+@@ -270,6 +274,10 @@ stremio_routers = (
      streams_router.streams,
      torznab.router,
      chilllink.router,
 +    subtitles.router,
 +    catalog.router,
 +    meta.router,
++    artwork.router,
  )
  
  for stremio_router in stremio_routers:
+diff --git a/comet/api/endpoints/artwork.py b/comet/api/endpoints/artwork.py
+new file mode 100644
+index 0000000..2b81d4e
+--- /dev/null
++++ b/comet/api/endpoints/artwork.py
+@@ -0,0 +1,62 @@
++from fastapi import APIRouter, HTTPException, Response
++
++from comet.services.artwork import ArtworkNotFound, render_landscape, render_top10
++
++router = APIRouter(tags=["Stremio"])
++
++
++@router.get(
++    "/art/top10/{rank}/{poster_file:path}",
++    summary="Top 10 Artwork",
++    description="Returns composite top 10 artwork with rank number.",
++)
++async def get_art_top10(rank: int, poster_file: str):
++    try:
++        data = await render_top10(rank, poster_file)
++        return Response(
++            content=data,
++            media_type="image/jpeg",
++            headers={"Cache-Control": "public, max-age=2592000, immutable"},
++        )
++    except (ArtworkNotFound, ValueError):
++        raise HTTPException(status_code=404, detail="Artwork not found")
++    except Exception as e:
++        raise HTTPException(status_code=404, detail="Artwork not found")
++
++
++@router.get(
++    "/art/land/{backdrop_file}",
++    summary="Landscape Artwork without Logo",
++    description="Returns landscape artwork with dark gradients.",
++)
++async def get_art_land_no_logo(backdrop_file: str):
++    try:
++        data = await render_landscape(backdrop_file, None)
++        return Response(
++            content=data,
++            media_type="image/jpeg",
++            headers={"Cache-Control": "public, max-age=2592000, immutable"},
++        )
++    except (ArtworkNotFound, ValueError):
++        raise HTTPException(status_code=404, detail="Artwork not found")
++    except Exception as e:
++        raise HTTPException(status_code=404, detail="Artwork not found")
++
++
++@router.get(
++    "/art/land/{backdrop_file}/{logo_file:path}",
++    summary="Landscape Artwork with Logo",
++    description="Returns landscape artwork with logo and dark gradients.",
++)
++async def get_art_land_with_logo(backdrop_file: str, logo_file: str):
++    try:
++        data = await render_landscape(backdrop_file, logo_file)
++        return Response(
++            content=data,
++            media_type="image/jpeg",
++            headers={"Cache-Control": "public, max-age=2592000, immutable"},
++        )
++    except (ArtworkNotFound, ValueError):
++        raise HTTPException(status_code=404, detail="Artwork not found")
++    except Exception as e:
++        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..8311d24
+index 0000000..6a3ca69
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,86 @@
 +import urllib.parse
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
@@ -106,10 +177,12 @@ index 0000000..8311d24
 +            if k not in extra_dict:
 +                extra_dict[k] = v
 +
++        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or f"{request.url.scheme}://{request.url.netloc}").rstrip("/")
 +        metas = await get_catalog(
 +            media_type=type,
 +            catalog_id=id,
 +            extra=extra_dict,
++            base_url=base_url,
 +        )
 +        return JSONResponse(
 +            content={"metas": metas},
@@ -1555,8 +1628,27 @@ index 0000000..8b4bca0
 +                "Cache-Control": "max-age=86400",
 +            },
 +        )
+diff --git a/comet/core/config_validation.py b/comet/core/config_validation.py
+index 44bf701..c2be5e9 100644
+--- a/comet/core/config_validation.py
++++ b/comet/core/config_validation.py
+@@ -116,6 +116,14 @@ def config_check(b64config: str | None, strict_b64config: bool = False):
+     if not b64config:
+         return _default_validated_config()
+ 
++    # Link pessoal: o token curto do .env vale pela config completa salva no servidor.
++    if (
++        settings.PERSONAL_LINK_TOKEN
++        and settings.PERSONAL_LINK_CONFIG
++        and b64config == settings.PERSONAL_LINK_TOKEN
++    ):
++        b64config = settings.PERSONAL_LINK_CONFIG
++
+     validated_config = _parse_and_validate_config(b64config)
+     if validated_config is not None:
+         return validated_config
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..092c91a 100644
+index 835a975..df0dc1f 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -1580,7 +1672,16 @@ index 835a975..092c91a 100644
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -317,6 +324,36 @@ class AppSettings(ServerSettings):
+@@ -268,6 +275,8 @@ class AppSettings(ServerSettings):
+     )
+     TORRENT_DISABLED_STREAM_URL: str | None = "https://comet.feels.legal"
+     PUBLIC_BASE_URL: str | None = None
++    PERSONAL_LINK_TOKEN: str | None = None
++    PERSONAL_LINK_CONFIG: str | None = None
+     REMOVE_ADULT_CONTENT: bool | None = False
+     BACKGROUND_SCRAPER_ENABLED: bool | None = False
+     BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
+@@ -317,6 +326,36 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -1617,7 +1718,7 @@ index 835a975..092c91a 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +690,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +692,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -3254,12 +3355,298 @@ index 13cfaa3..a0455a0 100644
      def is_loaded(self):
          return self.loaded
  
+diff --git a/comet/services/artwork.py b/comet/services/artwork.py
+new file mode 100644
+index 0000000..a213cca
+--- /dev/null
++++ b/comet/services/artwork.py
+@@ -0,0 +1,280 @@
++import asyncio
++import hashlib
++import io
++import os
++import re
++import time
++
++import aiohttp
++from PIL import Image, ImageDraw, ImageFont
++
++from comet.core.logger import logger
++
++FILENAME_REGEX = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|png)$")
++CACHE_DIR = "/opt/comet/data/img_cache"
++TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
++
++_SEMAPHORE = asyncio.Semaphore(2)
++_last_cleanup_time = 0.0
++_GRADIENT_OVERLAY: Image.Image | None = None
++
++FONT_PATHS = [
++    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
++    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
++]
++
++
++class ArtworkNotFound(Exception):
++    pass
++
++
++def _get_font(size: int) -> ImageFont.FreeTypeFont:
++    for path in FONT_PATHS:
++        if os.path.exists(path):
++            try:
++                return ImageFont.truetype(path, size)
++            except Exception:
++                continue
++    return ImageFont.load_default()
++
++
++def _get_gradient_overlay() -> Image.Image:
++    global _GRADIENT_OVERLAY
++    if _GRADIENT_OVERLAY is not None:
++        return _GRADIENT_OVERLAY
++
++    W, H = 780, 439
++    half_y = H / 2.0
++    third_x = W / 3.0
++    raw = bytearray(W * H * 4)
++    idx = 0
++    for y in range(H):
++        if y >= half_y:
++            a_bot = 0.85 * ((y - half_y) / (H - 1 - half_y))
++        else:
++            a_bot = 0.0
++        for x in range(W):
++            if x <= third_x:
++                a_left = 0.60 * ((third_x - x) / third_x)
++            else:
++                a_left = 0.0
++            a_comb = 1.0 - (1.0 - a_bot) * (1.0 - a_left)
++            raw[idx + 3] = int(round(a_comb * 255))
++            idx += 4
++
++    _GRADIENT_OVERLAY = Image.frombytes("RGBA", (W, H), bytes(raw))
++    return _GRADIENT_OVERLAY
++
++
++def _cleanup_cache_if_needed():
++    global _last_cleanup_time
++    now = time.time()
++    if now - _last_cleanup_time < 3600.0:
++        return
++    _last_cleanup_time = now
++    try:
++        if not os.path.isdir(CACHE_DIR):
++            return
++        total_size = 0
++        files = []
++        for entry in os.scandir(CACHE_DIR):
++            if entry.is_file():
++                try:
++                    st = entry.stat()
++                    total_size += st.st_size
++                    files.append((entry.path, st.st_mtime))
++                except OSError:
++                    pass
++        if total_size > 300 * 1024 * 1024:
++            cutoff = now - (30 * 86400)
++            for path, mtime in files:
++                if mtime < cutoff:
++                    try:
++                        os.unlink(path)
++                    except OSError:
++                        pass
++    except Exception as e:
++        logger.warning(f"Error during img_cache cleanup: {e}")
++
++
++def _save_atomic(cache_path: str, data: bytes):
++    try:
++        os.makedirs(CACHE_DIR, exist_ok=True)
++        tmp_path = f"{cache_path}.tmp.{os.getpid()}.{time.time()}"
++        with open(tmp_path, "wb") as f:
++            f.write(data)
++        os.replace(tmp_path, cache_path)
++    except Exception as e:
++        logger.warning(f"Failed to cache artwork atomically: {e}")
++
++
++async def _fetch_tmdb_image(size: str, filename: str) -> bytes:
++    clean = filename.lstrip("/")
++    if not FILENAME_REGEX.match(clean):
++        raise ArtworkNotFound(f"Invalid filename: {filename}")
++
++    url = f"{TMDB_IMAGE_BASE}/{size}/{clean}"
++    try:
++        timeout = aiohttp.ClientTimeout(total=10.0)
++        async with aiohttp.ClientSession(timeout=timeout) as session:
++            async with session.get(url) as resp:
++                if resp.status != 200:
++                    raise ArtworkNotFound(f"TMDB image fetch returned status {resp.status} for {url}")
++                return await resp.read()
++    except ArtworkNotFound:
++        raise
++    except Exception as e:
++        logger.warning(f"Error downloading {url}: {e}")
++        raise ArtworkNotFound(f"Download failed for {url}: {e}")
++
++
++def _render_top10_pillow(rank: int, poster_bytes: bytes) -> bytes:
++    """Tile 500x500 estilo Netflix: numero grande contornado a esquerda, poster a direita
++    sobrepondo um pouco o numero."""
++    from PIL import Image, ImageDraw, ImageFilter, ImageFont
++
++    W = H = 500
++    canvas = Image.new("RGB", (W, H), "#141414")
++    poster = Image.open(io.BytesIO(poster_bytes)).convert("RGB")
++    ph = 440
++    pw = round(poster.width * ph / poster.height)
++    poster = poster.resize((pw, ph), Image.LANCZOS)
++    px, py = W - pw, H - ph
++
++    text = str(rank)
++    font_path = (
++        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf"
++        if rank == 10
++        else "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
++    )
++    overlap = 50 if rank == 10 else 40
++    max_w = px + overlap - 6
++    max_h = 400
++    stroke = 7
++    size = 560
++    draw = ImageDraw.Draw(canvas)
++    while size > 60:
++        font = ImageFont.truetype(font_path, size)
++        l, t, r, b = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
++        if r - l <= max_w and b - t <= max_h:
++            break
++        size -= 10
++    l, t, r, b = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
++    x = (px + overlap) - r
++    y = (H - 8) - b
++    draw.text((x, y), text, font=font, fill="#141414", stroke_width=stroke, stroke_fill="#9a9a9a")
++
++    # sombra do poster sobre o numero
++    shadow = Image.new("L", (W, H), 0)
++    ImageDraw.Draw(shadow).rectangle((px - 4, py, W, H), fill=200)
++    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
++    canvas = Image.composite(Image.new("RGB", (W, H), "#000000"), canvas, shadow)
++    canvas.paste(poster, (px, py))
++
++    out = io.BytesIO()
++    canvas.save(out, "JPEG", quality=85, optimize=True)
++    return out.getvalue()
++
++def _render_landscape_pillow(backdrop_bytes: bytes, logo_bytes: bytes | None) -> bytes:
++    W, H = 780, 439
++    bg = Image.open(io.BytesIO(backdrop_bytes)).convert("RGBA")
++    scale = max(W / bg.width, H / bg.height)
++    sw = int(round(bg.width * scale))
++    sh = int(round(bg.height * scale))
++    bg_resized = bg.resize((sw, sh), Image.Resampling.LANCZOS)
++    cx = (sw - W) // 2
++    cy = (sh - H) // 2
++    canvas = bg_resized.crop((cx, cy, cx + W, cy + H))
++
++    canvas.alpha_composite(_get_gradient_overlay())
++
++    if logo_bytes:
++        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
++        max_lw = int(round(W * 0.45))
++        max_lh = int(round(H * 0.32))
++        lscale = min(max_lw / logo.width, max_lh / logo.height)
++        nlw = max(1, int(round(logo.width * lscale)))
++        nlh = max(1, int(round(logo.height * lscale)))
++        logo_resized = logo.resize((nlw, nlh), Image.Resampling.LANCZOS)
++        canvas.paste(logo_resized, (28, H - 28 - nlh), mask=logo_resized)
++
++    out = io.BytesIO()
++    canvas.convert("RGB").save(out, format="JPEG", quality=85, optimize=True)
++    return out.getvalue()
++
++
++async def render_top10(rank: int, poster_file: str) -> bytes:
++    if rank < 1 or rank > 10:
++        raise ArtworkNotFound(f"Invalid rank: {rank}")
++
++    clean_poster = poster_file.lstrip("/")
++    if not FILENAME_REGEX.match(clean_poster):
++        raise ArtworkNotFound(f"Invalid poster filename: {poster_file}")
++
++    cache_key = f"top10v2:{rank}:{clean_poster}"
++    cache_path = os.path.join(
++        CACHE_DIR, f"{hashlib.sha1(cache_key.encode('utf-8')).hexdigest()}.jpg"
++    )
++
++    if os.path.exists(cache_path):
++        try:
++            with open(cache_path, "rb") as f:
++                return f.read()
++        except Exception:
++            pass
++
++    async with _SEMAPHORE:
++        if os.path.exists(cache_path):
++            try:
++                with open(cache_path, "rb") as f:
++                    return f.read()
++            except Exception:
++                pass
++
++        poster_bytes = await _fetch_tmdb_image("w500", clean_poster)
++        jpeg_bytes = await asyncio.to_thread(_render_top10_pillow, rank, poster_bytes)
++        _save_atomic(cache_path, jpeg_bytes)
++        _cleanup_cache_if_needed()
++        return jpeg_bytes
++
++
++async def render_landscape(backdrop_file: str, logo_file: str | None = None) -> bytes:
++    clean_backdrop = backdrop_file.lstrip("/")
++    if not FILENAME_REGEX.match(clean_backdrop):
++        raise ArtworkNotFound(f"Invalid backdrop filename: {backdrop_file}")
++
++    clean_logo = logo_file.lstrip("/") if logo_file else None
++    if clean_logo and not FILENAME_REGEX.match(clean_logo):
++        raise ArtworkNotFound(f"Invalid logo filename: {logo_file}")
++
++    cache_key = f"land:{clean_backdrop}:{clean_logo or ''}"
++    cache_path = os.path.join(
++        CACHE_DIR, f"{hashlib.sha1(cache_key.encode('utf-8')).hexdigest()}.jpg"
++    )
++
++    if os.path.exists(cache_path):
++        try:
++            with open(cache_path, "rb") as f:
++                return f.read()
++        except Exception:
++            pass
++
++    async with _SEMAPHORE:
++        if os.path.exists(cache_path):
++            try:
++                with open(cache_path, "rb") as f:
++                    return f.read()
++            except Exception:
++                pass
++
++        backdrop_bytes = await _fetch_tmdb_image("w780", clean_backdrop)
++        logo_bytes = None
++        if clean_logo:
++            logo_bytes = await _fetch_tmdb_image("w500", clean_logo)
++
++        jpeg_bytes = await asyncio.to_thread(
++            _render_landscape_pillow, backdrop_bytes, logo_bytes
++        )
++        _save_atomic(cache_path, jpeg_bytes)
++        _cleanup_cache_if_needed()
++        return jpeg_bytes
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..4d9cb2f
+index 0000000..0eb5b8c
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,1118 @@
+@@ -0,0 +1,1162 @@
 +import asyncio
 +import datetime
 +import json
@@ -3383,7 +3770,9 @@ index 0000000..4d9cb2f
 +                with open(LANDSCAPE_CACHE_FILE, "r", encoding="utf-8") as f:
 +                    data = json.load(f)
 +                    if isinstance(data, dict):
-+                        _LANDSCAPE_MAP.update(data)
++                        for k, v in data.items():
++                            if isinstance(v, dict) and "backdrop" in v:
++                                _LANDSCAPE_MAP[k] = v
 +            except Exception as e:
 +                logger.warning(f"Error loading landscape_map.json: {e}")
 +        _LANDSCAPE_MAP_LOADED = True
@@ -3933,7 +4322,7 @@ index 0000000..4d9cb2f
 +
 +
 +async def _fetch_catalog_items(
-+    media_type: str, catalog_id: str, genre: str | None, skip: int
++    media_type: str, catalog_id: str, genre: str | None, skip: int, base_url: str = ""
 +) -> list[dict]:
 +    if catalog_id == "comet_top10" and skip > 0:
 +        return []
@@ -4030,57 +4419,88 @@ index 0000000..4d9cb2f
 +                        return imdb_id
 +            return None
 +
-+        async def resolve_landscape(tmdb_id: int) -> str | None:
++        async def resolve_landscape(tmdb_id: int, fallback_backdrop: str | None = None) -> dict | None:
 +            nonlocal landscape_cache_updated
 +            cache_key = f"{tmdb_type}:{tmdb_id}"
 +            if cache_key in _LANDSCAPE_MAP:
 +                val = _LANDSCAPE_MAP[cache_key]
-+                return val if val else None
++                if isinstance(val, dict) and "backdrop" in val:
++                    return val
 +
 +            async with sem:
 +                data = await tmdb._get_json(
-+                    f"{tmdb_type}/{tmdb_id}/images?include_image_language=pt,en",
++                    f"{tmdb_type}/{tmdb_id}/images?include_image_language=pt,en,null",
 +                    f"{tmdb_type} images {tmdb_id}",
 +                )
-+                chosen_path = None
++                chosen_backdrop = None
++                chosen_logo = None
 +                if isinstance(data, dict):
 +                    backdrops = data.get("backdrops")
-+                    if isinstance(backdrops, list):
-+                        pt_backdrops = [
++                    if isinstance(backdrops, list) and backdrops:
++                        null_bds = [
 +                            b.get("file_path")
 +                            for b in backdrops
 +                            if isinstance(b, dict)
-+                            and b.get("iso_639_1") == "pt"
++                            and (b.get("iso_639_1") is None or b.get("iso_639_1") == "null")
 +                            and b.get("file_path")
 +                        ]
-+                        if pt_backdrops:
-+                            chosen_path = pt_backdrops[0]
++                        if null_bds:
++                            chosen_backdrop = null_bds[0]
 +                        else:
-+                            en_backdrops = [
++                            any_bds = [
 +                                b.get("file_path")
 +                                for b in backdrops
-+                                if isinstance(b, dict)
-+                                and b.get("iso_639_1") == "en"
-+                                and b.get("file_path")
++                                if isinstance(b, dict) and b.get("file_path")
 +                            ]
-+                            if en_backdrops:
-+                                chosen_path = en_backdrops[0]
++                            if any_bds:
++                                chosen_backdrop = any_bds[0]
 +
-+                _LANDSCAPE_MAP[cache_key] = chosen_path or ""
++                    logos = data.get("logos")
++                    if isinstance(logos, list) and logos:
++                        valid_logos = [
++                            l for l in logos
++                            if isinstance(l, dict)
++                            and l.get("file_path")
++                            and l.get("file_path", "").lower().endswith(".png")
++                        ]
++                        pt_logos = [
++                            l for l in valid_logos
++                            if l.get("iso_639_1") == "pt"
++                        ]
++                        if pt_logos:
++                            pt_logos.sort(key=lambda x: float(x.get("vote_average") or 0.0), reverse=True)
++                            chosen_logo = pt_logos[0].get("file_path")
++                        else:
++                            en_logos = [
++                                l for l in valid_logos
++                                if l.get("iso_639_1") == "en"
++                            ]
++                            if en_logos:
++                                en_logos.sort(key=lambda x: float(x.get("vote_average") or 0.0), reverse=True)
++                                chosen_logo = en_logos[0].get("file_path")
++
++                if not chosen_backdrop and fallback_backdrop:
++                    chosen_backdrop = fallback_backdrop
++
++                res = {
++                    "backdrop": chosen_backdrop.lstrip("/") if chosen_backdrop else None,
++                    "logo": chosen_logo.lstrip("/") if chosen_logo else None,
++                }
++                _LANDSCAPE_MAP[cache_key] = res
 +                landscape_cache_updated = True
-+                return chosen_path
++                return res
 +
 +        async def resolve_item(item: dict):
 +            tid = item["id"]
 +            if is_landscape:
 +                imdb_res, landscape_res = await asyncio.gather(
 +                    resolve_imdb(tid),
-+                    resolve_landscape(tid),
++                    resolve_landscape(tid, item.get("backdrop_path")),
 +                    return_exceptions=True,
 +                )
 +                imdb_id = imdb_res if isinstance(imdb_res, str) else None
-+                landscape_img = landscape_res if isinstance(landscape_res, str) else None
-+                return imdb_id, landscape_img
++                landscape_data = landscape_res if isinstance(landscape_res, dict) else None
++                return imdb_id, landscape_data
 +            else:
 +                try:
 +                    imdb_id = await resolve_imdb(tid)
@@ -4103,7 +4523,7 @@ index 0000000..4d9cb2f
 +        for it, pair in zip(unique_raw_items, resolved_pairs):
 +            if not isinstance(pair, tuple):
 +                continue
-+            imdb_id, landscape_img = pair
++            imdb_id, landscape_data = pair
 +            if (
 +                not isinstance(imdb_id, str)
 +                or not imdb_id.startswith("tt")
@@ -4131,7 +4551,7 @@ index 0000000..4d9cb2f
 +                "id": imdb_id,
 +                "type": media_type,
 +                "name": name,
-+                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}",
++                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
 +                "background": (
 +                    f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
 +                    if backdrop_path
@@ -4142,28 +4562,37 @@ index 0000000..4d9cb2f
 +                "imdbRating": rating_str,
 +            }
 +
++            if catalog_id == "comet_top10" and poster_path:
++                meta["_raw_poster_path"] = poster_path
++
 +            if is_landscape:
-+                if landscape_img:
-+                    img_p = (
-+                        landscape_img
-+                        if landscape_img.startswith("/")
-+                        else f"/{landscape_img}"
-+                    )
-+                    meta["poster"] = f"https://image.tmdb.org/t/p/w780{img_p}"
-+                    meta["posterShape"] = "landscape"
++                backdrop_file = None
++                logo_file = None
++                if landscape_data and landscape_data.get("backdrop"):
++                    backdrop_file = landscape_data["backdrop"]
++                    logo_file = landscape_data.get("logo")
 +                elif backdrop_path:
-+                    bp = (
-+                        backdrop_path
-+                        if backdrop_path.startswith("/")
-+                        else f"/{backdrop_path}"
-+                    )
-+                    meta["poster"] = f"https://image.tmdb.org/t/p/w780{bp}"
++                    backdrop_file = backdrop_path
++
++                if backdrop_file:
++                    b_clean = backdrop_file.lstrip("/")
++                    l_clean = logo_file.lstrip("/") if logo_file else None
++                    if l_clean:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}"
++                    else:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}"
 +                    meta["posterShape"] = "landscape"
 +
 +            metas.append(meta)
 +
 +        if catalog_id == "comet_top10":
 +            metas = metas[:10]
++            for idx, item_meta in enumerate(metas, start=1):
++                item_meta["posterShape"] = "square"
++                p_file = item_meta.pop("_raw_poster_path", None)
++                if p_file:
++                    p_clean = p_file.lstrip("/")
++                    item_meta["poster"] = f"{base_url}/art/top10/{idx}/{p_clean}"
 +
 +        return metas
 +
@@ -4325,7 +4754,7 @@ index 0000000..4d9cb2f
 +
 +
 +async def get_catalog(
-+    media_type: str, catalog_id: str, extra: dict | None = None
++    media_type: str, catalog_id: str, extra: dict | None = None, base_url: str = ""
 +) -> list[dict]:
 +    if catalog_id == "comet_search":
 +        extra = extra or {}
@@ -4366,7 +4795,9 @@ index 0000000..4d9cb2f
 +
 +    try:
 +        async with asyncio.timeout(10.0):
-+            metas = await _fetch_catalog_items(media_type, catalog_id, genre, skip)
++            metas = await _fetch_catalog_items(
++                media_type, catalog_id, genre, skip, base_url=base_url
++            )
 +            if metas:
 +                _set_cached_catalog(cache_key, metas)
 +            return metas
