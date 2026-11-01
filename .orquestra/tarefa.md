@@ -1,41 +1,45 @@
-# Tarefa: capas montadas estilo Netflix (Top 10 com número gigante e capa deitada com logo)
+# Tarefa E: só listar o que toca (links diretos validados) e playback que nunca trava
 
 ## Contexto
-- Código do Comet: A71, chroot, `/opt/comet` (Android: `/data/debian/opt/comet`). Pillow 11.3.0 **já está instalado** no venv (`/opt/comet/.venv`). Fontes: `/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf`, `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`.
-- Arquivos: `comet/services/catalogs.py`, `comet/api/endpoints/catalog.py`, `comet/api/app.py`; novos `comet/services/artwork.py` e `comet/api/endpoints/artwork.py`.
+- Código do Comet: A71, chroot, `/opt/comet` (Android: `/data/debian/opt/comet`). Arquivos: `comet/services/direct_addons.py`, `comet/api/endpoints/playback.py`, `comet/api/endpoints/stream.py`, `comet/debrid/stremthru.py`, `comet/core/models.py`.
 - **Comandos:** `.\scripts\a71.ps1 '<cmd>'` (Android root) e `.\scripts\a71.ps1 -Chroot '<cmd>'` (Debian; `git` só existe aqui).
-- Enviar arquivo: `adb -s 192.168.3.44:5555 push <arq> /data/local/tmp/<nome>` (um por vez, nome completo), depois `mv` para `/data/debian/...`. Tudo em **LF**.
-- **PROIBIDO:** imprimir chaves/tokens (a chave do RD aparece nas URLs do `comet.log`), commit, instalar pacotes, mexer no AdGuard ou no `.env`. **NÃO rode tarefas em segundo plano.** Divida o trabalho em passos curtos.
-- URL pública: `settings.PUBLIC_BASE_URL` (está definido no `.env`); se vazio, `f"{request.url.scheme}://{request.url.netloc}"`.
+- Enviar arquivo: `adb -s 192.168.3.44:5555 push <arq> /data/local/tmp/<nome>` (um por vez), depois `mv` para `/data/debian/...`. Tudo em **LF**. Antes de `adb pull`, `chmod 644`.
+- **PROIBIDO:** imprimir chaves/tokens (a chave do RD aparece nas URLs do `comet.log`), commit, instalar pacotes, mexer no AdGuard, no `.env` ou no `resolv.conf`. **NÃO rode tarefas em segundo plano.** Passos curtos.
+- O chroot agora usa DNS público (`1.1.1.1`/`9.9.9.9`). Os aparelhos da casa (TV/celular com Stremio) usam o AdGuard `192.168.3.44`, que bloqueia TLDs inteiros (`.lat`, `.top`) e responde `0.0.0.0`. Exemplo real: FrostStream → `302 dbonline.tech-cdn.top` → `302 zjo.lat` (bloqueado na casa) → `206 video/mp4` em `*.workers.dev`. No Stremio vira `Failed to connect to zjo.lat/0.0.0.0:80`.
 
-## 1. Gerador de imagens (`comet/services/artwork.py`)
-- Baixa as imagens **só** de `https://image.tmdb.org/t/p/...` (aiohttp, timeout 10 s). Nome de arquivo aceito: regex `^[A-Za-z0-9_-]+\.(jpg|png)$`; qualquer outro → erro 404 (sem buscar nada).
-- Geração com Pillow em `asyncio.to_thread`, no máximo 2 ao mesmo tempo (semáforo). Saída JPEG qualidade 85, `optimize=True`.
-- Cache em disco `/opt/comet/data/img_cache/` (nome = sha1 dos parâmetros + `.jpg`; gravação atômica). Se existe, devolve direto. Apague arquivos com mais de 30 dias quando o tamanho da pasta passar de 300 MB (checagem no máx. 1 vez por hora).
-- **Top 10** `render_top10(rank: int, poster_file: str) -> bytes`: tela **500×500**, fundo `#141414`. Pôster (`w500`) redimensionado para altura 500 (≈333×500), colado **encostado à direita**. Número `rank` (1–10) em LiberationSans-Bold bem grande (altura ≈ 470 px; para "10" reduza para caber), alinhado embaixo à esquerda, **começando atrás do pôster** (o pôster cobre um pedaço do número, como na Netflix): preenchimento `#141414` com contorno cinza claro `#bfbfbf` de 8 px (`stroke_width`/`stroke_fill`). Desenhe o número **antes** de colar o pôster.
-- **Deitada com logo** `render_landscape(backdrop_file: str, logo_file: str | None) -> bytes`: tela **780×439**. Fundo = backdrop `w780` (preencher cortando ao centro). Gradiente escuro de baixo para cima (preto 85% → 0% na metade inferior) e outro da esquerda (preto 60% → 0% no terço esquerdo). Logo (`w500`, png com transparência) redimensionado para caber em 45% da largura × 32% da altura, mantendo proporção, colado embaixo à esquerda com margem 28 px. Sem logo → só backdrop + gradientes.
+## 1. Validar links diretos antes de listar (`direct_addons.py`)
+Depois de buscar os streams dos addons diretos, valide cada `url` (em paralelo, no máx. 8 ao mesmo tempo; limite total de 7 s para o lote, o que não terminar é descartado):
+- Siga os redirecionamentos **manualmente** (no máx. 6 saltos, `allow_redirects=False`), `GET` com `Range: bytes=0-1023` e `User-Agent: ExoPlayerLib/2.19.1`, timeout de 5 s por salto. Leia só o 1º KB.
+- Aceito se o fim for `200`/`206` com `Content-Type` `video/*`, `application/octet-stream` ou HLS (`application/vnd.apple.mpegurl`, `application/x-mpegurl`). O resto é descartado: 4xx/5xx, HTML, timeout, IP literal que não conecta.
+- **DNS da casa:** para cada host da cadeia (inclusive o final), pergunte ao DNS `settings.HOUSE_DNS` (padrão `"192.168.3.44"`; `None`/vazio desliga a checagem) com uma consulta A em UDP feita em Python puro (`asyncio` datagram, timeout de 1 s, sem pacote novo). Se a resposta for `0.0.0.0` ou não tiver IP, o host está bloqueado na casa: descarte o link e logue **uma vez por host a cada 6 h** `🚫 DNS da casa bloqueia <host> (link direto <addon>)`. Cache por host: 30 min.
+- Cache do resultado por URL: 10 min em memória (válido/inválido). Log de resumo por pedido: `🌐 diretos: <n válidos>/<n total>`.
+- A `url` entregue ao Stremio continua a original.
 
-## 2. Rotas (`comet/api/endpoints/artwork.py`, registrar em `app.py` como `catalog`)
-- `GET /art/top10/{rank}/{poster_file}` e `GET /art/land/{backdrop_file}` e `GET /art/land/{backdrop_file}/{logo_file}` (as duas últimas para com/sem logo). Também com prefixo `/{b64config}` não é necessário.
-- Resposta `image/jpeg`, `Cache-Control: public, max-age=2592000, immutable`. Erro de download/arquivo inválido → 404.
+## 2. Playback nunca trava (`playback.py`, `stremthru.py`)
+Hoje há pedidos de playback que levam 30 s ou mais (`TimeoutError` em `generate_download_link`, troca do 451 passando por 5 ou mais candidatos a ~2 s cada; uma levou 35,9 s). O Stremio fica carregando.
+- Orçamento total por pedido de playback: `settings.PLAYBACK_BUDGET` = 15 s, contado desde a chegada do pedido. Se acabar, devolva o vídeo de erro/aviso já existente do Comet, com texto claro (`"Não ficou pronto no Real-Debrid a tempo. Tente outra opção da lista."`). Não deixe nenhum `await` passar do orçamento.
+- Torrent não cacheado no RD: não espere o download. Se o RD não devolver o link na hora, responda o aviso `"Baixando no Real-Debrid (<progresso>% se souber). Tente de novo em alguns minutos ou escolha um ⚡."` em ≤ 15 s.
+- Troca do 451: dentro do mesmo orçamento; os candidatos que já estão marcados como 451 (precheck/banco) são pulados sem chamar o RD.
 
-## 3. Usar nas fileiras (`catalogs.py` + `catalog.py`)
-- `get_catalog` recebe `base_url` (passado pela rota do catálogo; a chave do cache não muda).
-- `comet_top10` (filme e série): `posterShape: "square"`, `poster = f"{base_url}/art/top10/{posição 1..10}/{poster_path sem /}"`.
-- Fileiras deitadas (`comet_trending`, `comet_new`, com `CATALOG_LANDSCAPE`): troque a busca de imagens para `include_image_language=pt,en,null` e guarde no `landscape_map.json` (formato novo: `{"backdrop": <arquivo sem texto (iso null) preferido; senão qualquer>, "logo": <png pt > en, maior vote_average; ignore .svg> }`; entradas antigas no formato velho devem ser refeitas). `poster = f"{base_url}/art/land/{backdrop}/{logo}"` (ou sem logo). Mantém `posterShape: "landscape"`. Sem backdrop → pôster normal sem `posterShape`.
+## 3. `▶ Assistir` só aponta para o que é certo (`stream.py`)
+- Candidatos do `▶ Assistir`: link direto **validado** (item 1), ou torrent ⚡ (em cache no RD) cujo hash **não** está marcado como 451. Nunca ⬇️ ou P2P. Se não houver candidato, não crie o `▶ Assistir`.
+- Logo depois de montar a lista, em background (sem atrasar a resposta), resolva o link do RD do `▶ Assistir` e guarde-o em memória por 10 min. Quando o player pedir, devolva o redirect na hora. Se der 451, marque o hash como 451, como o precheck já faz.
+
+## Settings (`models.py`)
+`HOUSE_DNS: str | None = "192.168.3.44"`, `PLAYBACK_BUDGET: float = 15.0`.
 
 ## Fora de escopo
-Não mexer em stream, filtragem, legendas, meta, busca, index.html.
+Fontes de torrents, catálogos, legendas, meta, index.html, AdGuard.
 
 ## Aplicar
 1. `py_compile` dos arquivos alterados.
 2. Reinicie: `.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`; espere `http://127.0.0.1:8000/manifest.json` no chroot (polling com `curl`, sem `Start-Sleep`).
-3. Regenere o patch: no chroot `git -C /opt/comet add -N comet/services/artwork.py comet/api/endpoints/artwork.py` e `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp/x.patch`, `adb pull` para `comet-patches/ptbr-first.patch`, apague temporários com `unlink`. Zero `\r`.
+3. Patch: no chroot `git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp/x.patch` (`chmod 644`), `adb pull` para `comet-patches/ptbr-first.patch`, apague temporários com `unlink`. Zero `\r`.
 
 ## Verificação
-- `catalog/movie/comet_top10.json`: 10 itens com `posterShape` `square` e `poster` em `/art/top10/`. `catalog/series/comet_trending.json`: `poster` em `/art/land/`, diga quantos têm logo.
-- Baixe no chroot 3 imagens: o `poster` do 1º e do 10º item do Top 10 de filmes e o do 1º item de `comet_trending` série, salve como `/var/tmp/art_top1.jpg`, `/var/tmp/art_top10.jpg`, `/var/tmp/art_land.jpg`; copie para `/data/local/tmp/` e `adb pull` para `.orquestra/` (mesmos nomes). **Não apague esses 3** (o revisor vai olhar).
-- Tempo da 1ª geração e da 2ª (cache) de uma imagem.
-- `/art/top10/1/..%2F..%2Fetc%2Fpasswd` e `/art/land/x.gif` → 404.
+- Config sem RD (veja a Seção 6 do HANDOFF): `stream/series/tt2293002:1:2.json` e `stream/movie/tt12042730.json`. Informe quantos diretos vieram e as linhas `🚫 DNS da casa bloqueia` do log (hoje devem aparecer `zjo.lat`, `aponteiecair.lat`, `telaplay93.top`, `cdn.vdcdpstop.lat`) e o resumo `🌐 diretos`.
+- Com `HOUSE_DNS` vazio só no teste (variável de ambiente, sem mexer no `.env`): os diretos que respondem vídeo voltam.
+- Tempo do pedido de stream: no máx. 8 s a mais do que antes nos 2 casos.
+- Playback: chame um link `/playback/...` de um torrent ⬇️ (pegue da lista com o link pessoal **sem imprimir a URL**) e mostre só o código HTTP e o tempo: ≤ 15 s.
 
 Responda em no máximo 5 linhas: arquivos alterados e resultado da verificação.

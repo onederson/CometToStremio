@@ -15,7 +15,7 @@ fi
 
 # DNS: AdGuard local + Quad9 de reserva
 rm -f "$ROOT/etc/resolv.conf"
-printf 'nameserver 192.168.3.44\nnameserver 9.9.9.9\n' > "$ROOT/etc/resolv.conf"
+printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > "$ROOT/etc/resolv.conf"
 printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 a71 a71.lan\n' > "$ROOT/etc/hosts"
 echo a71 > "$ROOT/etc/hostname"
 
