@@ -148,7 +148,7 @@ index 0000000..3dd9acd
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..382c4b7
+index 0000000..16df763
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
 @@ -0,0 +1,88 @@
@@ -198,7 +198,7 @@ index 0000000..382c4b7
 +    if not settings.CATALOGS_ENABLED:
 +        return JSONResponse(
 +            content={"metas": []},
-+            headers={"Cache-Control": "public, max-age=3600"},
++            headers={"Cache-Control": "public, max-age=600"},
 +        )
 +
 +    try:
@@ -207,7 +207,7 @@ index 0000000..382c4b7
 +            if not config:
 +                return JSONResponse(
 +                    content={"metas": []},
-+                    headers={"Cache-Control": "public, max-age=3600"},
++                    headers={"Cache-Control": "public, max-age=600"},
 +                )
 +
 +        extra_dict = {}
@@ -232,13 +232,13 @@ index 0000000..382c4b7
 +        )
 +        return JSONResponse(
 +            content={"metas": metas},
-+            headers={"Cache-Control": "public, max-age=3600"},
++            headers={"Cache-Control": "public, max-age=600"},
 +        )
 +    except Exception as e:
 +        logger.warning(f"Error handling catalog request: {type(e).__name__}")
 +        return JSONResponse(
 +            content={"metas": []},
-+            headers={"Cache-Control": "public, max-age=3600"},
++            headers={"Cache-Control": "public, max-age=600"},
 +        )
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
 index bce0fec..6a0c3ca 100644
@@ -4466,10 +4466,10 @@ index 0000000..5a09f5b
 +        return jpeg_bytes
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..93e9870
+index 0000000..744e26f
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,2456 @@
+@@ -0,0 +1,2459 @@
 +import asyncio
 +import datetime
 +import json
@@ -6781,6 +6781,9 @@ index 0000000..93e9870
 +    base_url: str = "",
 +    kids: bool = False,
 +) -> list[dict]:
++    if not base_url:
++        # chamadas internas (warmup) nao tem request: sem isso o cache guarda posters relativos
++        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
 +    if catalog_id in ("comet_mylist", "comet_newep", "comet_foryou"):
 +        if kids or not getattr(settings, "STREMIO_AUTH_KEY", None):
 +            return []
