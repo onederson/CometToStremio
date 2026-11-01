@@ -200,7 +200,7 @@ Flags importantes do `.env`:
 
 ## 5. Estado do git (IMPORTANTE)
 
-- **Commits:** `cbe21b8` → `17cec22` → `372e0e8` → `6615563` → `7642b2a` → "Proteção de memória, FlareSolverr e limpeza de apps do Android" (HEAD). Veja com `git log --oneline`.
+- **Commits:** histórico completo em `git log --oneline`. Os mais recentes: `4584455` (frontpage Netflix, Comet no lugar do Cinemeta) → `ce2a7a3` (visual Netflix) → `e13772e` (capas montadas e link pessoal) → `a757f17` (rodada ouro, links diretos validados, playback sem travar, DNS público no chroot).
 - **Árvore limpa** depois do último commit. Nada pendente.
 - O A71 está com tudo aplicado e rodando. O repositório é o espelho: `scripts/watchdog.sh` = `/data/comet/watchdog.sh` (confira o MD5), `comet-patches/*.patch` = diffs de `/opt/comet` e `/opt/flaresolverr`.
 - `config/.env` (no `.gitignore`) = `/opt/comet/.env`. Ao mudar um, mude o outro.
@@ -257,7 +257,7 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 ## 8. Onde paramos e próximo passo
 
-**Estado (01/11/2026):** rodando no A71, itens até o 24 da Seção 4 aplicados e conferidos com o link pessoal (RD). Último commit: `e13772e`; rodada ouro (item 23) + item 24 no stage, sem commit (commit só quando o usuário pedir). Se um dublado der `Failed to connect to <host>/0.0.0.0`, procure `🚫 DNS da casa bloqueia` no log e libere o host no AdGuard.
+**Estado (01/11/2026):** rodando no A71, itens até o 24 da Seção 4 aplicados e conferidos com o link pessoal (RD). Tudo commitado (itens 23 e 24 no `a757f17`); commit só quando o usuário pedir. Se um dublado der `Failed to connect to <host>/0.0.0.0`, procure `🚫 DNS da casa bloqueia` no log e libere o host no AdGuard.
 
 **Testado pelo usuário em 30/10/2026:** lançamento dublado funcionou, mas pela troca do 451 caiu num CAMRip com marca d'água (resolvido no item 12); Demon Slayer T1 e T5 ok; One Piece sem PT-BR (limite das fontes: quase tudo é legendado); Ben 10 Omniverse: todos os dublados estão bloqueados (451) no RD e só o P2P sobra, que tem poucos seeders.
 
