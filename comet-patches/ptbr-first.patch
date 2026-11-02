@@ -1,5 +1,5 @@
 diff --git a/comet/api/app.py b/comet/api/app.py
-index f7832d1..0cc2c62 100644
+index f7832d1..950f9e5 100644
 --- a/comet/api/app.py
 +++ b/comet/api/app.py
 @@ -10,7 +10,9 @@ from starlette.requests import Request
@@ -12,18 +12,28 @@ index f7832d1..0cc2c62 100644
      chilllink,
      cometnet,
      cometnet_ui,
-@@ -18,8 +20,10 @@ from comet.api.endpoints import (
+@@ -18,8 +20,11 @@ from comet.api.endpoints import (
      debrid_sync,
      kodi,
      manifest,
 +    meta,
      playback,
      prometheus,
++    status,
 +    subtitles,
      torznab,
  )
  from comet.api.endpoints import stream as streams_router
-@@ -196,6 +200,13 @@ async def lifespan(app: FastAPI):
+@@ -118,6 +123,8 @@ async def lifespan(app: FastAPI):
+ 
+     async with AsyncExitStack() as cleanup:
+         await setup_database()
++        from comet.services.subtitles import init_pt_filenames
++        await init_pt_filenames()
+         cleanup.push_async_callback(teardown_database)
+         cleanup.push_async_callback(shutdown_cache_writes)
+         cleanup.push_async_callback(anime_mapper.stop)
+@@ -196,6 +203,13 @@ async def lifespan(app: FastAPI):
              await cometnet_service.start()
              cleanup.push_async_callback(cometnet_service.stop)
  
@@ -37,7 +47,15 @@ index f7832d1..0cc2c62 100644
          # Start indexer manager
          indexer_manager_task = asyncio.create_task(indexer_manager.run())
          cleanup.push_async_callback(indexer_manager.close)
-@@ -270,6 +281,10 @@ stremio_routers = (
+@@ -253,6 +267,7 @@ app.add_middleware(
+ 
+ app.include_router(base.router)
+ app.include_router(config.router)
++app.include_router(status.router)
+ app.include_router(admin.router)
+ app.include_router(cometnet.router)
+ app.include_router(cometnet_ui.router)
+@@ -270,6 +285,10 @@ stremio_routers = (
      streams_router.streams,
      torznab.router,
      chilllink.router,
@@ -384,7 +402,7 @@ index 0000000..0b24340
 +            headers={"Cache-Control": "public, max-age=21600"},
 +        )
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
-index 35b1121..52292ad 100644
+index 35b1121..9982d1d 100644
 --- a/comet/api/endpoints/playback.py
 +++ b/comet/api/endpoints/playback.py
 @@ -1,6 +1,10 @@
@@ -398,7 +416,24 @@ index 35b1121..52292ad 100644
  
  import mediaflow_proxy.utils.http_utils
  import orjson
-@@ -32,6 +36,31 @@ router = APIRouter()
+@@ -14,7 +18,7 @@ from comet.core.database import (
+     build_scope_params,
+     database,
+ )
+-from comet.core.logger import logger
++from comet.core.logger import logger, record_playback_451_swap, record_playback_budget_exhausted, record_playback_play
+ from comet.core.models import settings
+ from comet.debrid.exceptions import DebridLinkGenerationError
+ from comet.debrid.manager import (
+@@ -24,6 +28,7 @@ from comet.debrid.manager import (
+ )
+ from comet.metadata.manager import MetadataScraper
+ from comet.services.status_video import build_status_video_response
++from comet.services.prefetch import trigger_prefetch_next_episode
+ from comet.services.streaming.manager import custom_handle_stream_request
+ from comet.utils.http_client import http_client_manager
+ from comet.utils.network import get_client_ip
+@@ -32,6 +37,31 @@ router = APIRouter()
  _INFO_HASH_PATTERN = re.compile(r"[0-9a-f]{40}")
  _NONNEGATIVE_INTEGER_PATTERN = re.compile(r"0|[1-9][0-9]*")
  
@@ -430,7 +465,7 @@ index 35b1121..52292ad 100644
  
  def _parse_optional_path_integer(value: str) -> int | None:
      if value == "n":
-@@ -181,6 +210,218 @@ async def _cache_download_link_safely(**kwargs) -> None:
+@@ -181,6 +211,292 @@ async def _cache_download_link_safely(**kwargs) -> None:
          )
  
  
@@ -461,6 +496,8 @@ index 35b1121..52292ad 100644
 +    aliases: dict,
 +    start_time: float,
 +    budget: float,
++    tb_debrid=None,
++    tb_api_key: str | None = None,
 +) -> str | None:
 +    orig_res = (original_resolution or "").lower()
 +    if not orig_res:
@@ -585,12 +622,11 @@ index 35b1121..52292ad 100644
 +    for candidate in ordered_candidates[:3]:
 +        rem_cand = budget - (time.monotonic() - start_time)
 +        if rem_cand <= 0.5:
++            record_playback_budget_exhausted()
 +            logger.warning("Playback budget expired during 451 fallback")
 +            break
 +
 +        cand_hash = str(candidate["info_hash"]).lower()
-+        if cand_hash in blocked_hashes:
-+            continue
 +        cand_title = candidate["title"]
 +        cand_index = (
 +            str(candidate["file_index"])
@@ -598,6 +634,43 @@ index 35b1121..52292ad 100644
 +            else "n"
 +        )
 +        cand_sources = _decode_sources(candidate["sources_json"])
++
++        # Se ja esta marcado como bloqueado no RD, tenta direto no TorBox
++        if cand_hash in blocked_hashes:
++            if tb_debrid and tb_api_key:
++                try:
++                    cand_url = await asyncio.wait_for(
++                        tb_debrid.generate_download_link(
++                            cand_hash,
++                            cand_index,
++                            name,
++                            cand_title,
++                            season,
++                            episode,
++                            cand_sources,
++                            aliases,
++                        ),
++                        timeout=rem_cand,
++                    )
++                    valid_cand_url = _valid_download_url(cand_url)
++                    if valid_cand_url:
++                        record_playback_451_swap()
++                        logger.log(
++                            "PLAYBACK",
++                            f"🔁 451 em {original_hash.lower()} → tocando {cand_hash} {cand_title} (TorBox)",
++                        )
++                        await _cache_download_link_safely(
++                            debrid_service="torbox",
++                            account_key_hash=build_account_key_hash(tb_api_key),
++                            info_hash=cand_hash,
++                            season=season,
++                            episode=episode,
++                            download_url=valid_cand_url,
++                        )
++                        return valid_cand_url
++                except Exception as tb_exc:
++                    logger.warning(f"TorBox candidato {cand_hash} falhou: {tb_exc}")
++            continue
 +
 +        try:
 +            cand_url = await asyncio.wait_for(
@@ -615,6 +688,7 @@ index 35b1121..52292ad 100644
 +            )
 +            valid_cand_url = _valid_download_url(cand_url)
 +            if valid_cand_url:
++                record_playback_451_swap()
 +                logger.log(
 +                    "PLAYBACK",
 +                    f"🔁 451 em {original_hash.lower()} → tocando {cand_hash} {cand_title}",
@@ -635,6 +709,41 @@ index 35b1121..52292ad 100644
 +                or cand_err.upstream_error_code == "infringing_file"
 +            ):
 +                blocked_hashes.add(cand_hash)
++                if tb_debrid and tb_api_key:
++                    rem_tb = budget - (time.monotonic() - start_time)
++                    if rem_tb > 0.5:
++                        try:
++                            tb_url = await asyncio.wait_for(
++                                tb_debrid.generate_download_link(
++                                    cand_hash,
++                                    cand_index,
++                                    name,
++                                    cand_title,
++                                    season,
++                                    episode,
++                                    cand_sources,
++                                    aliases,
++                                ),
++                                timeout=rem_tb,
++                            )
++                            valid_tb_url = _valid_download_url(tb_url)
++                            if valid_tb_url:
++                                record_playback_451_swap()
++                                logger.log(
++                                    "PLAYBACK",
++                                    f"🔁 451 em {original_hash.lower()} → tocando {cand_hash} {cand_title} (TorBox)",
++                                )
++                                await _cache_download_link_safely(
++                                    debrid_service="torbox",
++                                    account_key_hash=build_account_key_hash(tb_api_key),
++                                    info_hash=cand_hash,
++                                    season=season,
++                                    episode=episode,
++                                    download_url=valid_tb_url,
++                                )
++                                return valid_tb_url
++                        except Exception as tb_exc:
++                            logger.warning(f"TorBox candidato {cand_hash} falhou: {tb_exc}")
 +            continue
 +        except (TimeoutError, asyncio.TimeoutError):
 +            logger.warning(f"Fallback 451 timeout para candidato {cand_hash}")
@@ -649,7 +758,7 @@ index 35b1121..52292ad 100644
  @router.get(
      "/{b64config}/playback/{hash}/{service_index}/{index}/{season}/{episode}",
      tags=["Stremio"],
-@@ -199,6 +440,7 @@ async def playback(
+@@ -199,6 +515,7 @@ async def playback(
      name: str = Query(),
      media_id: str | None = Query(default=None),
      media_type: str | None = Query(default=None),
@@ -657,12 +766,22 @@ index 35b1121..52292ad 100644
  ):
      config = config_check(b64config, strict_b64config=True)
      if not config:
-@@ -232,6 +474,14 @@ async def playback(
+@@ -232,6 +549,24 @@ async def playback(
              ["BAD_REQUEST"],
              default_key="BAD_REQUEST",
          )
 +
++    if season is not None and episode is not None:
++        trigger_prefetch_next_episode(
++            b64config=b64config,
++            media_id=media_id,
++            info_hash=hash,
++            season=season,
++            episode=episode,
++        )
++
 +    start_time = time.monotonic()
++    record_playback_play()
 +    budget = float(getattr(settings, "PLAYBACK_BUDGET", 15.0))
 +
 +    preresolved = get_preresolved_link(debrid_service, hash, season, episode)
@@ -672,12 +791,13 @@ index 35b1121..52292ad 100644
      account_key_hash = build_account_key_hash(debrid_api_key)
  
      session = await http_client_manager.get_session()
-@@ -331,10 +581,28 @@ async def playback(
+@@ -331,10 +666,29 @@ async def playback(
                      default_key="BAD_REQUEST",
                  )
  
 +            rem = budget - (time.monotonic() - start_time)
 +            if rem <= 0.5:
++                record_playback_budget_exhausted()
 +                logger.warning("Não ficou pronto no Real-Debrid a tempo. Tente outra opção da lista.")
 +                return build_status_video_response(
 +                    ["SERVICE_UNAVAILABLE", "UNKNOWN"],
@@ -704,7 +824,7 @@ index 35b1121..52292ad 100644
  
          debrid = get_debrid(
              session,
-@@ -345,22 +613,74 @@ async def playback(
+@@ -345,22 +699,133 @@ async def playback(
              ip if not should_proxy else "",
          )
          try:
@@ -719,6 +839,7 @@ index 35b1121..52292ad 100644
 -                aliases,
 +            rem = budget - (time.monotonic() - start_time)
 +            if rem <= 0.5:
++                record_playback_budget_exhausted()
 +                logger.warning("Não ficou pronto no Real-Debrid a tempo. Tente outra opção da lista.")
 +                return build_status_video_response(
 +                    ["SERVICE_UNAVAILABLE", "UNKNOWN"],
@@ -753,25 +874,83 @@ index 35b1121..52292ad 100644
 +                or error.error_code == "UNAVAILABLE_FOR_LEGAL_REASONS"
 +                or error.upstream_error_code == "infringing_file"
              )
-+            if is_451 and context_media_id:
-+                fallback_url = await _try_playback_fallback_on_451(
-+                    original_hash=hash,
-+                    original_torrent_name=torrent_name,
-+                    original_resolution=resolution,
-+                    media_id=context_media_id,
-+                    media_type=resolved_media_type,
-+                    season=season,
-+                    episode=episode,
-+                    name=name,
-+                    debrid=debrid,
-+                    debrid_service=debrid_service,
-+                    account_key_hash=account_key_hash,
-+                    aliases=aliases,
-+                    start_time=start_time,
-+                    budget=budget,
++            if is_451:
++                torbox_entry = next(
++                    (e for e in config.get("_debridEntries", []) if e.get("service") == "torbox"),
++                    None,
 +                )
-+                if fallback_url:
-+                    download_url = fallback_url
++                if not torbox_entry and settings.TORBOX_API_KEY:
++                    torbox_entry = {"service": "torbox", "apiKey": settings.TORBOX_API_KEY}
++
++                tb_debrid = None
++                tb_api_key = None
++                if torbox_entry and torbox_entry.get("apiKey"):
++                    tb_api_key = torbox_entry["apiKey"]
++                    tb_debrid = get_debrid(
++                        session,
++                        context_media_id or hash,
++                        context_media_id or hash,
++                        "torbox",
++                        tb_api_key,
++                        ip,
++                    )
++
++                if debrid_service == "realdebrid" and tb_debrid and tb_api_key:
++                    rem_cand = budget - (time.monotonic() - start_time)
++                    if rem_cand > 0.5:
++                        short_hash = hash[:8].lower()
++                        logger.log("PLAYBACK", f"🔁 451 no RD → TorBox {short_hash}")
++                        try:
++                            cand_url = await asyncio.wait_for(
++                                tb_debrid.generate_download_link(
++                                    hash,
++                                    index,
++                                    name,
++                                    torrent_name,
++                                    season,
++                                    episode,
++                                    sources or [],
++                                    aliases,
++                                ),
++                                timeout=rem_cand,
++                            )
++                            valid_cand_url = _valid_download_url(cand_url)
++                            if valid_cand_url:
++                                record_playback_451_swap()
++                                await _cache_download_link_safely(
++                                    debrid_service="torbox",
++                                    account_key_hash=build_account_key_hash(tb_api_key),
++                                    info_hash=hash,
++                                    season=season,
++                                    episode=episode,
++                                    download_url=valid_cand_url,
++                                )
++                                download_url = valid_cand_url
++                        except Exception as tb_err:
++                            logger.warning(f"TorBox fallback direto para {short_hash} falhou: {tb_err}")
++
++                if download_url is None and context_media_id:
++                    fallback_url = await _try_playback_fallback_on_451(
++                        original_hash=hash,
++                        original_torrent_name=torrent_name,
++                        original_resolution=resolution,
++                        media_id=context_media_id,
++                        media_type=resolved_media_type,
++                        season=season,
++                        episode=episode,
++                        name=name,
++                        debrid=debrid,
++                        debrid_service=debrid_service,
++                        account_key_hash=account_key_hash,
++                        aliases=aliases,
++                        start_time=start_time,
++                        budget=budget,
++                        tb_debrid=tb_debrid,
++                        tb_api_key=tb_api_key,
++                    )
++                    if fallback_url:
++                        record_playback_451_swap()
++                        download_url = fallback_url
 +            if download_url is None:
 +                status_keys = error.status_keys
 +                is_pending = (
@@ -792,8 +971,364 @@ index 35b1121..52292ad 100644
  
          if not download_url:
              return build_status_video_response(
+diff --git a/comet/api/endpoints/status.py b/comet/api/endpoints/status.py
+new file mode 100644
+index 0000000..2f39407
+--- /dev/null
++++ b/comet/api/endpoints/status.py
+@@ -0,0 +1,350 @@
++from datetime import datetime, timezone
++import hashlib
++import html
++import json
++import os
++from pathlib import Path
++import re
++import time
++
++from fastapi import APIRouter, HTTPException, Request
++from fastapi.responses import HTMLResponse
++
++from comet.core.database import database
++from comet.core.logger import (
++    get_comet_uptime_seconds,
++    get_playback_stats,
++    get_sources_stats,
++    logger,
++)
++from comet.core.models import settings
++from comet.services.catalogs import build_manifest_catalogs
++from comet.services.direct_addons import get_blocked_hosts, get_last_direct_ratio
++
++router = APIRouter()
++
++
++def _get_manifest_version() -> str:
++    try:
++        resources = [
++            {"name": "stream", "types": ["movie", "series"], "idPrefixes": ["tt", "kitsu"]}
++        ]
++        if settings.SUBTITLES_ENABLED:
++            resources.append(
++                {"name": "subtitles", "types": ["movie", "series"], "idPrefixes": ["tt"]}
++            )
++        catalogs = []
++        if settings.CATALOGS_ENABLED:
++            catalogs = build_manifest_catalogs()
++            resources.append("catalog")
++            resources.append(
++                {"name": "meta", "types": ["movie", "series"], "idPrefixes": ["tt"]}
++            )
++        payload = catalogs + resources
++        n = int(
++            hashlib.sha1(
++                json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
++            ).hexdigest()[:6],
++            16,
++        )
++        return f"2.1.{n}"
++    except Exception:
++        return "2.1.0"
++
++
++def _format_uptime(seconds: int) -> str:
++    days, rem = divmod(seconds, 86400)
++    hours, rem = divmod(rem, 3600)
++    minutes, secs = divmod(rem, 60)
++    parts = []
++    if days > 0:
++        parts.append(f"{days}d")
++    if hours > 0:
++        parts.append(f"{hours}h")
++    if minutes > 0 or not parts:
++        parts.append(f"{minutes}m")
++    parts.append(f"{secs}s")
++    return " ".join(parts)
++
++
++def _get_system_memory() -> tuple[str, str]:
++    mem_avail = "N/A"
++    swap_free = "N/A"
++    try:
++        with open("/proc/meminfo", "r", encoding="utf-8") as f:
++            for line in f:
++                if line.startswith("MemAvailable:"):
++                    parts = line.split()
++                    kb = int(parts[1])
++                    mem_avail = f"{kb // 1024} MB"
++                elif line.startswith("SwapFree:"):
++                    parts = line.split()
++                    kb = int(parts[1])
++                    swap_free = f"{kb // 1024} MB"
++    except Exception:
++        pass
++    return mem_avail, swap_free
++
++
++def _get_process_rss() -> str:
++    rss = "N/A"
++    try:
++        with open("/proc/self/status", "r", encoding="utf-8") as f:
++            for line in f:
++                if line.startswith("VmRSS:"):
++                    parts = line.split()
++                    kb = int(parts[1])
++                    rss = f"{kb // 1024} MB"
++                    break
++    except Exception:
++        pass
++    return rss
++
++
++def _get_smoke_last():
++    path = Path("/opt/comet/data/smoke_last.json")
++    if not path.is_file():
++        return None
++    try:
++        return json.loads(path.read_text(encoding="utf-8"))
++    except Exception:
++        return None
++
++
++@router.get("/{token}/status", response_class=HTMLResponse)
++async def status_page(token: str, request: Request):
++    if not settings.PERSONAL_LINK_TOKEN or token != settings.PERSONAL_LINK_TOKEN:
++        raise HTTPException(status_code=404, detail="Not Found")
++
++    manifest_version = _get_manifest_version()
++    uptime_str = _format_uptime(get_comet_uptime_seconds())
++    mem_avail, swap_free = _get_system_memory()
++    proc_rss = _get_process_rss()
++
++    smoke = _get_smoke_last()
++
++    sources_stats = get_sources_stats(cutoff_hours=6.0)
++
++    direct_ratio = get_last_direct_ratio()
++    blocked_hosts = get_blocked_hosts()
++
++    count_451 = 0
++    try:
++        row = await database.fetch_one(
++            "SELECT COUNT(*) as c FROM debrid_blocked_hashes WHERE debrid_service = 'realdebrid'"
++        )
++        if row:
++            count_451 = row["c"]
++    except Exception as exc:
++        logger.warning(f"Erro ao consultar 451: {exc}")
++
++    tb_configured = "Sim" if bool(settings.TORBOX_API_KEY) else "Não"
++
++    playback_stats = get_playback_stats(cutoff_hours=6.0)
++
++    # Build HTML
++    smoke_html = ""
++    if smoke is None:
++        smoke_html = "<p class='dim'>ainda não rodou</p>"
++    else:
++        smoke_ok = smoke.get("ok", False)
++        status_badge = (
++            "<span class='badge ok'>OK</span>"
++            if smoke_ok
++            else "<span class='badge err'>FALHA</span>"
++        )
++        ts_str = smoke.get("ts", "")
++        try:
++            dt = datetime.fromisoformat(ts_str)
++            hora_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
++        except Exception:
++            hora_str = ts_str
++
++        checks_rows = ""
++        for chk in smoke.get("checks", []):
++            chk_name = html.escape(str(chk.get("name", "")))
++            chk_ok = chk.get("ok", False)
++            chk_badge = (
++                "<span class='badge ok'>OK</span>"
++                if chk_ok
++                else "<span class='badge err'>FALHA</span>"
++            )
++            chk_secs = f"{float(chk.get('secs', 0)):.2f}s"
++            chk_why = html.escape(str(chk.get("why", "")))
++            checks_rows += (
++                f"<tr><td>{chk_name}</td><td>{chk_badge}</td>"
++                f"<td>{chk_secs}</td><td>{chk_why}</td></tr>"
++            )
++
++        smoke_html = f"""
++        <div class="row"><span class="label">Hora:</span><span class="val">{html.escape(hora_str)}</span></div>
++        <div class="row"><span class="label">Status geral:</span><span class="val">{status_badge}</span></div>
++        <table>
++            <thead><tr><th>Checagem</th><th>Status</th><th>Tempo</th><th>Detalhe</th></tr></thead>
++            <tbody>{checks_rows}</tbody>
++        </table>
++        """
++
++    sources_rows = ""
++    for src, st in sources_stats.items():
++        src_esc = html.escape(src)
++        succ = st["success"]
++        err = st["error"]
++        last_err = html.escape(st["last_error"])
++        sources_rows += (
++            f"<tr><td><strong>{src_esc}</strong></td><td>{succ}</td>"
++            f"<td>{err}</td><td class='dim'>{last_err}</td></tr>"
++        )
++
++    directs_html = f'<div class="row"><span class="label">Último teste:</span><span class="val">🌐 diretos: {html.escape(direct_ratio)}</span></div>'
++    if not blocked_hosts:
++        directs_html += "<p class='dim'>Nenhum host bloqueado pelo DNS da casa.</p>"
++    else:
++        directs_html += "<p>Hosts bloqueados:</p><ul>"
++        for h in blocked_hosts:
++            h_esc = html.escape(h)
++            directs_html += (
++                f"<li><code>{h_esc}</code> — libere no AdGuard: <code>@@||{h_esc}^$important</code></li>"
++            )
++        directs_html += "</ul>"
++
++    content = f"""<!DOCTYPE html>
++<html lang="pt-BR">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1.0">
++<meta http-equiv="refresh" content="60">
++<title>Comet - Status</title>
++<style>
++:root {{
++    --bg: #121212;
++    --card: #1e1e1e;
++    --border: #2c2c2c;
++    --text: #e0e0e0;
++    --dim: #9e9e9e;
++    --accent: #3b82f6;
++    --ok: #22c55e;
++    --err: #ef4444;
++}}
++* {{ box-sizing: border-box; }}
++body {{
++    background-color: var(--bg);
++    color: var(--text);
++    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
++    margin: 0;
++    padding: 16px;
++    line-height: 1.4;
++}}
++.container {{
++    max-width: 680px;
++    margin: 0 auto;
++}}
++h1 {{
++    font-size: 1.4rem;
++    margin: 0 0 16px 0;
++    text-align: center;
++    color: var(--text);
++}}
++h2 {{
++    font-size: 1.1rem;
++    margin: 20px 0 8px 0;
++    color: var(--accent);
++    border-bottom: 1px solid var(--border);
++    padding-bottom: 4px;
++}}
++.card {{
++    background-color: var(--card);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    padding: 12px 14px;
++    margin-bottom: 12px;
++}}
++.row {{
++    display: flex;
++    justify-content: space-between;
++    align-items: center;
++    padding: 4px 0;
++    border-bottom: 1px solid rgba(255,255,255,0.05);
++}}
++.row:last-child {{ border-bottom: none; }}
++.label {{ color: var(--dim); font-size: 0.95rem; }}
++.val {{ font-weight: 500; font-size: 0.95rem; }}
++.dim {{ color: var(--dim); font-size: 0.85rem; }}
++.badge {{
++    padding: 2px 6px;
++    border-radius: 4px;
++    font-size: 0.8rem;
++    font-weight: bold;
++}}
++.badge.ok {{ color: var(--ok); }}
++.badge.err {{ color: var(--err); }}
++table {{
++    width: 100%;
++    border-collapse: collapse;
++    margin-top: 8px;
++    font-size: 0.88rem;
++}}
++th, td {{
++    text-align: left;
++    padding: 6px 4px;
++    border-bottom: 1px solid var(--border);
++}}
++th {{ color: var(--dim); font-weight: normal; font-size: 0.8rem; }}
++code {{
++    background: #262626;
++    padding: 2px 4px;
++    border-radius: 4px;
++    font-size: 0.85rem;
++}}
++ul {{ margin: 4px 0; padding-left: 20px; }}
++li {{ margin: 4px 0; font-size: 0.9rem; }}
++</style>
++</head>
++<body>
++<div class="container">
++<h1>☄️ Comet Status</h1>
++
++<h2>Geral</h2>
++<div class="card">
++    <div class="row"><span class="label">Versão do manifest:</span><span class="val">{html.escape(manifest_version)}</span></div>
++    <div class="row"><span class="label">Tempo no ar:</span><span class="val">{html.escape(uptime_str)}</span></div>
++    <div class="row"><span class="label">Memória livre (A71):</span><span class="val">MemAvailable: {html.escape(mem_avail)} | SwapFree: {html.escape(swap_free)}</span></div>
++    <div class="row"><span class="label">RSS do processo:</span><span class="val">{html.escape(proc_rss)}</span></div>
++</div>
++
++<h2>Teste automático</h2>
++<div class="card">
++    {smoke_html}
++</div>
++
++<h2>Fontes (últimas 6 h)</h2>
++<div class="card">
++    <table>
++        <thead><tr><th>Fonte</th><th>Sucessos</th><th>Erros</th><th>Último erro</th></tr></thead>
++        <tbody>{sources_rows}</tbody>
++    </table>
++</div>
++
++<h2>Links diretos</h2>
++<div class="card">
++    {directs_html}
++</div>
++
++<h2>Debrid</h2>
++<div class="card">
++    <div class="row"><span class="label">Hashes 451 no Real-Debrid:</span><span class="val">{count_451}</span></div>
++    <div class="row"><span class="label">TorBox configurado:</span><span class="val">{tb_configured}</span></div>
++</div>
++
++<h2>Playback (últimas 6 h)</h2>
++<div class="card">
++    <div class="row"><span class="label">Plays:</span><span class="val">{playback_stats['plays']}</span></div>
++    <div class="row"><span class="label">Estourou PLAYBACK_BUDGET:</span><span class="val">{playback_stats['budget_exhausted']}</span></div>
++    <div class="row"><span class="label">Trocas do 451:</span><span class="val">{playback_stats['swaps_451']}</span></div>
++</div>
++
++</div>
++</body>
++</html>
++"""
++    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..dfac4e6 100644
+index 94f56ae..ce38b61 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,32 @@
@@ -859,7 +1394,7 @@ index 94f56ae..dfac4e6 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +101,313 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +101,321 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -969,7 +1504,7 @@ index 94f56ae..dfac4e6 100644
 +            return
 +        entry = debrid_entries[entry_index]
 +        service = entry.get("service")
-+        token = entry.get("token")
++        token = entry.get("token") or entry.get("apiKey")
 +        if not service or not token or not info_hash:
 +            return
 +
@@ -1010,8 +1545,8 @@ index 94f56ae..dfac4e6 100644
 +            or err.error_code == "UNAVAILABLE_FOR_LEGAL_REASONS"
 +            or err.upstream_error_code == "infringing_file"
 +        ):
-+            await _record_debrid_blocked_hash("realdebrid", info_hash, "infringing_file")
-+            logger.log("PLAYBACK", f"🚫 RD bloqueou (451) no pré-resolve do Assistir: {info_hash}")
++            await _record_debrid_blocked_hash(service, info_hash, "infringing_file")
++            logger.log("PLAYBACK", f"🚫 {service} bloqueou (451) no pré-resolve do Assistir: {info_hash}")
 +    except Exception as e:
 +        logger.warning(f"Pré-resolve do Assistir falhou: {e}")
 +
@@ -1062,17 +1597,23 @@ index 94f56ae..dfac4e6 100644
 +        line1_parts = [p for p in [quality, audio, tamanho] if p]
 +        line1 = " · ".join(line1_parts) if line1_parts else None
 +
++        deb_svc = str(info.get("debrid_service") or info.get("service") or "").lower()
++        svc_name = "TorBox" if ("torbox" in deb_svc or deb_svc == "tb") else "Real-Debrid"
++
 +        if is_cam:
 +            line2 = "🎦 Gravação de cinema"
 +        elif kind == "p2p":
 +            line2 = "⚠️ Direto do torrent (P2P)"
 +        elif cached:
-+            line2 = "⚡ Pronto no Real-Debrid"
++            line2 = f"⚡ Pronto no {svc_name}"
 +        else:
-+            line2 = "⬇️ O Real-Debrid baixa antes de tocar"
++            line2 = f"⬇️ O {svc_name} baixa antes de tocar"
 +
 +        raw_title = info.get("raw_title") or ""
-+        line3 = f"📄 {raw_title[:70]}" if raw_title else None
++        if kind == "p2p":
++            line3 = f"📄 {raw_title[:70]}" if raw_title else None
++        else:
++            line3 = f"{svc_name} · 📄 {raw_title[:70]}" if raw_title else svc_name
 +
 +        desc_lines = [l for l in [line1, line2, line3] if l]
 +        s["description"] = "\n".join(desc_lines)
@@ -1113,9 +1654,11 @@ index 94f56ae..dfac4e6 100644
 +                continue
 +            if not info.get("cached"):
 +                continue
++            deb_svc = str(info.get("debrid_service") or info.get("service") or "").lower()
 +            chash = str(info.get("info_hash") or "").lower()
-+            if chash and chash in blocked_set:
-+                continue
++            if not ("torbox" in deb_svc or deb_svc == "tb"):
++                if chash and chash in blocked_set:
++                    continue
 +            too_big = (info.get("size") or 0) > 30 * 1024**3
 +            key = (too_big, _res_pref(info), idx)
 +            if best_key is None or key < best_key:
@@ -1173,7 +1716,7 @@ index 94f56ae..dfac4e6 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +465,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +473,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -1211,7 +1754,7 @@ index 94f56ae..dfac4e6 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +503,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +511,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -1220,7 +1763,7 @@ index 94f56ae..dfac4e6 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +526,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +534,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -1311,7 +1854,7 @@ index 94f56ae..dfac4e6 100644
      return selected_info_hashes
  
  
-@@ -247,6 +668,22 @@ async def stream(
+@@ -247,6 +676,22 @@ async def stream(
              cache_policy=response_cache_policy,
          )
  
@@ -1334,7 +1877,7 @@ index 94f56ae..dfac4e6 100644
      search_result = await search_media(
          media_type,
          media_id,
-@@ -257,6 +694,8 @@ async def stream(
+@@ -257,6 +702,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -1343,7 +1886,7 @@ index 94f56ae..dfac4e6 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +709,94 @@ async def stream(
+@@ -270,53 +717,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -1473,7 +2016,7 @@ index 94f56ae..dfac4e6 100644
              is_empty=True,
          )
  
-@@ -329,7 +809,7 @@ async def stream(
+@@ -329,7 +817,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -1482,7 +2025,7 @@ index 94f56ae..dfac4e6 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +817,7 @@ async def stream(
+@@ -337,6 +825,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -1490,7 +2033,7 @@ index 94f56ae..dfac4e6 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +829,7 @@ async def stream(
+@@ -348,7 +837,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -1499,7 +2042,7 @@ index 94f56ae..dfac4e6 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +859,7 @@ async def stream(
+@@ -378,7 +867,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -1508,7 +2051,7 @@ index 94f56ae..dfac4e6 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +874,40 @@ async def stream(
+@@ -393,8 +882,40 @@ async def stream(
                  }
              )
  
@@ -1550,7 +2093,7 @@ index 94f56ae..dfac4e6 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +915,31 @@ async def stream(
+@@ -402,18 +923,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -1584,22 +2127,98 @@ index 94f56ae..dfac4e6 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -432,6 +958,97 @@ async def stream(
-         for entry_index, service, debrid_extension in debrid_stream_specs:
-             if service in debrid_errors:
-                 continue
-+            if info_hash.lower() in blocked_by_service.get(service, ()):
-+                if not settings.P2P_FALLBACK_FOR_BLOCKED:
-+                    continue
-+                if info_hash in p2p_fallback_hashes:
-+                    continue
+@@ -429,21 +963,171 @@ async def stream(
+         info_hash_cache_status = service_cache_status.get(info_hash)
+         quoted_torrent_title = quote(torrent_title)
+ 
+-        for entry_index, service, debrid_extension in debrid_stream_specs:
+-            if service in debrid_errors:
+-                continue
++        chosen_spec = None
++        chosen_is_cached = False
+ 
++        specs_by_svc = {
++            svc: (idx, svc, ext)
++            for idx, svc, ext in debrid_stream_specs
++            if svc not in debrid_errors
++        }
 +
++        # 1. RD em cache (⚡) e hash não marcado como 451 para o RD
++        if "realdebrid" in specs_by_svc:
++            spec = specs_by_svc["realdebrid"]
++            is_blocked = info_hash.lower() in blocked_by_service.get("realdebrid", ())
+             is_cached = (
+-                info_hash_cache_status.get(service, False)
++                bool(info_hash_cache_status.get("realdebrid", False))
+                 if info_hash_cache_status
+                 else False
+             )
++            if is_cached and not is_blocked:
++                chosen_spec = spec
++                chosen_is_cached = True
++
++        # 2. TorBox em cache (⚡)
++        if not chosen_spec and "torbox" in specs_by_svc:
++            spec = specs_by_svc["torbox"]
++            is_blocked = info_hash.lower() in blocked_by_service.get("torbox", ())
++            is_cached = (
++                bool(info_hash_cache_status.get("torbox", False))
++                if info_hash_cache_status
++                else False
++            )
++            if is_cached and not is_blocked:
++                chosen_spec = spec
++                chosen_is_cached = True
++
++        # Outro debrid em cache
++        if not chosen_spec:
++            for svc, spec in specs_by_svc.items():
++                if svc in ("realdebrid", "torbox"):
++                    continue
++                is_blocked = info_hash.lower() in blocked_by_service.get(svc, ())
 +                is_cached = (
-+                    info_hash_cache_status.get(service, False)
++                    bool(info_hash_cache_status.get(svc, False))
 +                    if info_hash_cache_status
 +                    else False
 +                )
++                if is_cached and not is_blocked:
++                    chosen_spec = spec
++                    chosen_is_cached = True
++                    break
 +
++        # 3. RD não cacheado (⬇️) se não estiver marcado 451; senão TorBox não cacheado
++        if not chosen_spec and not config["cachedOnly"]:
++            if "realdebrid" in specs_by_svc:
++                spec = specs_by_svc["realdebrid"]
++                is_blocked = info_hash.lower() in blocked_by_service.get("realdebrid", ())
++                if not is_blocked:
++                    chosen_spec = spec
++                    chosen_is_cached = False
++            if not chosen_spec and "torbox" in specs_by_svc:
++                spec = specs_by_svc["torbox"]
++                is_blocked = info_hash.lower() in blocked_by_service.get("torbox", ())
++                if not is_blocked:
++                    chosen_spec = spec
++                    chosen_is_cached = False
++            if not chosen_spec:
++                for svc, spec in specs_by_svc.items():
++                    if svc in ("realdebrid", "torbox"):
++                        continue
++                    is_blocked = info_hash.lower() in blocked_by_service.get(svc, ())
++                    if not is_blocked:
++                        chosen_spec = spec
++                        chosen_is_cached = False
++                        break
++
++        if not chosen_spec:
++            rd_is_blocked = "realdebrid" in specs_by_svc and (
++                info_hash.lower() in blocked_by_service.get("realdebrid", ())
++            )
++            if (
++                rd_is_blocked
++                and settings.P2P_FALLBACK_FOR_BLOCKED
++                and info_hash not in p2p_fallback_hashes
++            ):
 +                behavior_hints = {
 +                    "bingeGroup": f"comet|torrent|{info_hash}",
 +                    "filename": rtn_data.raw_title,
@@ -1649,12 +2268,16 @@ index 94f56ae..dfac4e6 100644
 +                        f"🎦 Gravação de cinema: marca d'água e qualidade ruim\n"
 +                        f"{the_stream['description']}"
 +                    )
-+
+ 
+-            if config["cachedOnly"] and not is_cached:
+-                continue
 +                if chilllink:
 +                    the_stream["_chilllink"] = format_chilllink(
 +                        formatted_components, False
 +                    )
-+
+ 
+-            if deduplicate_streams and info_hash in added_hashes and is_cached:
+-                continue
 +                if torrent.get("fileIndex") is not None:
 +                    the_stream["fileIdx"] = torrent["fileIndex"]
 +
@@ -1669,20 +2292,22 @@ index 94f56ae..dfac4e6 100644
 +                    the_stream,
 +                    is_pt,
 +                    res_rank,
-+                    0 if is_cached else 1,
++                    1,
 +                    rank_idx,
 +                    seed_key,
 +                    is_cam,
 +                )
-+                if sort_mixed or is_cached:
++                if sort_mixed:
 +                    cached_results.append(stream_entry)
 +                else:
 +                    non_cached_results.append(stream_entry)
-+                continue
++        else:
++            entry_index, service, debrid_extension = chosen_spec
++            is_cached = chosen_is_cached
  
-             is_cached = (
-                 info_hash_cache_status.get(service, False)
-@@ -463,39 +1080,83 @@ async def stream(
+             behavior_hints = {
+                 "bingeGroup": f"comet|{service}|{info_hash}",
+@@ -463,38 +1147,82 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -1714,6 +2339,7 @@ index 94f56ae..dfac4e6 100644
 +                "raw_title": raw_title_val,
 +                "dub_kind": _get_dub_kind(raw_title_val, is_pt),
 +                "service": debrid_extension,
++                "debrid_service": service,
 +                "info_hash": info_hash,
 +                "file_index": file_index_str,
 +                "title": title,
@@ -1746,8 +2372,9 @@ index 94f56ae..dfac4e6 100644
 +                f"&media_id={quoted_media_only_id}&media_type={media_type}&resolution={res_param}"
              )
  
-             if is_cached:
-                 added_hashes.add(info_hash)
+-            if is_cached:
+-                added_hashes.add(info_hash)
++            added_hashes.add(info_hash)
  
 +            stream_entry = (
 +                the_stream,
@@ -1766,14 +2393,14 @@ index 94f56ae..dfac4e6 100644
 +                non_cached_results.append(stream_entry)
  
          if enable_torrent:
-             if deduplicate_streams and info_hash in added_hashes:
-                 continue
-+            if info_hash in p2p_fallback_hashes:
+-            if deduplicate_streams and info_hash in added_hashes:
++            if info_hash in added_hashes:
 +                continue
++            if info_hash in p2p_fallback_hashes:
+                 continue
  
              behavior_hints = {
-                 "bingeGroup": f"comet|torrent|{info_hash}",
-@@ -515,6 +1176,10 @@ async def stream(
+@@ -515,6 +1243,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -1784,7 +2411,7 @@ index 94f56ae..dfac4e6 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1187,26 @@ async def stream(
+@@ -522,6 +1254,26 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -1811,7 +2438,7 @@ index 94f56ae..dfac4e6 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1218,153 @@ async def stream(
+@@ -533,12 +1285,153 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -1819,9 +2446,7 @@ index 94f56ae..dfac4e6 100644
 +            cached_results.append(
 +                (the_stream, is_pt, res_rank, 1, rank_idx, seed_key, is_cam)
 +            )
- 
--    if sort_mixed:
--        final_streams = cached_results
++
 +    ordered_entries = (
 +        cached_results if sort_mixed else cached_results + non_cached_results
 +    )
@@ -1836,7 +2461,9 @@ index 94f56ae..dfac4e6 100644
 +        for s in direct_streams
 +        if not s.get("_is_pt")
 +    ]
-+
+ 
+-    if sort_mixed:
+-        final_streams = cached_results
 +    if settings.DEMOTE_CAM:
 +        if settings.PTBR_FIRST:
 +            pt_good = [entry for entry in ordered_entries if entry[1] and not entry[6]]
@@ -2272,10 +2899,10 @@ index 0000000..8b4bca0
 +            },
 +        )
 diff --git a/comet/core/config_validation.py b/comet/core/config_validation.py
-index 44bf701..80ddd93 100644
+index 44bf701..6524e2f 100644
 --- a/comet/core/config_validation.py
 +++ b/comet/core/config_validation.py
-@@ -112,10 +112,30 @@ def _parse_and_validate_config(b64config: str):
+@@ -112,12 +112,62 @@ def _parse_and_validate_config(b64config: str):
          return None
  
  
@@ -2289,12 +2916,14 @@ index 44bf701..80ddd93 100644
      if not b64config:
          return _default_validated_config()
  
++    is_token = False
 +    if (
 +        settings.KIDS_LINK_TOKEN
 +        and settings.PERSONAL_LINK_CONFIG
 +        and b64config == settings.KIDS_LINK_TOKEN
 +    ):
 +        b64config = settings.PERSONAL_LINK_CONFIG
++        is_token = True
 +    # Link pessoal: o token curto do .env vale pela config completa salva no servidor.
 +    elif (
 +        settings.PERSONAL_LINK_TOKEN
@@ -2302,12 +2931,181 @@ index 44bf701..80ddd93 100644
 +        and b64config == settings.PERSONAL_LINK_TOKEN
 +    ):
 +        b64config = settings.PERSONAL_LINK_CONFIG
++        is_token = True
 +
      validated_config = _parse_and_validate_config(b64config)
      if validated_config is not None:
++        if is_token and settings.TORBOX_API_KEY:
++            validated_config = dict(validated_config)
++            services = [
++                dict(s)
++                for s in (
++                    validated_config.get("debridServices")
++                    or validated_config.get("_debridEntries")
++                    or []
++                )
++            ]
++            has_torbox = any(s.get("service") == "torbox" for s in services)
++            if not has_torbox:
++                tb_entry = {"service": "torbox", "apiKey": settings.TORBOX_API_KEY}
++                rd_idx = -1
++                for idx, s in enumerate(services):
++                    if s.get("service") == "realdebrid":
++                        rd_idx = idx
++                        break
++                if rd_idx >= 0:
++                    services.insert(rd_idx + 1, tb_entry)
++                else:
++                    services.append(tb_entry)
++                validated_config["debridServices"] = services
++                validated_config["_debridEntries"] = [
++                    {"service": entry["service"], "apiKey": entry["apiKey"]}
++                    for entry in services
++                ]
          return validated_config
+ 
+     if strict_b64config:
+diff --git a/comet/core/logger.py b/comet/core/logger.py
+index 88b8606..929f202 100644
+--- a/comet/core/logger.py
++++ b/comet/core/logger.py
+@@ -179,6 +179,7 @@ def censor_url(url: str):
+ def log_scraper_error(
+     scraper_name: str, scraper_url: str, media_id: str, error: Exception
+ ):
++    record_source_error(scraper_name, error)
+     api_password_missing = ""
+     if "MediaFusion" in scraper_name:
+         api_password_missing = " or your API password could be wrong"
+@@ -682,3 +683,126 @@ def log_startup_info(settings):
+             "COMET",
+             "CometNet P2P: False",
+         )
++
++
++_COMET_START_TIME = time.time()
++_STATUS_EVENTS: list[tuple[float, str, bool, str]] = []  # (ts, source, is_success, err_msg)
++_PLAYBACK_EVENTS: list[tuple[float, str]] = []  # (ts, event_type: "play" | "budget" | "swap_451")
++
++
++def get_comet_uptime_seconds() -> int:
++    return int(time.time() - _COMET_START_TIME)
++
++
++def _clean_status_events(now: float):
++    cutoff = now - 6 * 3600
++    # limpa no maximo a cada 5000 eventos novos (barato) e nunca passa de 5000
++    if len(_STATUS_EVENTS) > 5000 or (_STATUS_EVENTS and _STATUS_EVENTS[0][0] < cutoff and len(_STATUS_EVENTS) % 500 == 0):
++        kept = [e for e in _STATUS_EVENTS if e[0] >= cutoff]
++        _STATUS_EVENTS[:] = kept[-4000:]
++
++
++def _clean_playback_events(now: float):
++    cutoff = now - 6 * 3600
++    # limpa no maximo a cada 5000 eventos novos (barato) e nunca passa de 5000
++    if len(_PLAYBACK_EVENTS) > 5000 or (_PLAYBACK_EVENTS and _PLAYBACK_EVENTS[0][0] < cutoff and len(_PLAYBACK_EVENTS) % 500 == 0):
++        kept = [e for e in _PLAYBACK_EVENTS if e[0] >= cutoff]
++        _PLAYBACK_EVENTS[:] = kept[-4000:]
++
++
++def record_source_success(source: str):
++    now = time.time()
++    _clean_status_events(now)
++    clean = source.split(" #")[0].removesuffix("Scraper")
++    _STATUS_EVENTS.append((now, clean, True, ""))
++
++
++def record_source_error(source: str, error: Exception | str):
++    now = time.time()
++    _clean_status_events(now)
++    clean = source.split(" #")[0].removesuffix("Scraper")
++    msg = str(error)
++    # Strip URLs and sensitive patterns
++    msg = re.sub(r"https?://\S+", "", msg)
++    msg = re.sub(r"//\S+", "", msg)
++    msg = re.sub(r"\s+", " ", msg)
++    msg = msg.strip(": -")
++    if not msg:
++        msg = type(error).__name__ if isinstance(error, Exception) else "Erro"
++    if len(msg) > 60:
++        msg = msg[:57] + "..."
++    _STATUS_EVENTS.append((now, clean, False, msg))
++
++
++def record_playback_play():
++    now = time.time()
++    _clean_playback_events(now)
++    _PLAYBACK_EVENTS.append((now, "play"))
++
++
++def record_playback_budget_exhausted():
++    now = time.time()
++    _clean_playback_events(now)
++    _PLAYBACK_EVENTS.append((now, "budget"))
++
++
++def record_playback_451_swap():
++    now = time.time()
++    _clean_playback_events(now)
++    _PLAYBACK_EVENTS.append((now, "swap_451"))
++
++
++def get_sources_stats(cutoff_hours: float = 6.0) -> dict[str, dict]:
++    cutoff = time.time() - cutoff_hours * 3600
++    events = [e for e in _STATUS_EVENTS if e[0] >= cutoff]
++    preferred_order = [
++        "Torrentio",
++        "MediaFusion",
++        "Comet",
++        "Zilean",
++        "Prowlarr",
++        "BRSites",
++        "Addons",
++        "FenixFlix",
++        "FrostStream",
++        "OpenSubtitles",
++        "SubSource",
++        "SubDL",
++        "TMDB",
++    ]
++    seen_sources = set(preferred_order)
++    for e in events:
++        seen_sources.add(e[1])
++
++    result = {}
++    ordered_keys = [s for s in preferred_order if s in seen_sources] + [
++        s for s in sorted(seen_sources) if s not in preferred_order
++    ]
++    for s in ordered_keys:
++        s_events = [e for e in events if e[1] == s]
++        successes = sum(1 for e in s_events if e[2])
++        errors = sum(1 for e in s_events if not e[2])
++        last_error = "-"
++        for e in reversed(s_events):
++            if not e[2]:
++                last_error = e[3]
++                break
++        result[s] = {
++            "success": successes,
++            "error": errors,
++            "last_error": last_error,
++        }
++    return result
++
++
++def get_playback_stats(cutoff_hours: float = 6.0) -> dict[str, int]:
++    cutoff = time.time() - cutoff_hours * 3600
++    events = [e for e in _PLAYBACK_EVENTS if e[0] >= cutoff]
++    plays = sum(1 for e in events if e[1] == "play")
++    budget_exhausted = sum(1 for e in events if e[1] == "budget")
++    swaps_451 = sum(1 for e in events if e[1] == "swap_451")
++    return {
++        "plays": plays,
++        "budget_exhausted": budget_exhausted,
++        "swaps_451": swaps_451,
++    }
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..7d72bad 100644
+index 835a975..d9b5075 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -2343,7 +3141,7 @@ index 835a975..7d72bad 100644
      REMOVE_ADULT_CONTENT: bool | None = False
      BACKGROUND_SCRAPER_ENABLED: bool | None = False
      BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
-@@ -317,6 +329,39 @@ class AppSettings(ServerSettings):
+@@ -317,6 +329,40 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -2357,6 +3155,7 @@ index 835a975..7d72bad 100644
 +    P2P_FALLBACK_FOR_BLOCKED: bool = True
 +    DEBRID_PRECHECK: bool = True
 +    DEBRID_PRECHECK_MAX_PER_HOUR: int = 20
++    PREFETCH_NEXT_EPISODE: bool = True
 +    SUBTITLES_ENABLED: bool = True
 +    SUBDL_API_KEY: str | None = None
 +    SUBSOURCE_API_KEY: str | None = None
@@ -2383,7 +3182,7 @@ index 835a975..7d72bad 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +698,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +699,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -2413,19 +3212,20 @@ index 835a975..7d72bad 100644
  
      def is_scraper_enabled(self, scraper_setting: bool | str, context: str):
 diff --git a/comet/core/schema_migrations.py b/comet/core/schema_migrations.py
-index 7fe4809..4ebb34e 100644
+index 7fe4809..b7ffd50 100644
 --- a/comet/core/schema_migrations.py
 +++ b/comet/core/schema_migrations.py
-@@ -20,6 +20,8 @@ from comet.core.schema_specs import (
+@@ -20,6 +20,9 @@ from comet.core.schema_specs import (
      DEBRID_ACCOUNT_MAGNETS_TABLE_SPEC,
      DEBRID_ACCOUNT_SYNC_STATE_TABLE_SPEC,
      DEBRID_AVAILABILITY_TABLE_SPEC,
 +    DEBRID_BLOCKED_HASHES_TABLE_SPEC,
 +    DEBRID_VERIFIED_HASHES_TABLE_SPEC,
++    PT_FILENAMES_TABLE_SPEC,
      DMM_ENTRIES_TABLE_SPEC,
      DMM_INGESTED_FILES_TABLE_SPEC,
      DOWNLOAD_LINKS_CACHE_TABLE_SPEC,
-@@ -994,6 +996,16 @@ async def _migration_media_demand_scrape_coverage(ctx: MigrationContext):
+@@ -994,6 +997,21 @@ async def _migration_media_demand_scrape_coverage(ctx: MigrationContext):
      return True
  
  
@@ -2439,21 +3239,27 @@ index 7fe4809..4ebb34e 100644
 +    return True
 +
 +
++async def _migration_pt_filenames(ctx: MigrationContext):
++    await _ensure_managed_table(ctx, PT_FILENAMES_TABLE_SPEC)
++    return True
++
++
  MIGRATIONS = [
      ("2026030901_foundation", _migration_foundation),
      ("2026030902_backfill_canonical_tables", _migration_backfill_canonical_tables),
-@@ -1018,4 +1030,6 @@ MIGRATIONS = [
+@@ -1018,4 +1036,7 @@ MIGRATIONS = [
          _migration_media_demand_scrape_coverage,
      ),
      ("2026072701_imdb_title_lookup", _migration_imdb_title_lookup),
 +    ("2026102901_debrid_blocked_hashes", _migration_debrid_blocked_hashes),
 +    ("2026103001_debrid_verified_hashes", _migration_debrid_verified_hashes),
++    ("2026110101_pt_filenames", _migration_pt_filenames),
  ]
 diff --git a/comet/core/schema_specs.py b/comet/core/schema_specs.py
-index cd66755..e367c3d 100644
+index cd66755..d6c55a1 100644
 --- a/comet/core/schema_specs.py
 +++ b/comet/core/schema_specs.py
-@@ -235,6 +235,33 @@ IMDB_TITLE_LOOKUP_TABLE_SPEC = ManagedTableSpec(
+@@ -235,6 +235,50 @@ IMDB_TITLE_LOOKUP_TABLE_SPEC = ManagedTableSpec(
      ),
  )
  
@@ -2483,6 +3289,23 @@ index cd66755..e367c3d 100644
 +        )
 +    """,
 +)
++
++PT_FILENAMES_TABLE_SPEC = ManagedTableSpec(
++    table_name="pt_filenames",
++    create_sql="""
++        CREATE TABLE {table_name} (
++            filename TEXT PRIMARY KEY,
++            seen_at INTEGER
++        )
++    """,
++    index_sql=(
++        """
++            CREATE INDEX IF NOT EXISTS idx_pt_filenames_seen_at
++            ON {table_name} (seen_at)
++        """,
++    ),
++)
++
 +
  SERIES_EPISODE_INDEX_TABLE_SPEC = ManagedTableSpec(
      table_name="series_episode_index",
@@ -3001,6 +3824,37 @@ index 0000000..316c696
 +            )
 +
 +        return result
+diff --git a/comet/metadata/tmdb.py b/comet/metadata/tmdb.py
+index 6dcc906..53f92c3 100644
+--- a/comet/metadata/tmdb.py
++++ b/comet/metadata/tmdb.py
+@@ -2,7 +2,7 @@ from datetime import date
+ 
+ import aiohttp
+ 
+-from comet.core.logger import logger
++from comet.core.logger import logger, record_source_error, record_source_success
+ from comet.core.models import settings
+ from comet.utils.languages import merge_aliases
+ 
+@@ -196,12 +196,16 @@ class TMDBApi:
+                 f"{self.base_url}/{path}", headers=self.headers
+             ) as response:
+                 if response.status != 200:
++                    record_source_error("TMDB", f"HTTP {response.status}")
+                     logger.warning(
+                         f"TMDB: {context} failed with HTTP {response.status}"
+                     )
+                     return None
+-                return await response.json()
++                data = await response.json()
++                record_source_success("TMDB")
++                return data
+         except Exception as exc:
++            record_source_error("TMDB", exc)
+             logger.error(f"TMDB: {context} failed: {exc}")
+             return None
+ 
 diff --git a/comet/scrapers/addons.py b/comet/scrapers/addons.py
 new file mode 100644
 index 0000000..969ec80
@@ -3207,6 +4061,28 @@ index 0000000..969ec80
 +            log_scraper_error("Addons", self.url, request.media_id, e)
 +
 +        return torrents
+diff --git a/comet/scrapers/base.py b/comet/scrapers/base.py
+index 29c623d..811476c 100644
+--- a/comet/scrapers/base.py
++++ b/comet/scrapers/base.py
+@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
+ from collections.abc import Awaitable, Iterable
+ from typing import TypeVar
+ 
+-from comet.core.logger import logger
++from comet.core.logger import logger, record_source_error
+ from comet.scrapers.models import ScrapeRequest
+ from comet.utils.network_manager import AsyncClientWrapper
+ 
+@@ -49,6 +49,8 @@ async def gather_with_error_logging[T](
+         if isinstance(result, BaseException):
+             if not isinstance(result, Exception):
+                 raise result
++            source_name = context.split()[0]
++            record_source_error(source_name, result)
+             logger.opt(depth=1).warning(
+                 f"{context} failed: {type(result).__name__}: {result}"
+             )
 diff --git a/comet/scrapers/brsites.py b/comet/scrapers/brsites.py
 new file mode 100644
 index 0000000..c6c18de
@@ -3546,6 +4422,42 @@ index 0000000..c6c18de
 +                    task.cancel()
 +
 +        return all_results
+diff --git a/comet/scrapers/manager.py b/comet/scrapers/manager.py
+index 3dd3b5e..7a517a7 100644
+--- a/comet/scrapers/manager.py
++++ b/comet/scrapers/manager.py
+@@ -5,7 +5,7 @@ import os
+ import pkgutil
+ import time
+ 
+-from comet.core.logger import logger
++from comet.core.logger import logger, record_source_error, record_source_success
+ from comet.core.models import settings
+ from comet.core.scrape import ScrapeContext, normalize_scraper_name
+ from comet.observability import metrics
+@@ -97,11 +97,14 @@ class ScraperManager:
+     ):
+         started_at = time.perf_counter()
+         outcome = "success"
++        clean_name = name.split(" #")[0].removesuffix("Scraper")
+         try:
+             async with asyncio.timeout(timeout):
+                 results = await scraper.scrape(request)
++            record_source_success(clean_name)
+         except TimeoutError:
+             outcome = "timeout"
++            record_source_error(clean_name, "Timeout")
+             logger.warning(
+                 f"Scraper {name} timed out "
+                 f"(context={request.context.value}, budget={timeout:g}s)"
+@@ -109,6 +112,7 @@ class ScraperManager:
+             results = []
+         except Exception as e:
+             outcome = "error"
++            record_source_error(clean_name, e)
+             logger.warning(f"Scraper {name} failed: {e}")  # todo: better error handling
+             results = []
+         duration = time.perf_counter() - started_at
 diff --git a/comet/scrapers/mediafusion.py b/comet/scrapers/mediafusion.py
 index 9ebcf1d..6357c75 100644
 --- a/comet/scrapers/mediafusion.py
@@ -4466,10 +5378,10 @@ index 0000000..5a09f5b
 +        return jpeg_bytes
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..744e26f
+index 0000000..79b7ade
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,2459 @@
+@@ -0,0 +1,2471 @@
 +import asyncio
 +import datetime
 +import json
@@ -5535,7 +6447,13 @@ index 0000000..744e26f
 +            FROM (
 +                SELECT info_hash, max(updated_at) AS max_updated_at
 +                FROM debrid_availability
-+                WHERE debrid_service = :service AND updated_at >= :cutoff
++                WHERE (
++                    (debrid_service = 'realdebrid' AND info_hash NOT IN (
++                        SELECT info_hash FROM debrid_blocked_hashes WHERE debrid_service = 'realdebrid'
++                    ))
++                    OR debrid_service = 'torbox'
++                )
++                AND updated_at >= :cutoff
 +                GROUP BY info_hash
 +            ) d
 +            JOIN torrents t ON d.info_hash = t.info_hash
@@ -5549,7 +6467,13 @@ index 0000000..744e26f
 +            FROM (
 +                SELECT info_hash, max(updated_at) AS max_updated_at
 +                FROM debrid_availability
-+                WHERE debrid_service = :service AND updated_at >= :cutoff
++                WHERE (
++                    (debrid_service = 'realdebrid' AND info_hash NOT IN (
++                        SELECT info_hash FROM debrid_blocked_hashes WHERE debrid_service = 'realdebrid'
++                    ))
++                    OR debrid_service = 'torbox'
++                )
++                AND updated_at >= :cutoff
 +                GROUP BY info_hash
 +            ) d
 +            JOIN torrents t ON d.info_hash = t.info_hash
@@ -5560,7 +6484,7 @@ index 0000000..744e26f
 +    try:
 +        rows = await database.fetch_all(
 +            query,
-+            {"service": "realdebrid", "cutoff": cutoff, "prefix": "tt%"},
++            {"cutoff": cutoff, "prefix": "tt%"},
 +        )
 +
 +        def _filter_rows(rows_data):
@@ -7170,10 +8094,10 @@ index 0000000..4c2b0a7
 +                break
 diff --git a/comet/services/direct_addons.py b/comet/services/direct_addons.py
 new file mode 100644
-index 0000000..d141855
+index 0000000..a65442e
 --- /dev/null
 +++ b/comet/services/direct_addons.py
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,471 @@
 +import asyncio
 +import random
 +import re
@@ -7184,7 +8108,7 @@ index 0000000..d141855
 +from curl_cffi.requests import AsyncSession
 +import httpx
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, record_source_error, record_source_success
 +from comet.core.models import settings
 +
 +_CACHE: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
@@ -7197,6 +8121,22 @@ index 0000000..d141855
 +_HOUSE_DNS_CACHE: dict[str, tuple[float, bool]] = {}  # host -> (timestamp, is_blocked)
 +_HOUSE_DNS_CACHE_TTL = 1800.0  # 30 min
 +_HOUSE_DNS_LOGGED: dict[str, float] = {}  # host -> timestamp
++
++_LAST_DIRECT_RATIO: str = "-"
++
++
++def get_last_direct_ratio() -> str:
++    return _LAST_DIRECT_RATIO
++
++
++def get_blocked_hosts() -> list[str]:
++    now = time.time()
++    return sorted([
++        host
++        for host, (ts, is_blocked) in _HOUSE_DNS_CACHE.items()
++        if is_blocked and (now - ts < _HOUSE_DNS_CACHE_TTL)
++    ])
++
 +
 +RES_RANKS = {
 +    "4K": 0,
@@ -7456,24 +8396,30 @@ index 0000000..d141855
 +    session: AsyncSession, base_url: str, media_type: str, media_id: str
 +) -> list[dict]:
 +    url = f"{base_url}/stream/{media_type}/{media_id}.json"
++    name = _get_short_name(base_url)
 +    try:
 +        resp = await session.get(url, timeout=settings.DIRECT_ADDONS_TIMEOUT)
 +        if resp.status_code == 200:
 +            data = resp.json()
 +            streams = data.get("streams", [])
 +            if isinstance(streams, list):
++                record_source_success(name)
 +                return streams
++            record_source_error(name, "Resposta sem streams")
 +            return []
 +        else:
 +            logger.warning(
 +                f"Direct addon {base_url} returned HTTP {resp.status_code}"
 +            )
++            record_source_error(name, f"HTTP {resp.status_code}")
 +    except Exception as e:
 +        logger.warning(f"Direct addon {base_url} failed: {e}")
++        record_source_error(name, e)
 +    return []
 +
 +
 +async def fetch_direct_streams(media_type: str, media_id: str) -> list[dict]:
++    global _LAST_DIRECT_RATIO
 +    try:
 +        raw_urls = settings.DIRECT_ADDONS_URL
 +        if isinstance(raw_urls, str):
@@ -7525,6 +8471,7 @@ index 0000000..d141855
 +
 +        total_count = len(raw_candidates)
 +        if total_count == 0:
++            _LAST_DIRECT_RATIO = "0/0"
 +            logger.info("🌐 diretos: 0/0")
 +            return []
 +
@@ -7549,6 +8496,7 @@ index 0000000..d141855
 +                if is_valid:
 +                    validated_candidates.append(cand)
 +
++        _LAST_DIRECT_RATIO = f"{len(validated_candidates)}/{total_count}"
 +        logger.info(f"🌐 diretos: {len(validated_candidates)}/{total_count}")
 +
 +        converted_items = []
@@ -7869,16 +8817,17 @@ index 81fb382..f1528ef 100644
                      settings.PROWLARR_INDEXERS = active_ids
  
 diff --git a/comet/services/media_search.py b/comet/services/media_search.py
-index a111c8c..364b582 100644
+index a111c8c..631dd5b 100644
 --- a/comet/services/media_search.py
 +++ b/comet/services/media_search.py
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
++import time
  import asyncio
 +import datetime
  from collections import defaultdict
  from collections.abc import Callable, Mapping
  from dataclasses import dataclass, field
-@@ -11,6 +12,7 @@ from comet.core.scrape import ScrapeContext
+@@ -11,6 +13,7 @@ from comet.core.scrape import ScrapeContext
  from comet.debrid.exceptions import DebridAuthError
  from comet.metadata.episode_index import EpisodeIndexService
  from comet.metadata.filter import release_filter
@@ -7886,7 +8835,7 @@ index a111c8c..364b582 100644
  from comet.metadata.manager import MetadataScraper
  from comet.observability import metrics
  from comet.services.anime import anime_mapper
-@@ -57,6 +59,7 @@ class MediaSearchResult:
+@@ -57,6 +60,7 @@ class MediaSearchResult:
      sort_mixed: bool = False
      show_account_sync_trigger: bool = False
      use_account_scrape: bool = False
@@ -7894,7 +8843,59 @@ index a111c8c..364b582 100644
  
  
  def episode_matching_policy(
-@@ -401,6 +404,10 @@ async def search_media(
+@@ -119,10 +123,21 @@ def select_debrid_refresh_hashes(
+     *,
+     had_cached_torrents: bool,
+     use_account_scrape: bool,
++    services: list[str] | None = None,
+ ) -> set[str]:
+     if not current_hashes:
+         return set()
+ 
++    # O cache do banco so guarda positivos: sem isto um 2o debrid (ex.: TorBox)
++    # nunca seria consultado para torrents ja conhecidos. Consulta o que cada
++    # servico ainda nao checou (positivo ou negativo) nas ultimas 12 h.
++    unchecked = {
++        h
++        for h in current_hashes
++        for service in (services or ())
++        if not _was_checked(service, h)
++    }
++
+     verified_count = sum(
+         any(service_map.values())
+         for info_hash, service_map in verified_cache_status.items()
+@@ -133,7 +148,28 @@ def select_debrid_refresh_hashes(
+         or verified_count == 0
+         or (verified_count / len(current_hashes)) < settings.DEBRID_CACHE_CHECK_RATIO
+     )
+-    return current_hashes if requires_full_refresh else current_hashes - initial_hashes
++    if requires_full_refresh:
++        return current_hashes
++    return (current_hashes - initial_hashes) | unchecked
++
++
++_CHECKED_TTL = 12 * 3600
++_CHECKED: dict[tuple[str, str], float] = {}
++
++
++def _was_checked(service: str, info_hash: str) -> bool:
++    ts = _CHECKED.get((service, info_hash))
++    return ts is not None and time.time() - ts < _CHECKED_TTL
++
++
++def mark_checked(services, info_hashes) -> None:
++    now = time.time()
++    if len(_CHECKED) > 200_000:
++        for k in [k for k, v in _CHECKED.items() if now - v >= _CHECKED_TTL]:
++            _CHECKED.pop(k, None)
++    for service in services:
++        for h in info_hashes:
++            _CHECKED[(service, h)] = now
+ 
+ 
+ async def background_scrape(
+@@ -401,6 +437,10 @@ async def search_media(
      season = metadata["season"]
      episode = metadata["episode"]
  
@@ -7905,7 +8906,7 @@ index a111c8c..364b582 100644
      log_title = f"({media_id}) {title}"
      if media_type == "series" and season is not None and episode is not None:
          log_title += f" S{season:02d}E{episode:02d}"
-@@ -462,9 +469,16 @@ async def search_media(
+@@ -462,9 +502,16 @@ async def search_media(
          has_debrid=bool(debrid_entries),
          enable_torrent=enable_torrent,
      )
@@ -7923,7 +8924,7 @@ index a111c8c..364b582 100644
              media_only_id,
              search_season,
              search_episode,
-@@ -475,6 +489,26 @@ async def search_media(
+@@ -475,6 +522,26 @@ async def search_media(
                  f"📅 Episode target air date: {target_air_date} for "
                  f"{media_only_id} S{search_season:02d}E{search_episode:02d}",
              )
@@ -7950,7 +8951,7 @@ index a111c8c..364b582 100644
          else:
              logger.log(
                  "SCRAPER",
-@@ -482,7 +516,26 @@ async def search_media(
+@@ -482,7 +549,26 @@ async def search_media(
                  f"S{search_season:02d}E{search_episode:02d}",
              )
  
@@ -7977,7 +8978,7 @@ index a111c8c..364b582 100644
      torrent_manager = TorrentManager(
          media_type,
          media_id,
-@@ -501,6 +554,10 @@ async def search_media(
+@@ -501,6 +587,10 @@ async def search_media(
          target_air_date=target_air_date,
          reject_unknown_episode_files=reject_unknown_episode_files,
          media_scope=media_scope,
@@ -7988,7 +8989,7 @@ index a111c8c..364b582 100644
      )
  
      await torrent_manager.get_cached_torrents()
-@@ -602,6 +659,7 @@ async def search_media(
+@@ -602,6 +692,7 @@ async def search_media(
              remove_adult_content,
              target_air_date=target_air_date,
              reject_unknown_episode_files=reject_unknown_episode_files,
@@ -7996,6 +8997,29 @@ index a111c8c..364b582 100644
          )
  
          for info_hash, account_torrent in account_torrents.items():
+@@ -671,6 +762,7 @@ async def search_media(
+         verified_service_cache_status,
+         had_cached_torrents=cache_result.has_cached_torrents,
+         use_account_scrape=use_account_scrape,
++        services=[e.get("service") for e in (debrid_entries or []) if e.get("service")],
+     )
+ 
+     debrid_errors = {}
+@@ -704,6 +796,14 @@ async def search_media(
+         merge_service_cache_status(
+             service_cache_status, fresh_service_cache_status
+         )
++        mark_checked(
++            [
++                e["service"]
++                for e in debrid_entries
++                if e.get("service") and e["service"] not in (debrid_errors or {})
++            ],
++            debrid_refresh_hashes,
++        )
+ 
+     for service in dict.fromkeys(entry["service"] for entry in debrid_entries):
+         cached_count = sum(
 diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
 new file mode 100644
 index 0000000..10fda00
@@ -8694,12 +9718,250 @@ index aa43646..722ba5b 100644
              )
              for i in range(0, len(new_torrents), chunk_size)
          ]
+diff --git a/comet/services/prefetch.py b/comet/services/prefetch.py
+new file mode 100644
+index 0000000..e819a67
+--- /dev/null
++++ b/comet/services/prefetch.py
+@@ -0,0 +1,232 @@
++import asyncio
++import time
++from datetime import datetime, timezone
++
++import aiohttp
++
++from comet.core.database import database
++from comet.core.logger import logger
++from comet.core.models import settings
++
++_RECENT_PREFETCHES: dict[str, float] = {}
++_PREFETCH_SEMAPHORE = asyncio.Semaphore(2)
++_TASKS: set = set()  # guarda referencia: sem isso o asyncio pode descartar a tarefa
++_COOLDOWN_SECONDS = 20 * 60  # 20 minutes
++
++
++def _is_future_release(rel_str: str | None) -> bool:
++    if not rel_str or not isinstance(rel_str, str):
++        return True
++    try:
++        clean = rel_str.strip().replace("Z", "+00:00")
++        dt = datetime.fromisoformat(clean)
++        if dt.tzinfo is None:
++            dt = dt.replace(tzinfo=timezone.utc)
++        return dt > datetime.now(timezone.utc)
++    except Exception:
++        try:
++            d_part = rel_str.strip().split("T", 1)[0]
++            d = datetime.strptime(d_part, "%Y-%m-%d").date()
++            return d > datetime.now(timezone.utc).date()
++        except Exception:
++            return True
++
++
++def _find_next_episode(
++    videos: list[dict], current_s: int, current_e: int
++) -> tuple[int, int] | None:
++    all_episodes: dict[tuple[int, int], dict] = {}
++    for v in videos:
++        if not isinstance(v, dict):
++            continue
++        s = v.get("season")
++        e = v.get("episode", v.get("number"))
++        try:
++            all_episodes[(int(s), int(e))] = v
++        except (TypeError, ValueError):
++            continue
++
++    season_episodes = [ep for (s, ep) in all_episodes.keys() if s == current_s]
++    if not season_episodes:
++        return None
++
++    max_e = max(season_episodes)
++    if current_e < max_e:
++        target = (current_s, current_e + 1)
++    else:
++        target = (current_s + 1, 1)
++
++    target_video = all_episodes.get(target)
++    if not target_video:
++        return None
++
++    rel = target_video.get("released") or target_video.get("firstAired")
++    if _is_future_release(rel):
++        return None
++
++    return target
++
++
++async def _get_series_videos(
++    session: aiohttp.ClientSession, imdb_id: str
++) -> list[dict]:
++    # 1. Tenta meta_ptbr (usa cache em memoria)
++    try:
++        from comet.services.meta_ptbr import get_meta_ptbr
++
++        meta = await get_meta_ptbr("series", imdb_id)
++        if meta and isinstance(meta.get("videos"), list) and meta["videos"]:
++            return meta["videos"]
++    except Exception as e:
++        logger.warning(f"Erro ao obter meta_ptbr para {imdb_id}: {e}")
++
++    # 2. Fallback direto Cinemeta
++    try:
++        url = f"https://v3-cinemeta.strem.io/meta/series/{imdb_id}.json"
++        async with session.get(
++            url, timeout=aiohttp.ClientTimeout(total=10.0)
++        ) as resp:
++            if resp.status == 200:
++                data = await resp.json()
++                if isinstance(data, dict):
++                    meta = data.get("meta") or {}
++                    if isinstance(meta.get("videos"), list):
++                        return meta["videos"]
++    except Exception as e:
++        logger.warning(f"Erro ao obter Cinemeta para {imdb_id}: {e}")
++
++    return []
++
++
++async def _resolve_imdb_id(
++    media_id: str | None, info_hash: str | None
++) -> str | None:
++    if media_id:
++        if media_id.startswith("tt"):
++            return media_id.split(":")[0]
++        if media_id.startswith("kitsu:"):
++            try:
++                from comet.services.anime import anime_mapper
++
++                parts = media_id.split(":")
++                k_id = parts[1] if len(parts) > 1 else media_id
++                mapped = await anime_mapper.get_imdb_from_kitsu(k_id)
++                if mapped and mapped.startswith("tt"):
++                    return mapped
++            except Exception:
++                pass
++            return media_id.split(":")[0] if ":" in media_id else media_id
++
++    if info_hash:
++        try:
++            row = await database.fetch_one(
++                """
++                SELECT media_id
++                FROM torrents
++                WHERE info_hash = :hash
++                ORDER BY updated_at DESC
++                LIMIT 1
++                """,
++                {"hash": info_hash},
++            )
++            if row and row["media_id"]:
++                raw = str(row["media_id"]).strip()
++                if raw.startswith("tt"):
++                    return raw.split(":")[0]
++                return raw
++        except Exception:
++            pass
++
++    return media_id.split(":")[0] if media_id else None
++
++
++async def _prefetch_worker(
++    b64config: str,
++    media_id: str | None,
++    info_hash: str | None,
++    season: int,
++    episode: int,
++) -> None:
++    try:
++        imdb_id = await _resolve_imdb_id(media_id, info_hash)
++        if not imdb_id:
++            return
++
++        timeout_meta = aiohttp.ClientTimeout(total=15.0)
++        async with aiohttp.ClientSession(timeout=timeout_meta) as meta_session:
++            videos = await _get_series_videos(meta_session, imdb_id)
++
++        if not videos:
++            return
++
++        target = _find_next_episode(videos, season, episode)
++        if not target:
++            return
++
++        next_s, next_e = target
++        cache_key = f"{imdb_id}:{next_s}:{next_e}"
++
++        now = time.monotonic()
++        expired = [
++            k
++            for k, v in _RECENT_PREFETCHES.items()
++            if now - v >= _COOLDOWN_SECONDS
++        ]
++        for k in expired:
++            _RECENT_PREFETCHES.pop(k, None)
++
++        if now - _RECENT_PREFETCHES.get(cache_key, 0) < _COOLDOWN_SECONDS:
++            return
++
++        _RECENT_PREFETCHES[cache_key] = now
++
++        async with _PREFETCH_SEMAPHORE:
++            url = f"http://127.0.0.1:8000/{b64config}/stream/series/{imdb_id}:{next_s}:{next_e}.json"
++            t0 = time.monotonic()
++            timeout_get = aiohttp.ClientTimeout(total=60.0)
++            async with aiohttp.ClientSession(timeout=timeout_get) as client:
++                async with client.get(url) as resp:
++                    elapsed = time.monotonic() - t0
++                    if resp.status == 200:
++                        data = await resp.json()
++                        streams = (
++                            data.get("streams", [])
++                            if isinstance(data, dict)
++                            else []
++                        )
++                        n_streams = len(streams)
++                        logger.info(
++                            f"⏭️ pré-busca {imdb_id} S{next_s}E{next_e}: {n_streams} streams em {elapsed:.1f}s"
++                        )
++                    else:
++                        logger.warning(
++                            f"Pré-busca {imdb_id} S{next_s}E{next_e} falhou: HTTP {resp.status}"
++                        )
++    except Exception as e:
++        logger.warning(
++            f"Pré-busca {media_id or info_hash} S{season}E{episode} falhou: {e}"
++        )
++
++
++def trigger_prefetch_next_episode(
++    b64config: str,
++    media_id: str | None,
++    info_hash: str | None,
++    season: int | None,
++    episode: int | None,
++) -> None:
++    if not getattr(settings, "PREFETCH_NEXT_EPISODE", True):
++        return
++    if season is None or episode is None:
++        return
++    task = asyncio.create_task(
++        _prefetch_worker(
++            b64config=b64config,
++            media_id=media_id,
++            info_hash=info_hash,
++            season=season,
++            episode=episode,
++        )
++    )
++    _TASKS.add(task)
++    task.add_done_callback(_TASKS.discard)
 diff --git a/comet/services/stremio_library.py b/comet/services/stremio_library.py
 new file mode 100644
-index 0000000..b72fce2
+index 0000000..48ecd1e
 --- /dev/null
 +++ b/comet/services/stremio_library.py
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,477 @@
 +"""
 +Stremio library service for personal catalogs:
 +- Minha lista (comet_mylist)
@@ -8909,8 +10171,7 @@ index 0000000..b72fce2
 +        if it.get("type") == "series"
 +        and isinstance(it.get("_id"), str)
 +        and it["_id"].startswith("tt")
-+        and not it.get("removed", False)
-+        and not it.get("temp", False)
++        # historico conta mesmo sem estar salvo na biblioteca (removed/temp)
 +        and it.get("state", {}).get("lastWatched") is not None
 +    ]
 +    if not watched_series:
@@ -9010,8 +10271,7 @@ index 0000000..b72fce2
 +        if it.get("type") == media_type
 +        and isinstance(it.get("_id"), str)
 +        and it["_id"].startswith("tt")
-+        and not it.get("removed", False)
-+        and not it.get("temp", False)
++        # historico conta mesmo sem estar salvo na biblioteca (removed/temp)
 +        and it.get("state", {}).get("lastWatched") is not None
 +    ]
 +    if not watched:
@@ -9375,10 +10635,10 @@ index 0000000..114c872
 +    return res_srt, stats
 diff --git a/comet/services/subtitles.py b/comet/services/subtitles.py
 new file mode 100644
-index 0000000..809d7fa
+index 0000000..d8cd639
 --- /dev/null
 +++ b/comet/services/subtitles.py
-@@ -0,0 +1,1133 @@
+@@ -0,0 +1,1197 @@
 +import collections
 +import asyncio
 +import base64
@@ -9394,7 +10654,8 @@ index 0000000..809d7fa
 +import zipfile
 +from curl_cffi.requests import AsyncSession
 +
-+from comet.core.logger import logger
++from comet.core.database import database
++from comet.core.logger import logger, record_source_error, record_source_success
 +from comet.core.models import settings
 +
 +SUBS_CACHE_DIR = "/opt/comet/data/subs_cache"
@@ -9802,6 +11063,7 @@ index 0000000..809d7fa
 +            timeout=10.0,
 +        )
 +        if r.status_code != 200:
++            record_source_error("OpenSubtitles", f"HTTP {r.status_code}")
 +            logger.warning(f"OpenSubtitles search returned status {r.status_code}")
 +            return []
 +        data = r.json().get("data", [])
@@ -9827,8 +11089,10 @@ index 0000000..809d7fa
 +                    "episode": episode,
 +                }
 +            )
++        record_source_success("OpenSubtitles")
 +        return items
 +    except Exception as e:
++        record_source_error("OpenSubtitles", e)
 +        logger.warning(f"OpenSubtitles search failed: {type(e).__name__}")
 +        return []
 +
@@ -9852,6 +11116,7 @@ index 0000000..809d7fa
 +    try:
 +        r = await session.get(search_url, headers=headers, timeout=10.0)
 +        if r.status_code != 200:
++            record_source_error("SubSource", f"HTTP {r.status_code}")
 +            logger.warning(f"SubSource movie search returned status {r.status_code}")
 +            return []
 +        movie_data = r.json().get("data", [])
@@ -9871,6 +11136,7 @@ index 0000000..809d7fa
 +        subs_url = f"https://api.subsource.net/api/v1/subtitles?movieId={movie_id}&language={language}"
 +        r_subs = await session.get(subs_url, headers=headers, timeout=10.0)
 +        if r_subs.status_code != 200:
++            record_source_error("SubSource", f"HTTP {r_subs.status_code}")
 +            logger.warning(f"SubSource subtitles search returned status {r_subs.status_code}")
 +            return []
 +
@@ -9936,8 +11202,10 @@ index 0000000..809d7fa
 +                    "is_pack": is_pack,
 +                }
 +            )
++        record_source_success("SubSource")
 +        return items
 +    except Exception as e:
++        record_source_error("SubSource", e)
 +        logger.warning(f"SubSource search failed: {type(e).__name__}")
 +        return []
 +
@@ -9971,6 +11239,7 @@ index 0000000..809d7fa
 +            timeout=10.0,
 +        )
 +        if r.status_code != 200:
++            record_source_error("SubDL", f"HTTP {r.status_code}")
 +            logger.warning(f"SubDL search returned status {r.status_code}")
 +            return []
 +        subdl_data = r.json().get("subtitles", [])
@@ -9998,8 +11267,10 @@ index 0000000..809d7fa
 +                    "is_pack": bool(entry.get("full_season")),
 +                }
 +            )
++        record_source_success("SubDL")
 +        return items
 +    except Exception as e:
++        record_source_error("SubDL", e)
 +        logger.warning(f"SubDL search failed: {type(e).__name__}")
 +        return []
 +
@@ -10500,6 +11771,53 @@ index 0000000..809d7fa
 +_PT_FILENAMES: "collections.OrderedDict[str, None]" = collections.OrderedDict()
 +
 +
++async def init_pt_filenames() -> None:
++    try:
++        now = int(time.time())
++        cutoff = now - (90 * 86400)
++        await database.execute(
++            "DELETE FROM pt_filenames WHERE seen_at < :cutoff",
++            {"cutoff": cutoff},
++        )
++        count_row = await database.fetch_one("SELECT COUNT(*) as c FROM pt_filenames")
++        if count_row and count_row["c"] > 50000:
++            await database.execute(
++                """
++                DELETE FROM pt_filenames
++                WHERE filename NOT IN (
++                    SELECT filename FROM pt_filenames
++                    ORDER BY seen_at DESC
++                    LIMIT 50000
++                )
++                """
++            )
++        rows = await database.fetch_all(
++            "SELECT filename FROM pt_filenames ORDER BY seen_at ASC LIMIT 50000"
++        )
++        for row in rows:
++            fn = row["filename"]
++            _PT_FILENAMES[fn] = None
++        logger.info(f"💾 Memória PT-BR carregada: {len(_PT_FILENAMES)} arquivos")
++    except Exception as exc:
++        logger.warning(f"Erro ao carregar pt_filenames do banco: {exc}")
++
++
++async def _persist_pt_filename(key: str) -> None:
++    try:
++        now = int(time.time())
++        await database.execute(
++            """
++            INSERT INTO pt_filenames (filename, seen_at)
++            VALUES (:filename, :seen_at)
++            ON CONFLICT (filename) DO UPDATE SET
++                seen_at = EXCLUDED.seen_at
++            """,
++            {"filename": key, "seen_at": now},
++        )
++    except Exception as exc:
++        logger.debug(f"Erro ao persistir pt_filename: {exc}")
++
++
 +def remember_pt_filename(name: str | None) -> None:
 +    if not name:
 +        return
@@ -10508,6 +11826,12 @@ index 0000000..809d7fa
 +    _PT_FILENAMES.move_to_end(key)
 +    while len(_PT_FILENAMES) > 50000:
 +        _PT_FILENAMES.popitem(last=False)
++
++    try:
++        loop = asyncio.get_running_loop()
++        loop.create_task(_persist_pt_filename(key))
++    except RuntimeError:
++        pass
 +
 +
 +def is_known_pt_filename(name: str | None) -> bool:

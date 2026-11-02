@@ -38,4 +38,5 @@ if ($LASTEXITCODE -ne 0) {
   throw "ERRO ao aplicar ptbr-first.patch no A71."
 }
 
-Write-Host "Concluido! O watchdog religara o Comet em ate 30 s."
+Write-Host "Concluido! Executando smoke test..."
+& "$PSScriptRoot\smoke.ps1" -Device $Device

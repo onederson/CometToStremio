@@ -109,6 +109,8 @@ check_flaresolverr_mem() {
 start_comet() {
   nohup /system/bin/sh "$BASE/chroot.sh" -c 'cd /opt/comet && exec /opt/comet/.venv/bin/python -m comet.main' \
     >> "$OUT" 2>&1 < /dev/null &
+  COMET_JUST_STARTED=1
+  COMET_START_TIME=$(date +%s)
 }
 
 # Caddy (HTTPS a71comet.duckdns.org -> 127.0.0.1:8000). O chroot.sh limpa o ambiente (env -i),
@@ -123,6 +125,31 @@ cap_log() {
   if [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 5242880 ]; then
     : > "$1"
     log "$(basename "$1") truncado"
+  fi
+}
+
+run_smoke() {
+  if [ -f /data/debian/opt/comet/data/smoke.disable ]; then
+    return
+  fi
+  touch /data/debian/var/tmp/comet.log
+  grep -q " /data/debian/var/tmp/comet.log " /proc/mounts || mount -o bind "$OUT" /data/debian/var/tmp/comet.log 2>/dev/null || true
+  _offset=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
+  _out=$(timeout 150 /system/bin/sh "$BASE/chroot.sh" -c "/opt/comet/.venv/bin/python /opt/comet-tools/smoke.py --log-file /var/tmp/comet.log --log-offset $_offset" 2>&1)
+  _code=$?
+  tail -c +$((_offset + 1)) "$OUT" > /data/debian/var/tmp/smoke_log.txt 2>/dev/null || true
+  if echo "$_out" | grep -q "RESTAURADO"; then
+    log "RESTAURADO"
+  fi
+  if [ "$_code" -eq 0 ]; then
+    log "SMOKE OK"
+  else
+    _fail=$(echo "$_out" | grep '^SMOKE FALHOU' | tail -n 1)
+    if [ -n "$_fail" ]; then
+      log "$_fail"
+    else
+      log "SMOKE FALHOU"
+    fi
   fi
 }
 
@@ -145,6 +172,10 @@ start_flaresolverr() {
 }
 
 log "watchdog iniciado (pid $$)"
+LAST_SMOKE_RUN=$(date +%s)
+COMET_JUST_STARTED=1
+COMET_START_TIME=$(date +%s)
+
 while true; do
   protect
   free_mem
@@ -170,6 +201,17 @@ while true; do
     start_flaresolverr
   fi
   protect
+
+  now=$(date +%s)
+  if [ "$COMET_JUST_STARTED" = "1" ] && [ $((now - COMET_START_TIME)) -ge 180 ]; then
+    COMET_JUST_STARTED=0
+    LAST_SMOKE_RUN=$now
+    run_smoke
+  elif [ $((now - LAST_SMOKE_RUN)) -ge 3600 ]; then
+    LAST_SMOKE_RUN=$now
+    run_smoke
+  fi
+
   cap_log "$OUT"
   cap_log "$CADDY_OUT"
   cap_log "$STREMTHRU_OUT"

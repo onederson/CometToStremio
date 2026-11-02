@@ -26,4 +26,5 @@ rm -f /data/local/tmp/index.html
 pkill -f "python -m comet.main" || true
 '@
 
-Write-Host "Template aplicado! O watchdog religara o Comet em ate 30 s."
+Write-Host "Template aplicado! Executando smoke test..."
+& "$PSScriptRoot\smoke.ps1" -Device $Device

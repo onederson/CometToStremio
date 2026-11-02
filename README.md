@@ -81,7 +81,10 @@
 - [x] Frontpage estilo Netflix: fileiras por streaming (Netflix, Prime, Disney+, HBO Max, Apple TV+, Paramount+, Globoplay, Crunchyroll) em PT-BR
 - [x] Visual Netflix: originais por serviço, lançamentos, aclamados, fileiras deitadas, logo e trailer PT-BR na página do título
 - [x] Lista de fontes com ▶ Assistir, Pronto dublado, Sagas, busca por ator, Animes da temporada, link Kids, selos nas capas
-- [ ] Usuário: colocar `STREMIO_AUTH_KEY` no `.env` para ligar Minha lista / Novos episódios / Recomendados
+- [x] Fileiras pessoais (Novos episódios, Recomendados) pelo histórico do Stremio
+- [x] Teste automático a cada hora com restauração da última versão boa
+- [x] TorBox como 2º debrid (cobre o 451 do RD), próximo episódio instantâneo, página /status
+- [ ] Usuário: assinar o TorBox Essential (a conta grátis tem limite)
 - [ ] Usuário: reinstalar o Comet, esconder o Cinemeta (Addon Manager: Comet no topo e sem catálogos do Cinemeta), Trakt, OpenSubtitles v3/PRO, FenixFlix e FrostStream (Comet faz tudo)
 - [ ] Usuário reinstalar o Comet no Stremio (recurso de legendas), tirar o OpenSubtitles PRO e trocar a chave do SubDL
 
