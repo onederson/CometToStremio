@@ -45,6 +45,8 @@ export UV_PYTHON_PREFERENCE=only-system
 uv sync --frozen --no-install-project --no-dev
 # Pillow: capas montadas dos catalogos (Top 10 e capa deitada com logo), comet/services/artwork.py
 uv pip install --python .venv/bin/python pillow==11.3.0
+# uvloop + httptools: motor de rede e leitor HTTP rápidos (o uvicorn usa sozinho se estiverem instalados)
+uv pip install --python .venv/bin/python uvloop httptools
 
 mkdir -p /opt/comet/data
 echo "== OK: Comet instalado em /opt/comet =="

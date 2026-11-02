@@ -1350,6 +1350,40 @@ def t_fileiras_novas(token: str) -> tuple[str, str]:
     return "PASS", f"{len(counts)} fileiras novas OK ({', '.join(f'{k}={v}' for k, v in counts.items())})"
 
 
+def t_geracional(token: str) -> tuple[str, str]:
+    """Salto geracional: maratonas, anime sem filler, capas vivas, qualidade real e TorBox primeiro."""
+    notes = []
+    with get_client(timeout=90.0) as client:
+        orders = client.get(f"/{token}/catalog/series/comet_orders.json").json().get("metas", [])
+        if len(orders) < 6:
+            return "FAIL", f"maratonas: só {len(orders)}"
+        mcu = (client.get(f"/{token}/meta/series/cometsaga:o-mcu.json").json().get("meta") or {})
+        if len(mcu.get("videos") or []) < 30:
+            return "FAIL", "maratona MCU com menos de 30 filmes"
+        notes.append(f"maratonas {len(orders)} (MCU {len(mcu['videos'])})")
+        op = (client.get(f"/{token}/meta/series/cometsaga:c-tt0388629.json").json().get("meta") or {})
+        if not op or "fillers" not in (op.get("description") or ""):
+            return "FAIL", "One Piece só a história sem meta"
+        notes.append(f"OP canon {len(op['videos'])} eps")
+        hero = client.get(f"/art/hero/movie/tt0111161.jpg")
+        if hero.status_code != 200 or not hero.headers.get("content-type", "").startswith("image/"):
+            return "FAIL", f"pôster editorial status {hero.status_code}"
+        tv = client.get(f"/{token}/catalog/tv/comet_livehome.json").json().get("metas", [])
+        if not tv or "/art/tv/" not in tv[0].get("poster", ""):
+            return "FAIL", "capa de canal sem guia de TV"
+        st = client.get(f"/{token}/stream/movie/tt0816692.json").json().get("streams", [])
+        tb = sum(1 for s in st if "TorBox" in (s.get("description") or "") and "⚡" in s.get("name", ""))
+        rd = sum(1 for s in st if "Real-Debrid" in (s.get("description") or "") and "⚡" in s.get("name", ""))
+        if len(st) > 130:
+            return "FAIL", f"lista sem teto: {len(st)} fontes"
+        if tb < rd:
+            return "FAIL", f"TorBox não é o principal (TB {tb} x RD {rd})"
+        notes.append(f"fontes {len(st)} (TB⚡ {tb} · RD⚡ {rd})")
+        media = sum(1 for s in st if "🎞️" in (s.get("description") or ""))
+        notes.append(f"qualidade real em {media}")
+    return "PASS", " · ".join(notes)
+
+
 def t_notas(token: str) -> tuple[str, str]:
     """Página do título com notas do OMDb (IMDb/Rotten) e Oscar; usa o cache, não gasta cota."""
     with get_client(timeout=35.0) as client:
@@ -1480,6 +1514,7 @@ def main():
         ("saga", lambda: t_saga(token, public_base)),
         ("fileiras_novas", lambda: t_fileiras_novas(token)),
         ("notas", lambda: t_notas(token)),
+        ("geracional", lambda: t_geracional(token)),
     ]
 
     selected_parallel = [
