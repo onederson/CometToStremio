@@ -244,11 +244,23 @@ Flags importantes do `.env`:
 
 ## 5. Estado do git (IMPORTANTE)
 
-- **Commits:** histórico completo em `git log --oneline`. Os mais recentes: `4584455` (frontpage Netflix, Comet no lugar do Cinemeta) → `ce2a7a3` (visual Netflix) → `e13772e` (capas montadas e link pessoal) → `a757f17` (rodada ouro, links diretos validados, playback sem travar, DNS público no chroot).
-- **Árvore limpa** depois do último commit. Nada pendente.
-- O A71 está com tudo aplicado e rodando. O repositório é o espelho: `scripts/watchdog.sh` = `/data/comet/watchdog.sh` (confira o MD5), `comet-patches/*.patch` = diffs de `/opt/comet` e `/opt/flaresolverr`.
-- `config/.env` (no `.gitignore`) = `/opt/comet/.env`. Ao mudar um, mude o outro.
-- Commit só quando o usuário pedir. E-mail local `wandersonks02@gmail.com`; mensagem por arquivo (`git commit -F`) com a linha de coautoria definida pela sessão.
+- **Remoto:** `https://github.com/onederson/CometToStremio` (o branch local `master` é enviado para `main`: `git push origin master:main`).
+- **Commits mais recentes** (antes deste, que atualiza a documentação):
+```
+fa484ff Comet acessível fora de casa (4G) pela porta 7443
+724f30d Leva supremo: tela instantânea, notas e Oscar, bot do Telegram e modo fora de casa
+18958ad Tira do repositório o arquivo de anotações do usuário
+0f52575 Fileiras de mood, animes dublados, estreias da semana e pré-download no RD
+777476b Desliga a fileira de teste do fundo animado (não anima no app da TV)
+42dd149 Pluto TV com sessão nova, sagas como série e teste de fundo animado
+bc98273 Busca abrangente, sagas completas, TV na tela inicial e selos maiores
+0dae6d9 Grande update: testes de regressão, legenda traduzida, TV ao vivo e áudio PT confirmado
+40ea4d1 TorBox como 2º debrid, próximo episódio instantâneo, /status e teste automático
+```
+- O A71 está com tudo aplicado e rodando. O repositório é o espelho: `scripts/watchdog.sh` = `/data/comet/watchdog.sh`, `config/Caddyfile` = `/etc/caddy/Caddyfile` (chroot), `comet-patches/ptbr-first.patch` = diff de `/opt/comet` (o vídeo `KIDS_BEDTIME.mp4` vai à parte em `comet-patches/assets/`, porque o diff não carrega binário).
+- `config/.env` e `config/duckdns.token` (no `.gitignore`) = `/opt/comet/.env` e `/etc/caddy/duckdns.token`. Ao mudar um, mude o outro. Para gravar uma chave no `.env` do A71 sem imprimir o valor, use `scripts/env_set.sh` (envie o valor em `/data/local/tmp/cc_val.txt` e rode `sh env_set.sh CHAVE` como root; ele confere a contagem de linhas e apaga o valor).
+- Antes de cada commit, conferir que nenhum valor do `.env` aparece no diff (`PUBLIC_BASE_URL`, `ADDON_NAME` e `FASTAPI_HOST` aparecem e são inofensivos).
+- Mensagem por arquivo (`git commit -F`) com a linha de coautoria da sessão. O usuário pediu commit + push ao fim de cada leva.
 
 ---
 
@@ -301,19 +313,28 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 ## 8. Onde paramos e próximo passo
 
-**Estado (02/11/2026, noite):** rodando no A71, itens até o 29 da Seção 4 aplicados, conferidos e no GitHub. Depois de mexer no Comet, rode `.\scripts\smoke.ps1` e `.\scripts\regress.ps1` (precisa dar `REGRESS OK`; o WARN de `comet_mylist` vazio é normal). Se um dublado der `Failed to connect to <host>/0.0.0.0`, procure `🚫 DNS da casa bloqueia` no log e libere o host no AdGuard.
+**Estado (02/11/2026, noite):** tudo da Seção 4 (itens 1–29) está rodando no A71, testado (`SMOKE OK`, `REGRESS OK` com 40 testes; o WARN de `comet_mylist` vazio é normal) e no GitHub (`onederson/CometToStremio`, branch `main`). A restauração automática do smoke está **ligada** (sem `data/smoke.disable`).
 
-**Testado pelo usuário em 30/10/2026:** lançamento dublado funcionou, mas pela troca do 451 caiu num CAMRip com marca d'água (resolvido no item 12); Demon Slayer T1 e T5 ok; One Piece sem PT-BR (limite das fontes: quase tudo é legendado); Ben 10 Omniverse: todos os dublados estão bloqueados (451) no RD e só o P2P sobra, que tem poucos seeders.
+**Último passo feito:** acesso fora de casa (item 29). O link agora é `https://a71comet.duckdns.org:7443/<PERSONAL_LINK_TOKEN>/manifest.json` e foi testado de fora (5 países, HTTP 200). Falta o **usuário reinstalar o addon com o link :7443 em todos os aparelhos e testar no 4G** (abrir um filme, um episódio e um canal de TV).
 
-**Pendente do lado do usuário:** instalar o addon Store (`https://a71comet.duckdns.org:8443/stremio/store/configure`, Real-Debrid + chave do RD) (FenixFlix e FrostStream **não** precisam mais ser instalados: já vêm dentro do Comet, item 16 da Seção 4).
+**Pendente do lado do usuário:**
+1. Reinstalar o addon com o link `:7443` (PC, TV, celular) e testar no 4G.
+2. (Opcional) AdGuard: reescrita `a71comet.duckdns.org` → `192.168.3.44` (o roteador já faz NAT loopback, então não é obrigatória).
+3. (Opcional) Vigia externo: conta no healthchecks.io para avisar no Telegram se o A71 inteiro cair (sem energia/internet); o A71 não consegue avisar de si mesmo.
+4. Assinar o TorBox Essential (a conta grátis tem limite).
+5. Trocar a chave do SubDL (vazou num teste em 31/10/2026) e tirar o addon OpenSubtitles PRO.
+6. `NTFY_TOPIC` não é mais necessário: os avisos vão pelo Telegram.
 
-**O Store é opcional:** ele só mostra como catálogo os torrents que já estão na conta do RD (135 em 30/10/2026, quase todos adicionados pelo próprio Comet ao dar play). O usuário achava que não tinha nada lá.
+**Se o usuário relatar problema:**
+- Fora de casa não abre: `nslookup a71comet.duckdns.org 1.1.1.1` tem que dar o IP público da casa (o watchdog atualiza a cada 10 min; falha aparece como `DuckDNS: falha` no `watchdog.log`); a regra 7443 do roteador tem que existir; teste externo em check-host.net (`check-http` em `https://a71comet.duckdns.org:7443/manifest.json`).
+- Dublado com `Failed to connect to <host>/0.0.0.0`: procure `🚫 DNS da casa bloqueia` no log e libere o host no AdGuard.
+- Lista lenta: página de status (fontes pausadas, aquecimento); log `⏸️ <fonte> pausada`.
+- 451 do RD: `🚫 RD bloqueou`, `🔁 451 no RD → TorBox`.
+- Canal do Pluto mostrando "não está mais disponível": é o vídeo de aviso (`takedownslate`); o `check_channel_chain` já reprova; rodar a revalidação do `live_tv.py`.
 
-**Próximos passos que o usuário quer:**
-1. **Mais fontes de link direto como FenixFlix/FrostStream:** procurar outros addons Stremio que servem vídeo HTTP direto com dublado e acrescentar a URL em `DIRECT_ADDONS_URL` (nada de código). Critério para entrar: o `GET /stream/...json` traz `url`, o link responde `200/206 video/*` com `Range`, e há dublado em títulos que o RD bloqueia (teste com Ben 10 Omniverse `tt2293002:1:2`).
-2. **Legendas:** feito (item 17 da Seção 4). Pendente do usuário: reinstalar o Comet no Stremio para aparecer o recurso de legendas, tirar o addon OpenSubtitles PRO e trocar a chave do SubDL (vazou num teste em 31/10/2026).
+**Ideias que ficaram para depois (combinadas com o usuário):** perfis da família (um link por pessoa com histórico próprio; o usuário não quis agora), Letterboxd/MyAnimeList (só se ele usar), filtro por aparelho que trava com arquivo pesado (o app não se identifica; hoje só existe "fora de casa"), selo de áudio de cinema (Atmos/DTS-HD).
 
-Se ele relatar problema, comece pelos logs (`/data/comet/comet.log`: procure `🚫 RD bloqueou`, `🔁 451 em`).
+**Não é possível (não insistir):** prévia em vídeo ao focar a capa (testado: o app da TV não anima WebP/GIF; o protocolo não tem campo de vídeo), pular abertura, mudar o player.
 
 **Manutenção:** se o BRSites parar de trazer resultados, provavelmente um dos sites trocou de domínio. Corrija o dict `SITES` em `comet/scrapers/brsites.py`. O `/configure` do usuário já está com "só em cache" desligado.
 
