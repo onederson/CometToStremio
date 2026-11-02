@@ -107,8 +107,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 - [x] Usuário reinstalou com o link **:7443** e testou no 4G (02/11/2026): funcionou
 - [ ] **Usuário (opcional):** reescrita no AdGuard `a71comet.duckdns.org` → `192.168.3.44` (deixa a casa um pouco mais rápida; não é obrigatória porque o roteador faz NAT loopback)
 - [ ] **Usuário (opcional):** vigia externo (healthchecks.io) para avisar se o A71 inteiro cair
-- [ ] Usuário: assinar o TorBox Essential (a conta grátis tem limite)
-- [ ] Usuário: trocar a chave do SubDL (vazou num teste em 31/10/2026) e tirar o addon OpenSubtitles PRO
+- [x] TorBox assinado pelo usuário (02/11/2026)
 - [ ] Achar mais addons de link direto (como FenixFlix/FrostStream) e somar em `DIRECT_ADDONS_URL`
 
 ---
@@ -119,6 +118,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 | :--- | :--- |
 | `HANDOFF.md` | Regras, arquitetura detalhada, histórico item a item (Seção 4), lacunas e onde paramos |
 | `CLAUDE.md` | Modo de trabalho da IA |
+| `MELHORIAS.md` | Lista priorizada de melhorias possíveis (com medições) e passo a passo do que depende do usuário |
 | `COMO-CRIAR-BOT-TELEGRAM.md` | Passo a passo do bot (para leigos) |
 | `como.md` | Como preencher o `/configure` (link genérico, sem token) |
 | `.orquestra/tarefa-*.md` | Especificação de cada tarefa feita (registro) |

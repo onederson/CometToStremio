@@ -320,8 +320,6 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 **Pendente do lado do usuário:**
 2. (Opcional) AdGuard: reescrita `a71comet.duckdns.org` → `192.168.3.44` (o roteador já faz NAT loopback, então não é obrigatória).
 3. (Opcional) Vigia externo: conta no healthchecks.io para avisar no Telegram se o A71 inteiro cair (sem energia/internet); o A71 não consegue avisar de si mesmo.
-4. Assinar o TorBox Essential (a conta grátis tem limite).
-5. Trocar a chave do SubDL (vazou num teste em 31/10/2026) e tirar o addon OpenSubtitles PRO.
 6. `NTFY_TOPIC` não é mais necessário: os avisos vão pelo Telegram.
 
 **Se o usuário relatar problema:**
@@ -330,6 +328,10 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 - Lista lenta: página de status (fontes pausadas, aquecimento); log `⏸️ <fonte> pausada`.
 - 451 do RD: `🚫 RD bloqueou`, `🔁 451 no RD → TorBox`.
 - Canal do Pluto mostrando "não está mais disponível": é o vídeo de aviso (`takedownslate`); o `check_channel_chain` já reprova; rodar a revalidação do `live_tv.py`.
+
+**TorBox:** assinado pelo usuário em 02/11/2026. **SubDL:** o usuário decidiu não trocar a chave.
+
+**Próximas melhorias:** ver `MELHORIAS.md` (medido em 02/11: respostas sem compressão, tela inicial com 65 fileiras = 1,47 MB, lista de Interestelar com 1.489 fontes = 878 KB, capa nova 1–1,5 s). O usuário quer o vigia externo (passo a passo em `MELHORIAS.md` 6.2; falta o Ping URL dele).
 
 **Ideias que ficaram para depois (combinadas com o usuário):** perfis da família (um link por pessoa com histórico próprio; o usuário não quis agora), Letterboxd/MyAnimeList (só se ele usar), filtro por aparelho que trava com arquivo pesado (o app não se identifica; hoje só existe "fora de casa"), selo de áudio de cinema (Atmos/DTS-HD).
 
