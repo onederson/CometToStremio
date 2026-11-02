@@ -260,6 +260,22 @@ def t_unit_merge_aliases() -> tuple[str, str]:
     return "PASS", "deduplicação e união de aliases OK"
 
 
+def t_unit_predownload_pick() -> tuple[str, str]:
+    from comet.services.prefetch import _pick_predownload as pick
+    rd_1080 = {"name": "⬇️ 1080p\n🇧🇷 PT-BR", "description": "WEB-DL · 1,5 GB\nReal-Debrid · x", "url": "a"}
+    tb_4k_big = {"name": "⬇️ 4K\n🇧🇷 Dual", "description": "20,0 GB\nTorBox", "url": "b"}
+    sd = {"name": "⬇️ SD\n🇧🇷 PT-BR", "description": "0,2 GB\nReal-Debrid", "url": "c"}
+    en_fast = {"name": "⚡ 1080p", "description": "EN", "url": "d"}
+    r = pick([{"name": "▶ Assistir", "url": "u"}, rd_1080, tb_4k_big, en_fast])
+    assert r and r["res"] == "1080p" and r["service"] == "Real-Debrid", r
+    assert pick([rd_1080, {"name": "⚡ 720p\n🇧🇷 PT-BR", "url": "e"}]) is None, "PT ⚡ já pronto"
+    assert pick([rd_1080, {"name": "🌐 1080p\n🇧🇷 PT-BR", "url": "f"}]) is None, "link direto PT já pronto"
+    assert pick([{"name": "⬇️ 1080p", "url": "g"}]) is None, "sem PT não baixa"
+    assert pick([tb_4k_big]) is None, "acima de 15 GB"
+    assert pick([sd])["res"] == "SD"
+    return "PASS", "escolhe PT ⬇️ certo; pula PT pronto, link direto PT, sem PT e > 15 GB"
+
+
 def t_unit_source_breaker() -> tuple[str, str]:
     from comet.core import breaker
     breaker.reset()
@@ -418,7 +434,7 @@ def t_catalogos(token: str, baseline_data: dict, current_baseline: dict, save_ba
             if rels:
                 relative_urls.extend(rels)
 
-            is_personal = any(p in cat_id for p in ("mylist", "newep", "foryou", "dubready", "previewtest"))
+            is_personal = any(p in cat_id for p in ("mylist", "newep", "foryou", "dubready", "previewtest", "week"))
             if cat_id == "comet_previewtest":
                 if count != 4:
                     failed.append(f"{cat_id} ({count} itens != 4)")
@@ -1307,6 +1323,30 @@ def t_saga(token: str, public_base: str) -> tuple[str, str]:
     return "PASS", f"HP: 8 vids, SW: 9 vids, Velozes: {len(v_fast)} vids, streams match ({len(streams_series)})"
 
 
+def t_fileiras_novas(token: str) -> tuple[str, str]:
+    new_rows = [
+        ("movie", "comet_mood_cry", 10),
+        ("movie", "comet_mood_twist", 10),
+        ("series", "comet_mood_binge", 10),
+        ("movie", "comet_mood_light", 10),
+        ("movie", "comet_mood_family", 10),
+        ("movie", "comet_mood_night", 10),
+        ("series", "comet_anime_dub", 10),
+        ("series", "comet_week", 3),
+    ]
+    with get_client(timeout=35.0) as client:
+        counts = {}
+        for ctype, cid, min_items in new_rows:
+            r = client.get(f"/{token}/catalog/{ctype}/{cid}.json")
+            if r.status_code != 200:
+                return "FAIL", f"{cid} status {r.status_code}"
+            metas = r.json().get("metas", [])
+            counts[cid] = len(metas)
+            if len(metas) < min_items:
+                return "FAIL", f"{cid} retornou apenas {len(metas)} itens (< {min_items})"
+    return "PASS", f"8 fileiras novas OK ({', '.join(f'{k}={v}' for k, v in counts.items())})"
+
+
 
 # =====================================================================
 # Runner Principal
@@ -1365,6 +1405,7 @@ def main():
         ("unit_format_uptime", t_unit_format_uptime),
         ("unit_merge_aliases", t_unit_merge_aliases),
         ("unit_source_breaker", t_unit_source_breaker),
+        ("unit_predownload_pick", t_unit_predownload_pick),
     ]
 
     all_results = []
@@ -1420,6 +1461,7 @@ def main():
         ("bingegroup", lambda: t_bingegroup(token)),
         ("sorteio", lambda: t_sorteio(token)),
         ("saga", lambda: t_saga(token, public_base)),
+        ("fileiras_novas", lambda: t_fileiras_novas(token)),
     ]
 
     selected_parallel = [

@@ -1090,10 +1090,10 @@ index 35b1121..533ebd5 100644
              return build_status_video_response(
 diff --git a/comet/api/endpoints/status.py b/comet/api/endpoints/status.py
 new file mode 100644
-index 0000000..c954512
+index 0000000..eb8133c
 --- /dev/null
 +++ b/comet/api/endpoints/status.py
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,524 @@
 +from datetime import datetime, timezone, timedelta
 +import hashlib
 +import html
@@ -1271,6 +1271,27 @@ index 0000000..c954512
 +    uptime_str = _format_uptime(get_comet_uptime_seconds())
 +    mem_avail, swap_free = _get_system_memory()
 +    proc_rss = _get_process_rss()
++
++
++    try:
++
++
++        from comet.services.prefetch import get_predownload_summary
++
++
++        _pd = get_predownload_summary()
++
++
++    except Exception:
++
++
++        _pd = {'today': 0, 'recent': []}
++
++
++    _predl_today = _pd['today']
++
++
++    _predl_recent = ''.join(f"<div class='row'><span class='val dim'>{html.escape(x)}</span></div>" for x in _pd['recent'])
 +
 +
 +    nightly = _get_nightly_last()
@@ -1577,6 +1598,8 @@ index 0000000..c954512
 +
 +<h2>Playback (últimas 6 h)</h2>
 +<div class="card">
++    <div class="row"><span class="label">Pré-downloads hoje:</span><span class="val">{_predl_today}</span></div>
++    {_predl_recent}
 +    <div class="row"><span class="label">Plays:</span><span class="val">{playback_stats['plays']}</span></div>
 +    <div class="row"><span class="label">Estourou PLAYBACK_BUDGET:</span><span class="val">{playback_stats['budget_exhausted']}</span></div>
 +    <div class="row"><span class="label">Trocas do 451:</span><span class="val">{playback_stats['swaps_451']}</span></div>
@@ -1596,7 +1619,7 @@ index 0000000..c954512
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..c22fb1b 100644
+index 94f56ae..aa861c9 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -2337,11 +2360,21 @@ index 94f56ae..c22fb1b 100644
      return selected_info_hashes
  
  
-@@ -198,6 +842,18 @@ async def stream(
+@@ -198,6 +842,28 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
 +    clean_id = media_id.removesuffix(".json")
++    # Usuário abriu um episódio (pedido externo, via Caddy): pré-busca o próximo.
++    # Pedidos internos (pré-busca, madrugada, testes) não têm X-Forwarded-For e não encadeiam.
++    if media_type == "series" and b64config and request.headers.get("x-forwarded-for"):
++        try:
++            _parts = clean_id.split(":")
++            if len(_parts) == 3 and _parts[0].startswith("tt"):
++                from comet.services.prefetch import trigger_prefetch_next_episode_later
++                trigger_prefetch_next_episode_later(b64config, clean_id, int(_parts[1]), int(_parts[2]))
++        except Exception as _pf_err:
++            logger.debug(f"pré-busca ao abrir episódio falhou: {_pf_err}")
 +    if media_type == "tv" and clean_id.startswith("cometlive:"):
 +        from comet.services.live_tv import get_live_tv_stream
 +        live_streams = await get_live_tv_stream(clean_id)
@@ -2356,7 +2389,7 @@ index 94f56ae..c22fb1b 100644
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +896,30 @@ async def stream(
+@@ -240,12 +906,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -2388,7 +2421,7 @@ index 94f56ae..c22fb1b 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +931,8 @@ async def stream(
+@@ -257,6 +941,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -2397,7 +2430,7 @@ index 94f56ae..c22fb1b 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +946,94 @@ async def stream(
+@@ -270,53 +956,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -2527,7 +2560,7 @@ index 94f56ae..c22fb1b 100644
              is_empty=True,
          )
  
-@@ -329,7 +1046,7 @@ async def stream(
+@@ -329,7 +1056,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -2536,7 +2569,7 @@ index 94f56ae..c22fb1b 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1054,7 @@ async def stream(
+@@ -337,6 +1064,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -2544,7 +2577,7 @@ index 94f56ae..c22fb1b 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1066,7 @@ async def stream(
+@@ -348,7 +1076,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -2553,7 +2586,7 @@ index 94f56ae..c22fb1b 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1096,7 @@ async def stream(
+@@ -378,7 +1106,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -2562,7 +2595,7 @@ index 94f56ae..c22fb1b 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1111,40 @@ async def stream(
+@@ -393,8 +1121,40 @@ async def stream(
                  }
              )
  
@@ -2604,7 +2637,7 @@ index 94f56ae..c22fb1b 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1152,31 @@ async def stream(
+@@ -402,18 +1162,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -2638,7 +2671,7 @@ index 94f56ae..c22fb1b 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1192,171 @@ async def stream(
+@@ -429,21 +1202,171 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -2818,7 +2851,7 @@ index 94f56ae..c22fb1b 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1376,83 @@ async def stream(
+@@ -463,38 +1386,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -2912,7 +2945,7 @@ index 94f56ae..c22fb1b 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1473,10 @@ async def stream(
+@@ -515,6 +1483,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -2923,7 +2956,7 @@ index 94f56ae..c22fb1b 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1484,27 @@ async def stream(
+@@ -522,6 +1494,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -2951,7 +2984,7 @@ index 94f56ae..c22fb1b 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1516,218 @@ async def stream(
+@@ -533,12 +1526,218 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -4049,7 +4082,7 @@ index 88b8606..796cafe 100644
 +        "swaps_451": swaps_451,
 +    }
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..726db03 100644
+index 835a975..91cb56f 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4131,7 +4164,7 @@ index 835a975..726db03 100644
 +    STREMIO_AUTH_KEY: str | None = None
 +    NIGHTLY_WARM: bool = True
 +    NIGHTLY_WARM_HOUR: int = 4
-+    NIGHTLY_MAX_ITEMS: int = 40
++    NIGHTLY_MAX_ITEMS: int = 60
 +    NTFY_TOPIC: str | None = None
 +    SOURCE_BREAKER: bool = True
 +    SOURCE_BREAKER_FAILS: int = 3
@@ -7799,10 +7832,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..0ae9b4c
+index 0000000..159b823
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,3735 @@
+@@ -0,0 +1,4736 @@
 +import asyncio
 +import datetime
 +import json
@@ -8092,6 +8125,14 @@ index 0000000..0ae9b4c
 +            },
 +            {
 +                "type": "series",
++                "id": "comet_anime_dub",
++                "name": "🎌 Animes dublados",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "series",
 +                "id": "comet_orig_disney",
 +                "name": "⭐ Originais Disney+",
 +                "extra": [
@@ -8157,6 +8198,17 @@ index 0000000..0ae9b4c
 +                    "type": "tv",
 +                    "id": "comet_livehome",
 +                    "name": "📺 Ao vivo agora",
++                    "extra": [
++                        {"name": "skip", "isRequired": False},
++                    ],
++                },
++            )
++            catalogs.insert(
++                2,
++                {
++                    "type": "movie",
++                    "id": "comet_mood_family",
++                    "name": "👨‍👩‍👧 Sessão em família",
 +                    "extra": [
 +                        {"name": "skip", "isRequired": False},
 +                    ],
@@ -8288,6 +8340,14 @@ index 0000000..0ae9b4c
 +                    "type": "series",
 +                    "id": "comet_dubready",
 +                    "name": "🔔 Chegou dublado",
++                    "extra": [
++                        {"name": "skip", "isRequired": False},
++                    ],
++                },
++                {
++                    "type": "series",
++                    "id": "comet_week",
++                    "name": "📅 Estreias da semana",
 +                    "extra": [
 +                        {"name": "skip", "isRequired": False},
 +                    ],
@@ -8499,6 +8559,16 @@ index 0000000..0ae9b4c
 +            ],
 +        }
 +    )
++    catalogs.append(
++        {
++            "type": "series",
++            "id": "comet_anime_dub",
++            "name": "🎌 Animes dublados",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++    )
 +
 +    # 🍥 Animes
 +    catalogs.append(
@@ -8583,6 +8653,67 @@ index 0000000..0ae9b4c
 +        else:
 +            catalogs.append(livehome_cat)
 +
++    if is_personal:
++        mood_cats = [
++            {
++                "type": "movie",
++                "id": "comet_mood_cry",
++                "name": "😭 Para chorar no domingo",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "movie",
++                "id": "comet_mood_twist",
++                "name": "🤯 Plot twist de explodir a cabeça",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "series",
++                "id": "comet_mood_binge",
++                "name": "⚡ Séries curtas pra maratonar num dia",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "movie",
++                "id": "comet_mood_light",
++                "name": "😌 Comédia leve pra desligar",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "movie",
++                "id": "comet_mood_family",
++                "name": "👨‍👩‍👧 Sessão em família",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++            {
++                "type": "movie",
++                "id": "comet_mood_night",
++                "name": "🌙 Suspense pra ver à noite",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
++        ]
++        lh_idx = next((i for i, c in enumerate(catalogs) if c.get("id") == "comet_livehome"), -1)
++        if lh_idx >= 0:
++            for mc in reversed(mood_cats):
++                catalogs.insert(lh_idx + 1, mc)
++        else:
++            ns_idx = next((i for i, c in enumerate(catalogs) if c.get("id") == "comet_new" and c.get("type") == "series"), -1)
++            pos = ns_idx + 1 if ns_idx >= 0 else len(catalogs)
++            for mc in reversed(mood_cats):
++                catalogs.insert(pos, mc)
++
 +        from comet.services.live_tv import get_live_tv_categories
 +        catalogs.append(
 +            {
@@ -8616,7 +8747,7 @@ index 0000000..0ae9b4c
 +    now = time.time()
 +    if key in _CATALOG_CACHE:
 +        ts, metas = _CATALOG_CACHE[key]
-+        ttl = 1800 if (len(key) > 1 and key[1] == "comet_ready") else _CATALOG_CACHE_TTL
++        ttl = 3600 if (len(key) > 1 and key[1] == "comet_week") else (1800 if (len(key) > 1 and key[1] == "comet_ready") else _CATALOG_CACHE_TTL)
 +        if now - ts < ttl:
 +            return metas
 +        del _CATALOG_CACHE[key]
@@ -11366,6 +11497,86 @@ index 0000000..0ae9b4c
 +            base_url=base_url,
 +        )
 +
++    if catalog_id == "comet_week":
++        if kids or media_type != "series":
++            return []
++        extra = extra or {}
++        skip_raw = extra.get("skip", 0)
++        try:
++            skip = int(skip_raw)
++        except (ValueError, TypeError):
++            skip = 0
++        today_str = datetime.date.today().isoformat()
++        cache_key = (media_type, catalog_id, skip, today_str)
++        cached = _get_cached_catalog(cache_key)
++        if cached is not None:
++            return cached
++        try:
++            async with asyncio.timeout(15.0):
++                metas = await _fetch_week_items(skip, base_url=base_url)
++                if metas:
++                    _set_cached_catalog(cache_key, metas)
++                return metas
++        except TimeoutError:
++            logger.warning("Week catalog timeout")
++            return []
++        except Exception as e:
++            logger.warning(f"Week catalog error: {type(e).__name__}: {e}")
++            return []
++
++    if catalog_id == "comet_anime_dub":
++        if media_type != "series":
++            return []
++        extra = extra or {}
++        skip_raw = extra.get("skip", 0)
++        try:
++            skip = int(skip_raw)
++        except (ValueError, TypeError):
++            skip = 0
++        cache_key = (media_type, catalog_id, skip, kids)
++        cached = _get_cached_catalog(cache_key)
++        if cached is not None:
++            return cached
++        try:
++            async with asyncio.timeout(15.0):
++                metas = await _fetch_anime_dub_items(skip, base_url=base_url, kids=kids)
++                if metas:
++                    _set_cached_catalog(cache_key, metas)
++                return metas
++        except TimeoutError:
++            logger.warning("Anime dub catalog timeout")
++            return []
++        except Exception as e:
++            logger.warning(f"Anime dub catalog error: {type(e).__name__}: {e}")
++            return []
++
++    if catalog_id.startswith("comet_mood_"):
++        if kids and catalog_id != "comet_mood_family":
++            return []
++        extra = extra or {}
++        skip_raw = extra.get("skip", 0)
++        try:
++            skip = int(skip_raw)
++        except (ValueError, TypeError):
++            skip = 0
++        today_str = datetime.date.today().isoformat()
++        cache_key = (media_type, catalog_id, skip, kids, today_str)
++        cached = _get_cached_catalog(cache_key)
++        if cached is not None:
++            return cached
++        try:
++            async with asyncio.timeout(15.0):
++                metas = await _fetch_mood_items(media_type, catalog_id, skip, base_url=base_url, kids=kids)
++                if metas:
++                    _set_cached_catalog(cache_key, metas)
++                return metas
++        except TimeoutError:
++            logger.warning(f"Mood catalog timeout for {catalog_id}")
++            return []
++        except Exception as e:
++            logger.warning(f"Mood catalog error for {catalog_id}: {type(e).__name__}: {e}")
++            return []
++
 +    if catalog_id == "comet_search":
 +        extra = extra or {}
 +        search_query = extra.get("search")
@@ -11538,6 +11749,829 @@ index 0000000..0ae9b4c
 +            f"Catalog error for {media_type}/{catalog_id}: {type(e).__name__}"
 +        )
 +        return []
++
++
++# ==============================================================================
++# Fileiras Novas: Mood, Animes Dublados, Estreias da Semana
++# ==============================================================================
++
++_TV_SHORT_SERIES_CACHE: dict[int, tuple[float, bool]] = {}
++_ANIME_INFO_CACHE: dict[str, dict] = {}
++
++WEEKDAYS_PT = {
++    0: "Segunda-feira",
++    1: "Terça-feira",
++    2: "Quarta-feira",
++    3: "Quinta-feira",
++    4: "Sexta-feira",
++    5: "Sábado",
++    6: "Domingo",
++}
++
++
++async def _fetch_mood_items(
++    media_type: str,
++    catalog_id: str,
++    skip: int,
++    base_url: str = "",
++    kids: bool = False,
++) -> list[dict]:
++    if skip >= 30:
++        return []
++
++    _ensure_imdb_map_loaded()
++    _ensure_landscape_map_loaded()
++
++    timeout = aiohttp.ClientTimeout(total=15.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++
++        params: dict[str, Any] = {
++            "language": "pt-BR",
++            "sort_by": "popularity.desc",
++        }
++        tmdb_type = "movie" if media_type == "movie" else "tv"
++        path = f"discover/{tmdb_type}"
++
++        if catalog_id == "comet_mood_cry":
++            params["with_genres"] = 18
++            kw_list = [
++                "tearjerker",
++                "grief",
++                "terminal illness",
++                "loss of loved one",
++                "death of child",
++                "cancer",
++            ]
++            kw_ids_raw = await asyncio.gather(
++                *[_get_keyword_candidates(tmdb, kw) for kw in kw_list],
++                return_exceptions=True,
++            )
++            kw_ids = []
++            for clist in kw_ids_raw:
++                if isinstance(clist, list):
++                    kw_ids.extend([str(k) for k in clist])
++            if kw_ids:
++                params["with_keywords"] = "|".join(set(kw_ids))
++            params["vote_average.gte"] = 7.2
++            params["vote_count.gte"] = 800
++
++        elif catalog_id == "comet_mood_twist":
++            kw_list = [
++                "plot twist",
++                "twist ending",
++                "unreliable narrator",
++                "mind bending",
++                "mind-bending",
++                "twist",
++                "surprise ending",
++                "plot twists",
++                "plot-twist",
++            ]
++            kw_ids_raw = await asyncio.gather(
++                *[_get_keyword_candidates(tmdb, kw) for kw in kw_list],
++                return_exceptions=True,
++            )
++            kw_ids = []
++            for clist in kw_ids_raw:
++                if isinstance(clist, list):
++                    kw_ids.extend([str(k) for k in clist])
++            if kw_ids:
++                params["with_keywords"] = "|".join(set(kw_ids))
++            params["vote_average.gte"] = 6.8
++            params["vote_count.gte"] = 300
++
++        elif catalog_id == "comet_mood_binge":
++            params["with_type"] = 2
++            params["vote_average.gte"] = 7.5
++            params["vote_count.gte"] = 300
++
++        elif catalog_id == "comet_mood_light":
++            params["with_genres"] = 35
++            params["without_genres"] = "27,53,80,10752"
++            params["with_runtime.lte"] = 115
++            params["vote_average.gte"] = 6.8
++            params["vote_count.gte"] = 800
++
++        elif catalog_id == "comet_mood_family":
++            params["with_genres"] = "10751|16"
++            params["without_genres"] = "27"
++            params["vote_average.gte"] = 7.0
++            params["vote_count.gte"] = 1000
++
++        elif catalog_id == "comet_mood_night":
++            params["with_genres"] = "53|9648"
++            params["vote_average.gte"] = 7.0
++            params["vote_count.gte"] = 1000
++
++        # Fetch up to 100 items from discover (5 pages)
++        pages_tasks = [
++            tmdb._get_json(
++                f"{path}?{urllib.parse.urlencode({**params, 'page': p})}",
++                f"mood {catalog_id} p{p}",
++            )
++            for p in range(1, 6)
++        ]
++        pages_res = await asyncio.gather(*pages_tasks, return_exceptions=True)
++        raw_items = []
++        seen_tids = set()
++        for pres in pages_res:
++            if isinstance(pres, dict) and isinstance(pres.get("results"), list):
++                for item in pres["results"]:
++                    tid = item.get("id")
++                    if tid and tid not in seen_tids:
++                        seen_tids.add(tid)
++                        raw_items.append(item)
++
++        if not raw_items:
++            return []
++
++        today_str = datetime.date.today().isoformat()
++        rnd = random.Random(f"{catalog_id}:{today_str}")
++        top100 = raw_items[:100]
++        rnd.shuffle(top100)
++
++        sem = asyncio.Semaphore(25)
++        cache_updated = False
++
++        async def resolve_imdb(tmdb_id: int) -> str | None:
++            nonlocal cache_updated
++            cache_key = f"{tmdb_type}:{tmdb_id}"
++            if cache_key in _IMDB_MAP:
++                return _IMDB_MAP[cache_key]
++            async with sem:
++                data = await tmdb._get_json(
++                    f"{tmdb_type}/{tmdb_id}/external_ids", f"ext {tmdb_id}"
++                )
++                if isinstance(data, dict):
++                    imdb_id = data.get("imdb_id")
++                    if isinstance(imdb_id, str) and imdb_id.startswith("tt"):
++                        _IMDB_MAP[cache_key] = imdb_id
++                        cache_updated = True
++                        return imdb_id
++            return None
++
++        # Resolve IMDb IDs
++        imdb_results = await asyncio.gather(
++            *[resolve_imdb(it["id"]) for it in top100], return_exceptions=True
++        )
++        if cache_updated:
++            await asyncio.to_thread(_save_imdb_map)
++
++        valid_items = []
++        for it, imdb in zip(top100, imdb_results):
++            if isinstance(imdb, str) and imdb.startswith("tt"):
++                valid_items.append((imdb, it))
++
++        ready_tt_list = await _get_ready_tt_list(media_type)
++        ready_set = set(ready_tt_list)
++        valid_items.sort(key=lambda x: x[0] not in ready_set)
++
++        chosen = valid_items[:30]
++        if not chosen:
++            return []
++
++        chosen_raw = [x[1] for x in chosen]
++        item_providers = await resolve_watch_providers(media_type, chosen_raw, session, tmdb)
++
++        is_landscape = getattr(settings, "CATALOG_LANDSCAPE", True) and not kids
++        ls_data_list = []
++        landscape_cache_updated = False
++        if is_landscape:
++            async def resolve_ls(tmdb_id: int, fb: str | None) -> dict | None:
++                nonlocal landscape_cache_updated
++                cache_key = f"{tmdb_type}:{tmdb_id}"
++                if cache_key in _LANDSCAPE_MAP:
++                    return _LANDSCAPE_MAP[cache_key]
++                async with sem:
++                    data = await tmdb._get_json(
++                        f"{tmdb_type}/{tmdb_id}/images?include_image_language=pt,en,null",
++                        f"{tmdb_type} images {tmdb_id}",
++                    )
++                    chosen_backdrop = None
++                    chosen_logo = None
++                    if isinstance(data, dict):
++                        bds = data.get("backdrops", [])
++                        if bds:
++                            null_bds = [b.get("file_path") for b in bds if isinstance(b, dict) and (b.get("iso_639_1") is None or b.get("iso_639_1") == "null") and b.get("file_path")]
++                            chosen_backdrop = null_bds[0] if null_bds else bds[0].get("file_path")
++                        logos = data.get("logos", [])
++                        if logos:
++                            pt_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "pt" and l.get("file_path")]
++                            en_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "en" and l.get("file_path")]
++                            null_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and (l.get("iso_639_1") is None or l.get("iso_639_1") == "null") and l.get("file_path")]
++                            if pt_logos:
++                                chosen_logo = pt_logos[0]
++                            elif en_logos:
++                                chosen_logo = en_logos[0]
++                            elif null_logos:
++                                chosen_logo = null_logos[0]
++                            elif logos and logos[0].get("file_path"):
++                                chosen_logo = logos[0]["file_path"]
++                    if not chosen_backdrop and fb:
++                        chosen_backdrop = fb
++                    res = {
++                        "backdrop": chosen_backdrop.lstrip("/") if chosen_backdrop else None,
++                        "logo": chosen_logo.lstrip("/") if chosen_logo else None,
++                    }
++                    _LANDSCAPE_MAP[cache_key] = res
++                    landscape_cache_updated = True
++                    return res
++
++            ls_data_list = await asyncio.gather(
++                *[resolve_ls(x[1]["id"], x[1].get("backdrop_path")) for x in chosen],
++                return_exceptions=True,
++            )
++            if landscape_cache_updated:
++                await asyncio.to_thread(_save_landscape_map)
++
++        metas = []
++        for idx, (imdb_id, it) in enumerate(chosen):
++            poster_path = it.get("poster_path")
++            backdrop_path = it.get("backdrop_path")
++            name = (it.get("title") or it.get("original_title") or "") if media_type == "movie" else (it.get("name") or it.get("original_name") or "")
++            date_str = it.get("release_date") if media_type == "movie" else it.get("first_air_date")
++            year = date_str[:4] if date_str and len(date_str) >= 4 else ""
++            vote_avg = it.get("vote_average")
++            rating_str = f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++
++            meta = {
++                "id": imdb_id,
++                "type": media_type,
++                "name": name,
++                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
++                "background": f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
++                "description": it.get("overview") or "",
++                "releaseInfo": year,
++                "imdbRating": rating_str,
++            }
++
++            provider_id = item_providers.get(it.get("id"))
++            badge = "dub" if imdb_id in ready_set else None
++            q_str = _build_art_query(badge=badge, provider_id=provider_id)
++
++            if is_landscape:
++                ls_data = ls_data_list[idx] if idx < len(ls_data_list) and isinstance(ls_data_list[idx], dict) else None
++                backdrop_file = None
++                logo_file = None
++                if ls_data and ls_data.get("backdrop"):
++                    backdrop_file = ls_data["backdrop"]
++                    logo_file = ls_data.get("logo")
++                elif backdrop_path:
++                    backdrop_file = backdrop_path
++                if backdrop_file:
++                    b_clean = backdrop_file.lstrip("/")
++                    l_clean = logo_file.lstrip("/") if logo_file else None
++                    if l_clean:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
++                    else:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
++                    meta["posterShape"] = "landscape"
++                elif poster_path and (provider_id or badge):
++                    p_clean = poster_path.lstrip("/")
++                    meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
++            metas.append(meta)
++
++        return metas
++
++
++_ANIME_RATING_CACHE: dict = {}
++
++
++async def _fetch_anime_dub_items(
++    skip: int,
++    base_url: str = "",
++    kids: bool = False,
++) -> list[dict]:
++    if skip >= 40:
++        return []
++
++    _ensure_imdb_map_loaded()
++    _ensure_landscape_map_loaded()
++
++    timeout = aiohttp.ClientTimeout(total=15.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++        sem = asyncio.Semaphore(25)
++
++        # 1. Fast load anime torrents with PT in DB using JOIN with anime_ids
++        anime_pt_rows = await database.fetch_all("""
++            SELECT t.media_id, t.title, t.tracker
++            FROM torrents t
++            JOIN anime_ids a ON substr(t.media_id, 1, instr(t.media_id || ':', ':') - 1) = a.provider_id
++            WHERE a.provider = 'imdb'
++        """)
++        pt_series_set = set()
++        for r in anime_pt_rows:
++            p = RTN.parse(r["title"])
++            apply_ptbr_detection(p, r["title"], r["tracker"])
++            if "pt" in (getattr(p, "languages", None) or ()) and not is_cam_release(p):
++                pt_series_set.add(r["media_id"].split(":")[0])
++
++        ready_series = await _get_ready_tt_list("series")
++        ready_set = set(ready_series)
++
++        # Animes in DB with ⚡ (ready_set) first, then remaining animes with PT in DB
++        ready_anime_tts = [tt for tt in ready_series if tt in pt_series_set]
++        other_anime_tts = [tt for tt in pt_series_set if tt not in ready_set]
++        candidate_tts = ready_anime_tts + other_anime_tts
++
++        async def get_anime_info(imdb_id: str) -> dict | None:
++            if imdb_id in _ANIME_INFO_CACHE:
++                return _ANIME_INFO_CACHE[imdb_id]
++            async with sem:
++                find_res = await tmdb._get_json(f"find/{imdb_id}?external_source=imdb_id", f"find {imdb_id}")
++                if isinstance(find_res, dict) and find_res.get("tv_results"):
++                    tv = find_res["tv_results"][0]
++                    tid = tv.get("id")
++                    genre_ids = tv.get("genre_ids", [])
++                    is_anime = (16 in genre_ids and tv.get("original_language") == "ja") or (imdb_id in pt_series_set)
++                    br_rating = None
++                    if is_anime and tid and kids:
++                        cr = await tmdb._get_json(f"tv/{tid}/content_ratings", f"cr {tid}")
++                        if isinstance(cr, dict):
++                            for r in cr.get("results", []):
++                                if r.get("iso_3166_1") == "BR":
++                                    br_rating = str(r.get("rating") or "").strip()
++                                    break
++                    info = {
++                        "is_anime": is_anime,
++                        "tid": tid,
++                        "br_rating": br_rating,
++                        "genre_ids": genre_ids,
++                        "raw": tv,
++                        "imdb_id": imdb_id,
++                    }
++                    _ANIME_INFO_CACHE[imdb_id] = info
++                    return info
++            return None
++
++        async def get_kids_ratings(tid: int) -> tuple[str, str]:
++            if tid in _ANIME_RATING_CACHE:
++                return _ANIME_RATING_CACHE[tid]
++            br, us = "", ""
++            async with sem:
++                cr = await tmdb._get_json(f"tv/{tid}/content_ratings", f"cr {tid}")
++            if isinstance(cr, dict):
++                for r in cr.get("results", []):
++                    if r.get("iso_3166_1") == "BR":
++                        br = str(r.get("rating") or "").strip().upper()
++                    elif r.get("iso_3166_1") == "US":
++                        us = str(r.get("rating") or "").strip().upper()
++            _ANIME_RATING_CACHE[tid] = (br, us)
++            return br, us
++
++        def is_kids_safe(info: dict) -> bool:
++            if not kids:
++                return True
++            gids = info.get("genre_ids") or []
++            if any(g in (27, 53, 80, 10759) for g in gids) and 10762 not in gids:
++                return False
++            br, us = info.get("_ratings") or ("", "")
++            if br:
++                return br in ("L", "LIVRE", "AL", "10")
++            return us in ("TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G")
++
++        info_tasks = [get_anime_info(tt) for tt in candidate_tts]
++        infos = await asyncio.gather(*info_tasks, return_exceptions=True)
++        if kids:
++            _valid = [x for x in infos if isinstance(x, dict) and x.get("is_anime") and x.get("tid")]
++            _rts = await asyncio.gather(*[get_kids_ratings(x["tid"]) for x in _valid], return_exceptions=True)
++            for x, rt in zip(_valid, _rts):
++                x["_ratings"] = rt if isinstance(rt, tuple) else ("", "")
++
++        items_to_show = []
++        seen_tts = set()
++        for inf in infos:
++            if isinstance(inf, dict) and inf.get("is_anime"):
++                if is_kids_safe(inf):
++                    items_to_show.append(inf)
++                    seen_tts.add(inf["imdb_id"])
++
++        chosen = items_to_show[:40]
++        if not chosen:
++            return []
++
++        chosen_raw = [x["raw"] for x in chosen]
++        item_providers = await resolve_watch_providers("series", chosen_raw, session, tmdb)
++
++        is_landscape = getattr(settings, "CATALOG_LANDSCAPE", True) and not kids
++        ls_data_list = []
++        landscape_cache_updated = False
++        if is_landscape:
++            async def resolve_ls(tmdb_id: int, fb: str | None) -> dict | None:
++                nonlocal landscape_cache_updated
++                cache_key = f"tv:{tmdb_id}"
++                if cache_key in _LANDSCAPE_MAP:
++                    return _LANDSCAPE_MAP[cache_key]
++                async with sem:
++                    data = await tmdb._get_json(
++                        f"tv/{tmdb_id}/images?include_image_language=pt,en,null",
++                        f"tv images {tmdb_id}",
++                    )
++                    chosen_backdrop = None
++                    chosen_logo = None
++                    if isinstance(data, dict):
++                        bds = data.get("backdrops", [])
++                        if bds:
++                            null_bds = [b.get("file_path") for b in bds if isinstance(b, dict) and (b.get("iso_639_1") is None or b.get("iso_639_1") == "null") and b.get("file_path")]
++                            chosen_backdrop = null_bds[0] if null_bds else bds[0].get("file_path")
++                        logos = data.get("logos", [])
++                        if logos:
++                            pt_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "pt" and l.get("file_path")]
++                            en_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "en" and l.get("file_path")]
++                            null_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and (l.get("iso_639_1") is None or l.get("iso_639_1") == "null") and l.get("file_path")]
++                            if pt_logos:
++                                chosen_logo = pt_logos[0]
++                            elif en_logos:
++                                chosen_logo = en_logos[0]
++                            elif null_logos:
++                                chosen_logo = null_logos[0]
++                            elif logos and logos[0].get("file_path"):
++                                chosen_logo = logos[0]["file_path"]
++                    if not chosen_backdrop and fb:
++                        chosen_backdrop = fb
++                    res = {
++                        "backdrop": chosen_backdrop.lstrip("/") if chosen_backdrop else None,
++                        "logo": chosen_logo.lstrip("/") if chosen_logo else None,
++                    }
++                    _LANDSCAPE_MAP[cache_key] = res
++                    landscape_cache_updated = True
++                    return res
++
++            ls_data_list = await asyncio.gather(
++                *[resolve_ls(x["raw"]["id"], x["raw"].get("backdrop_path")) for x in chosen],
++                return_exceptions=True,
++            )
++            if landscape_cache_updated:
++                await asyncio.to_thread(_save_landscape_map)
++
++        metas = []
++        for idx, inf in enumerate(chosen):
++            imdb_id = inf["imdb_id"]
++            it = inf["raw"]
++            poster_path = it.get("poster_path")
++            backdrop_path = it.get("backdrop_path")
++            name = it.get("name") or it.get("original_name") or ""
++            date_str = it.get("first_air_date")
++            year = date_str[:4] if date_str and len(date_str) >= 4 else ""
++            vote_avg = it.get("vote_average")
++            rating_str = f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++
++            meta = {
++                "id": imdb_id,
++                "type": "series",
++                "name": name,
++                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
++                "background": f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
++                "description": it.get("overview") or "",
++                "releaseInfo": year,
++                "imdbRating": rating_str,
++            }
++
++            provider_id = item_providers.get(it.get("id"))
++            badge = "dub" if imdb_id in ready_set else None
++            q_str = _build_art_query(badge=badge, provider_id=provider_id)
++
++            if is_landscape:
++                ls_data = ls_data_list[idx] if idx < len(ls_data_list) and isinstance(ls_data_list[idx], dict) else None
++                backdrop_file = None
++                logo_file = None
++                if ls_data and ls_data.get("backdrop"):
++                    backdrop_file = ls_data["backdrop"]
++                    logo_file = ls_data.get("logo")
++                elif backdrop_path:
++                    backdrop_file = backdrop_path
++                if backdrop_file:
++                    b_clean = backdrop_file.lstrip("/")
++                    l_clean = logo_file.lstrip("/") if logo_file else None
++                    if l_clean:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
++                    else:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
++                    meta["posterShape"] = "landscape"
++                elif poster_path and (provider_id or badge):
++                    p_clean = poster_path.lstrip("/")
++                    meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
++            metas.append(meta)
++
++        return metas
++
++
++async def _fetch_week_items(
++    skip: int,
++    base_url: str = "",
++) -> list[dict]:
++    if skip >= 30:
++        return []
++
++    _ensure_imdb_map_loaded()
++    _ensure_landscape_map_loaded()
++
++    tz_br = datetime.timezone(datetime.timedelta(hours=-3))
++    now_br = datetime.datetime.now(tz_br)
++    today_br = now_br.date()
++    monday_br = today_br - datetime.timedelta(days=today_br.weekday())
++    sunday_br = monday_br + datetime.timedelta(days=6)
++
++    timeout = aiohttp.ClientTimeout(total=15.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++        series_candidates: dict[str, tuple[str, dict]] = {}
++
++        # (a) Histórico últimos 90 dias
++        auth_key = getattr(settings, "STREMIO_AUTH_KEY", None)
++        if auth_key:
++            try:
++                from comet.services.stremio_library import get_stremio_library
++                library = await get_stremio_library(auth_key)
++                now_utc = datetime.datetime.now(datetime.timezone.utc)
++                for it in library:
++                    if it.get("type") != "series":
++                        continue
++                    mid = it.get("_id") or it.get("id")
++                    if not mid or not isinstance(mid, str) or not mid.startswith("tt"):
++                        continue
++                    lw = it.get("state", {}).get("lastWatched")
++                    if not lw:
++                        continue
++                    try:
++                        clean = str(lw).strip().replace("Z", "+00:00")
++                        dt = datetime.datetime.fromisoformat(clean)
++                        if dt.tzinfo is None:
++                            dt = dt.replace(tzinfo=datetime.timezone.utc)
++                        diff = (now_utc - dt).total_seconds() / 86400
++                        if 0 <= diff <= 90:
++                            series_candidates[mid] = (it.get("name") or "", {})
++                    except Exception:
++                        pass
++            except Exception as e:
++                logger.warning(f"Erro ao carregar historico para estreias da semana: {e}")
++
++        # (b) 30 mais populares do tv/on_the_air
++        try:
++            p1, p2 = await asyncio.gather(
++                tmdb._get_json("tv/on_the_air?language=pt-BR&page=1", "ota1"),
++                tmdb._get_json("tv/on_the_air?language=pt-BR&page=2", "ota2"),
++                return_exceptions=True,
++            )
++            ota_results = []
++            if isinstance(p1, dict) and isinstance(p1.get("results"), list):
++                ota_results.extend(p1["results"])
++            if isinstance(p2, dict) and isinstance(p2.get("results"), list):
++                ota_results.extend(p2["results"])
++
++            async def resolve_ota_ext(r: dict) -> tuple[str | None, dict]:
++                tid = r.get("id")
++                if not tid:
++                    return None, r
++                ext = await tmdb._get_json(f"tv/{tid}/external_ids", f"ext {tid}")
++                if isinstance(ext, dict):
++                    imdb_id = ext.get("imdb_id")
++                    if imdb_id and isinstance(imdb_id, str) and imdb_id.startswith("tt"):
++                        return imdb_id, r
++                return None, r
++
++            ota_ext_results = await asyncio.gather(
++                *[resolve_ota_ext(r) for r in ota_results[:30]],
++                return_exceptions=True,
++            )
++            for item in ota_ext_results:
++                if isinstance(item, tuple) and item[0]:
++                    imdb_id, r = item
++                    if imdb_id not in series_candidates:
++                        series_candidates[imdb_id] = (r.get("name") or "", r)
++                    elif not series_candidates[imdb_id][1]:
++                        series_candidates[imdb_id] = (series_candidates[imdb_id][0] or r.get("name") or "", r)
++        except Exception as e:
++            logger.warning(f"Erro ao carregar on_the_air para estreias da semana: {e}")
++
++        if not series_candidates:
++            return []
++
++        sem = asyncio.Semaphore(25)
++
++        async def fetch_series_vids(mid: str) -> tuple[str, list[dict], dict]:
++            async with sem:
++                try:
++                    url = f"https://v3-cinemeta.strem.io/meta/series/{mid}.json"
++                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
++                        if resp.status == 200:
++                            data = await resp.json()
++                            meta = data.get("meta", {})
++                            return mid, meta.get("videos", []), meta
++                except Exception:
++                    pass
++                return mid, [], {}
++
++        vids_res = await asyncio.gather(*[fetch_series_vids(mid) for mid in series_candidates])
++
++        matched_series = []
++        for mid, vids, cm_meta in vids_res:
++            sname = series_candidates[mid][0] or cm_meta.get("name") or ""
++            week_vids = []
++            for v in vids:
++                rel = v.get("released") or v.get("firstAired")
++                if not rel:
++                    continue
++                try:
++                    clean = str(rel).strip().replace("Z", "+00:00")
++                    dt = datetime.datetime.fromisoformat(clean)
++                    if dt.tzinfo is None:
++                        dt = dt.replace(tzinfo=datetime.timezone.utc)
++                    dt_br = dt.astimezone(tz_br)
++                    d = dt_br.date()
++                except Exception:
++                    try:
++                        d = datetime.date.fromisoformat(str(rel)[:10])
++                    except Exception:
++                        continue
++
++                if monday_br <= d <= sunday_br:
++                    vs = v.get("season")
++                    ve = v.get("episode", v.get("number"))
++                    try:
++                        vs_i = int(vs)
++                        ve_i = int(ve)
++                    except (ValueError, TypeError):
++                        continue
++                    week_vids.append((d, vs_i, ve_i, v))
++
++            if week_vids:
++                week_vids.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
++                chosen_ep = week_vids[0]
++                matched_series.append({
++                    "imdb_id": mid,
++                    "name": sname,
++                    "ep_date": chosen_ep[0],
++                    "season": chosen_ep[1],
++                    "episode": chosen_ep[2],
++                    "ep_raw": chosen_ep[3],
++                    "cm_meta": cm_meta,
++                    "tmdb_raw": series_candidates[mid][1],
++                })
++
++        if not matched_series:
++            return []
++
++        def week_sort_key(item):
++            d = item["ep_date"]
++            if d == today_br:
++                return (0, 0, item.get("name", ""))
++            elif d > today_br:
++                return (1, (d - today_br).days, item.get("name", ""))
++            else:
++                return (2, (today_br - d).days, item.get("name", ""))
++
++        matched_series.sort(key=week_sort_key)
++
++        ready_series_set = set(await _get_ready_tt_list("series"))
++        dub_watch_rows = await database.fetch_all("SELECT media_id, dub_ready FROM dub_watch")
++        dub_ready_map = {r["media_id"]: r["dub_ready"] for r in dub_watch_rows}
++
++        chosen_tmdb_items = []
++        for it in matched_series:
++            raw = it.get("tmdb_raw")
++            if raw and raw.get("id"):
++                chosen_tmdb_items.append({"id": raw["id"], "_imdb": it["imdb_id"]})
++            else:
++                chosen_tmdb_items.append({"id": None, "_imdb": it["imdb_id"]})
++
++        async def resolve_find_tid(item: dict):
++            if not item.get("id") and item.get("_imdb"):
++                find_res = await tmdb._get_json(f"find/{item['_imdb']}?external_source=imdb_id", f"find {item['_imdb']}")
++                if isinstance(find_res, dict) and find_res.get("tv_results"):
++                    item["id"] = find_res["tv_results"][0].get("id")
++
++        await asyncio.gather(*[resolve_find_tid(item) for item in chosen_tmdb_items if not item.get("id")])
++
++        item_providers = await resolve_watch_providers(
++            "series", [it for it in chosen_tmdb_items if it.get("id")], session, tmdb
++        )
++
++        is_landscape = getattr(settings, "CATALOG_LANDSCAPE", True)
++        ls_tasks = []
++        landscape_cache_updated = False
++
++        async def resolve_ls(tmdb_id: int, fb: str | None) -> dict | None:
++            nonlocal landscape_cache_updated
++            cache_key = f"tv:{tmdb_id}"
++            if cache_key in _LANDSCAPE_MAP:
++                return _LANDSCAPE_MAP[cache_key]
++            async with sem:
++                data = await tmdb._get_json(
++                    f"tv/{tmdb_id}/images?include_image_language=pt,en,null",
++                    f"tv images {tmdb_id}",
++                )
++                chosen_backdrop = None
++                chosen_logo = None
++                if isinstance(data, dict):
++                    bds = data.get("backdrops", [])
++                    if bds:
++                        null_bds = [b.get("file_path") for b in bds if isinstance(b, dict) and (b.get("iso_639_1") is None or b.get("iso_639_1") == "null") and b.get("file_path")]
++                        chosen_backdrop = null_bds[0] if null_bds else bds[0].get("file_path")
++                    logos = data.get("logos", [])
++                    if logos:
++                        pt_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "pt" and l.get("file_path")]
++                        en_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "en" and l.get("file_path")]
++                        null_logos = [l.get("file_path") for l in logos if isinstance(l, dict) and (l.get("iso_639_1") is None or l.get("iso_639_1") == "null") and l.get("file_path")]
++                        if pt_logos:
++                            chosen_logo = pt_logos[0]
++                        elif en_logos:
++                            chosen_logo = en_logos[0]
++                        elif null_logos:
++                            chosen_logo = null_logos[0]
++                        elif logos and logos[0].get("file_path"):
++                            chosen_logo = logos[0]["file_path"]
++                if not chosen_backdrop and fb:
++                    chosen_backdrop = fb
++                res = {
++                    "backdrop": chosen_backdrop.lstrip("/") if chosen_backdrop else None,
++                    "logo": chosen_logo.lstrip("/") if chosen_logo else None,
++                }
++                _LANDSCAPE_MAP[cache_key] = res
++                landscape_cache_updated = True
++                return res
++
++        for it, t_item in zip(matched_series, chosen_tmdb_items):
++            tid = t_item.get("id")
++            if tid:
++                ls_tasks.append(resolve_ls(tid, it.get("cm_meta", {}).get("background")))
++            else:
++                ls_tasks.append(asyncio.sleep(0, result=None))
++        ls_data_list = await asyncio.gather(*ls_tasks, return_exceptions=True)
++        if landscape_cache_updated:
++            await asyncio.to_thread(_save_landscape_map)
++
++        metas = []
++        for idx, it in enumerate(matched_series):
++            mid = it["imdb_id"]
++            d = it["ep_date"]
++            s = it["season"]
++            e = it["episode"]
++            ep_mid = f"{mid}:{s}:{e}"
++
++            is_dub = bool(dub_ready_map.get(ep_mid) == 1 or mid in ready_series_set)
++            if is_dub:
++                status_str = "🇧🇷 dublado pronto"
++            elif d > today_br:
++                status_str = "ainda não saiu"
++            else:
++                status_str = "legendado"
++
++            weekday_name = WEEKDAYS_PT.get(d.weekday(), "")
++            dd_mm = d.strftime("%d/%m")
++            desc = f"📅 {weekday_name} {dd_mm} · T{s}E{e} · {status_str}"
++
++            badge = "new_ep" if d <= today_br else None
++
++            t_item = chosen_tmdb_items[idx]
++            provider_id = item_providers.get(t_item.get("id")) if t_item.get("id") else None
++            q_str = _build_art_query(badge=badge, provider_id=provider_id)
++
++            cm_meta = it.get("cm_meta", {})
++            poster_url = cm_meta.get("poster") or ""
++            backdrop_url = cm_meta.get("background")
++
++            meta = {
++                "id": mid,
++                "type": "series",
++                "name": it["name"],
++                "poster": poster_url,
++                "background": backdrop_url,
++                "description": desc,
++                "releaseInfo": f"T{s}E{e}",
++                "imdbRating": cm_meta.get("imdbRating") or "",
++            }
++
++            if is_landscape:
++                ls_data = ls_data_list[idx] if idx < len(ls_data_list) and isinstance(ls_data_list[idx], dict) else None
++                backdrop_file = None
++                logo_file = None
++                if ls_data and ls_data.get("backdrop"):
++                    backdrop_file = ls_data["backdrop"]
++                    logo_file = ls_data.get("logo")
++                elif backdrop_url and "tmdb.org" in backdrop_url:
++                    m_p = re.search(r"/p/[^/]+(/.*)", backdrop_url)
++                    if m_p:
++                        backdrop_file = m_p.group(1)
++                if backdrop_file:
++                    b_clean = backdrop_file.lstrip("/")
++                    l_clean = logo_file.lstrip("/") if logo_file else None
++                    if l_clean:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
++                    else:
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
++                    meta["posterShape"] = "landscape"
++                elif poster_url and (provider_id or badge):
++                    m_post = re.search(r"/p/[^/]+(/.*)", poster_url)
++                    if m_post:
++                        p_clean = m_post.group(1).lstrip("/")
++                        meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
++
++            metas.append(meta)
++
++        return metas
 diff --git a/comet/services/debrid.py b/comet/services/debrid.py
 index 819551b..23202e1 100644
 --- a/comet/services/debrid.py
@@ -14210,10 +15244,10 @@ index 0000000..3ed664d
 +    return copy.deepcopy(base_meta)
 diff --git a/comet/services/nightly.py b/comet/services/nightly.py
 new file mode 100644
-index 0000000..34993f8
+index 0000000..8a5874b
 --- /dev/null
 +++ b/comet/services/nightly.py
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,603 @@
 +from __future__ import annotations
 +
 +import asyncio
@@ -14305,7 +15339,7 @@ index 0000000..34993f8
 +
 +
 +async def _build_work_list(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
-+    max_items = getattr(settings, "NIGHTLY_MAX_ITEMS", 40) or 40
++    max_items = getattr(settings, "NIGHTLY_MAX_ITEMS", 60) or 60
 +    candidates: list[dict[str, Any]] = []
 +    seen_media_ids: set[str] = set()
 +
@@ -14483,6 +15517,59 @@ index 0000000..34993f8
 +                        break
 +    except Exception as exc:
 +        logger.warning(f"🌙 Erro ao carregar Top 10: {exc}")
++
++    # c. 20 animes mais populares (discover animação ja, vote_count >= 200) que ainda não estão no banco
++    try:
++        from comet.metadata.tmdb import TMDBApi
++        tmdb = TMDBApi(session)
++        anime_data = await tmdb._get_json(
++            "discover/tv?language=pt-BR&with_genres=16&with_original_language=ja&vote_count.gte=200&sort_by=popularity.desc&page=1",
++            "nightly anime discover",
++        )
++        anime_items = anime_data.get("results", []) if isinstance(anime_data, dict) else []
++        anime_added = 0
++        for it in anime_items:
++            if not isinstance(it, dict):
++                continue
++            tid = it.get("id")
++            if not tid:
++                continue
++            ext = await tmdb._get_json(f"tv/{tid}/external_ids", f"ext {tid}")
++            if not isinstance(ext, dict):
++                continue
++            imdb_id = ext.get("imdb_id")
++            if not imdb_id or not isinstance(imdb_id, str) or not imdb_id.startswith("tt"):
++                continue
++            row_t = await database.fetch_one(
++                "SELECT 1 FROM torrents WHERE media_id LIKE :prefix LIMIT 1",
++                {"prefix": f"{imdb_id}%"},
++            )
++            if row_t:
++                continue
++            row_dw = await database.fetch_one(
++                "SELECT 1 FROM dub_watch WHERE imdb = :imdb LIMIT 1",
++                {"imdb": imdb_id},
++            )
++            if row_dw:
++                continue
++            ep_mid = f"{imdb_id}:1:1"
++            if ep_mid not in seen_media_ids:
++                seen_media_ids.add(ep_mid)
++                candidates.append({
++                    "type": "series",
++                    "imdb": imdb_id,
++                    "season": 1,
++                    "episode": 1,
++                    "media_id": ep_mid,
++                    "name": it.get("name") or "",
++                    "aired": "",
++                    "is_history": False,
++                })
++                anime_added += 1
++                if anime_added >= 20:
++                    break
++    except Exception as exc:
++        logger.warning(f"🌙 Erro ao carregar animes para madrugada: {exc}")
 +
 +    return candidates[:max_items]
 +
@@ -15023,10 +16110,10 @@ index aa43646..722ba5b 100644
          ]
 diff --git a/comet/services/prefetch.py b/comet/services/prefetch.py
 new file mode 100644
-index 0000000..e819a67
+index 0000000..0578131
 --- /dev/null
 +++ b/comet/services/prefetch.py
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,377 @@
 +import asyncio
 +import time
 +from datetime import datetime, timezone
@@ -15041,6 +16128,132 @@ index 0000000..e819a67
 +_PREFETCH_SEMAPHORE = asyncio.Semaphore(2)
 +_TASKS: set = set()  # guarda referencia: sem isso o asyncio pode descartar a tarefa
 +_COOLDOWN_SECONDS = 20 * 60  # 20 minutes
++
++
++# --- Pré-download do próximo episódio dublado (Tarefa Y) ---
++import json as _json
++import re as _re
++from pathlib import Path as _Path
++
++_PREDL_FILE = _Path("/opt/comet/data/predownload.json")
++_PREDL_LOCK = asyncio.Lock()
++_PREDL_SERIES_COOLDOWN = 12 * 3600
++_RES_PREF = {"1080p": 0, "720p": 1, "4K": 2, "480p": 3, "SD": 4}
++
++
++def _predl_load() -> dict:
++    try:
++        return _json.loads(_PREDL_FILE.read_text(encoding="utf-8"))
++    except Exception:
++        return {}
++
++
++def _predl_save(state: dict) -> None:
++    try:
++        tmp = _PREDL_FILE.with_suffix(".tmp")
++        tmp.write_text(_json.dumps(state, ensure_ascii=False), encoding="utf-8")
++        tmp.replace(_PREDL_FILE)
++    except Exception as e:
++        logger.debug(f"pré-download: não gravou estado: {e}")
++
++
++def get_predownload_summary() -> dict:
++    st = _predl_load()
++    today = time.strftime("%Y-%m-%d")
++    return {
++        "today": st.get("count", 0) if st.get("day") == today else 0,
++        "recent": (st.get("recent") or [])[-5:],
++    }
++
++
++def _stream_size_gb(desc: str) -> float | None:
++    m = _re.search(r"([\d.,]+)\s*GB", desc or "")
++    if not m:
++        return None
++    try:
++        return float(m.group(1).replace(".", "").replace(",", "."))
++    except ValueError:
++        return None
++
++
++def _stream_res(name: str) -> str | None:
++    for r in ("4K", "1080p", "720p", "480p", "SD"):
++        if r in (name or ""):
++            return r
++    return None
++
++
++def _pick_predownload(streams: list[dict]) -> dict | None:
++    """Melhor stream 🇧🇷 não cacheado (⬇️). None se já existe 🇧🇷 ⚡ ou se não há 🇧🇷."""
++    pt_ready = False
++    candidates = []
++    for st in streams:
++        name = str(st.get("name") or "")
++        desc = str(st.get("description") or st.get("title") or "")
++        if "🇧🇷" not in name + desc or not st.get("url"):
++            continue
++        if name.startswith("▶"):
++            continue
++        if "⚡" in name or "🌐" in name:
++            pt_ready = True  # dublado em cache ou link direto dublado: já toca na hora
++            continue
++        if "⬇" not in name:
++            continue
++        if "P2P" in name + desc:
++            continue
++        res = _stream_res(name)
++        size = _stream_size_gb(desc)
++        if res is None or (size is not None and size > 15):
++            continue
++        service = "TorBox" if "TorBox" in desc else "Real-Debrid"
++        candidates.append((_RES_PREF.get(res, 9), 0 if service == "Real-Debrid" else 1, size or 99, res, service, st))
++    if pt_ready or not candidates:
++        return None
++    candidates.sort(key=lambda c: c[:3])
++    _, _, size, res, service, st = candidates[0]
++    return {"stream": st, "res": res, "service": service, "size": size}
++
++
++async def _maybe_predownload(streams: list[dict], imdb_id: str, s: int, e: int, name: str = "") -> None:
++    if not getattr(settings, "PREDOWNLOAD_NEXT_EPISODE", True):
++        return
++    choice = _pick_predownload(streams)
++    if not choice:
++        logger.debug(f"pré-download {imdb_id} T{s}E{e}: pulado (já tem 🇧🇷 ⚡ ou não há 🇧🇷)")
++        return
++    async with _PREDL_LOCK:
++        st = _predl_load()
++        today = time.strftime("%Y-%m-%d")
++        if st.get("day") != today:
++            st["day"], st["count"] = today, 0
++        max_day = int(getattr(settings, "PREDOWNLOAD_MAX_PER_DAY", 10))
++        if st.get("count", 0) >= max_day:
++            logger.debug(f"pré-download {imdb_id}: limite diário ({max_day})")
++            return
++        last = (st.get("series") or {}).get(imdb_id, 0)
++        if time.time() - last < _PREDL_SERIES_COOLDOWN:
++            logger.debug(f"pré-download {imdb_id}: mesma série há menos de 12 h")
++            return
++        url = str(choice["stream"]["url"])
++        public = (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
++        if public and url.startswith(public):
++            url = "http://127.0.0.1:8000" + url[len(public):]
++        try:
++            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20.0)) as client:
++                async with client.get(url, headers={"Range": "bytes=0-1", "User-Agent": "ExoPlayerLib/2.19.1"}, allow_redirects=False) as resp:
++                    status = resp.status
++        except Exception as exc:
++            logger.warning(f"pré-download {imdb_id} T{s}E{e} falhou: {type(exc).__name__}")
++            return
++        size_txt = f"{choice['size']:.1f} GB" if choice.get("size") and choice["size"] < 99 else "?"
++        logger.info(f"📥 pré-download {imdb_id} T{s}E{e}: {choice['service']} {choice['res']} {size_txt} (HTTP {status})")
++        st["count"] = st.get("count", 0) + 1
++        st.setdefault("series", {})[imdb_id] = time.time()
++        recent = st.setdefault("recent", [])
++        recent.append(f"{name or imdb_id} T{s}E{e} · {choice['service']} {choice['res']}")
++        st["recent"] = recent[-20:]
++        _predl_save(st)
++
 +
 +
 +def _is_future_release(rel_str: str | None) -> bool:
@@ -15227,6 +16440,10 @@ index 0000000..e819a67
 +                        logger.info(
 +                            f"⏭️ pré-busca {imdb_id} S{next_s}E{next_e}: {n_streams} streams em {elapsed:.1f}s"
 +                        )
++                        try:
++                            await _maybe_predownload(streams, imdb_id, next_s, next_e)
++                        except Exception as pd_err:
++                            logger.warning(f"pré-download falhou: {pd_err}")
 +                    else:
 +                        logger.warning(
 +                            f"Pré-busca {imdb_id} S{next_s}E{next_e} falhou: HTTP {resp.status}"
@@ -15257,6 +16474,21 @@ index 0000000..e819a67
 +            episode=episode,
 +        )
 +    )
++    _TASKS.add(task)
++    task.add_done_callback(_TASKS.discard)
++
++
++def trigger_prefetch_next_episode_later(b64config: str, media_id: str, season: int, episode: int, delay: float = 25.0) -> None:
++    """Pré-busca do próximo episódio quando o usuário ABRE o episódio (lista de streams).
++    Cobre o caso em que o ▶ Assistir é link direto e o play não passa pelo Comet."""
++    if not getattr(settings, "PREFETCH_NEXT_EPISODE", True):
++        return
++
++    async def _later():
++        await asyncio.sleep(delay)
++        trigger_prefetch_next_episode(b64config, media_id, None, season, episode)
++
++    task = asyncio.create_task(_later())
 +    _TASKS.add(task)
 +    task.add_done_callback(_TASKS.discard)
 diff --git a/comet/services/smart_search.py b/comet/services/smart_search.py
