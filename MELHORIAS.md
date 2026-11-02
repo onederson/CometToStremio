@@ -13,6 +13,34 @@ O documento tem duas partes:
 
 ---
 
+## ★★ O salto geracional (12 ideias que nenhum addon tem)
+
+A grande sacada: **no Stremio, a interface do addon são as imagens.** Capas, fundo da página do título, miniatura de episódio e logo de canal são desenhados pelo próprio Comet no A71. Ou seja, dá para pôr **informação viva** dentro deles: progresso, dublagem, notas, horário. As ideias marcadas com 🎨 mudam o visual.
+
+| # | Ideia | Como fica para você |
+|---|---|---|
+| 1 🎨 | **Capas vivas** | A capa muda com o seu momento: **barra vermelha de progresso** ("faltam 23 min") no que você começou, "T2E5 sai HOJE", contagem "Estreia em 3 dias", "🇧🇷 Dublado chegou", nota IMDb. Tudo desenhado na hora a partir do seu histórico do Stremio |
+| 2 🎨 | **Página do título cinematográfica** | O fundo da página vira um **pôster editorial** em tela cheia: logo grande, notas (IMDb/Rotten/Oscar), "🇧🇷 dublado pronto em 4K", tira com as fotos do elenco, duração e "termina às 22:41" |
+| 3 🎨 | **Episódios que contam tudo** | Cada miniatura de episódio ganha selos: `🇧🇷 DUB`, `✓ visto`, `🟡 FILLER`, `★ 9,4` (nota do episódio), `FINAL DE TEMPORADA`. Você vê de longe qual episódio é imperdível |
+| 4 🎨 | **Lista de fontes com curadoria** | No topo, 4 botões claros em vez de 100 linhas: `▶ Melhor dublado` · `📱 Leve (celular/4G)` · `💎 Máxima qualidade (4K HDR/Atmos)` · `🎧 Original legendado`. Abaixo, o resto, já sem as mentiras |
+| 5 | **Qualidade de verdade (abrir o arquivo)** | O Comet lê o cabeçalho de cada arquivo: codec, HDR/Dolby Vision, bitrate real, faixas de áudio. Mostra `4K REAL · HDR10 · 22 Mbps` ou `⚠ 4K falso (upscale)`, avisa `DV perfil 5: cores erradas na sua TV` e `Som TrueHD: sua TV pode ficar muda` |
+| 6 | **Dublado de primeira, sempre** | Prefere arquivo com o PT como faixa padrão. Experimental: o Comet **corrige o arquivo no caminho** (PT vira padrão; som DTS/TrueHD vira um formato que a TV toca) |
+| 7 🎨 | **Ordens de maratona** | Itens novos que são uma "série" montada: **Universo Marvel em ordem cronológica**, **Star Wars na ordem da história**, **Velozes em ordem cronológica**, com capa desenhada e cada filme como episódio. Clicou, maratona na ordem certa, com progresso |
+| 8 🎨 | **Anime sem filler** | Ao lado de "One Piece" aparece **"One Piece · só a história"**: a lista de episódios pulando os fillers, na ordem certa. Vale para Naruto, Bleach e o que tiver lista de filler |
+| 9 🎨 | **TV ao vivo com guia na capa** | A capa de cada canal mostra **o que está passando agora** (título + barra de progresso do programa) e o que vem depois, atualizada a cada 15 min. A fileira vira um guia de TV |
+| 10 🎨 | **Sua semana em cartões** | Fileira "📅 Sua semana" com um **cartão por dia** (desenho do Comet): "Quarta: The Boys T5E3 🇧🇷 · Pinguim T2E1". Clicou, abre o do dia |
+| 11 | **Lista de desejos + radar** (Telegram) | "Me avisa quando sair Duna 3 dublado" → baixa e avisa sozinho. Filme saiu do cinema e chegou dublado (sem CAM) → aviso |
+| 12 | **O Comet que aprende** | O que você assiste até o fim fortalece aquele tipo de release; o que abandona enfraquece. As fileiras se reordenam pelo seu uso. "Para hoje à noite" escolhe pelo dia e pela hora |
+
+**Já em andamento (02/11/2026, noite):**
+- **5 (qualidade de verdade):** leitor completo de MKV/MP4, feito por um subagente.
+- **11 (lista de desejos + radar):** feito por outro subagente.
+- **Base:** play garantido, TorBox principal, `uvloop` e compressão, comigo.
+
+Depois: **4 → 1 → 3 → 7 → 8 → 9 → 2 → 10 → 6 → 12**.
+
+---
+
 ## ★ O salto para o perfeito
 
 ### O que as medições mostraram (02/11/2026, à noite)
