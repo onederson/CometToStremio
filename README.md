@@ -104,6 +104,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 - [x] Notas IMDb/Rotten/Metacritic + selo Oscar (OMDb)
 - [x] Bot do Telegram com pedidos e avisos
 - [x] Funciona fora de casa (4G) pela porta 7443
+- [x] Salto geracional: capas vivas (pôster editorial, guia de TV, progresso, faixas HOJE/DUBLADO), 📅 Sua semana, 🍿 maratonas na ordem da história, 🎌 anime sem filler, qualidade real do arquivo (HDR/DV/bitrate/faixa padrão), atalhos 📱💎🎧, TorBox principal, compressão + uvloop, lista de desejos no Telegram
 - [x] Usuário reinstalou com o link **:7443** e testou no 4G (02/11/2026): funcionou
 - [ ] **Usuário (opcional):** reescrita no AdGuard `a71comet.duckdns.org` → `192.168.3.44` (deixa a casa um pouco mais rápida; não é obrigatória porque o roteador faz NAT loopback)
 - [x] Vigia externo (healthchecks.io): avisa no Telegram se o A71 cair ou o Comet travar

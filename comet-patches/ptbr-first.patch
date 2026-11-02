@@ -242,10 +242,10 @@ index 0000000..1fdce15
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..e8126d8
+index 0000000..dd813b0
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,208 @@
 +import urllib.parse
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
@@ -281,6 +281,38 @@ index 0000000..e8126d8
 +    return out
 +
 +
++def _status_ribbons(metas: list, catalog_id: str) -> list:
++    """Faixa de estado na capa: HOJE / AMANHÃ / EM N DIAS / NOVO (semana) e DUBLADO CHEGOU."""
++    import re as _re
++    from datetime import date as _date
++    from comet.services.live_art_svc import live_url
++    today = _date.today()
++    out = []
++    for m in metas or []:
++        m = dict(m)
++        st = None
++        if catalog_id == "comet_dubready":
++            st = "DUBLADO CHEGOU"
++        else:
++            mm = _re.search(r"(\d{2})/(\d{2})", (m.get("description") or "").split("\n")[0])
++            if mm:
++                try:
++                    d = _date(today.year, int(mm.group(2)), int(mm.group(1)))
++                    diff = (d - today).days
++                    st = "HOJE" if diff == 0 else "AMANHÃ" if diff == 1 else f"EM {diff} DIAS" if diff > 1 else "NOVO"
++                except ValueError:
++                    st = None
++        if st and m.get("poster"):
++            # a faixa ocupa o canto do selo de texto: tira o selo antigo (?b=) da capa de origem
++            import urllib.parse as _up
++            _u = _up.urlsplit(m["poster"])
++            _q = [(k, v) for k, v in _up.parse_qsl(_u.query) if k != "b"]
++            _src = _up.urlunsplit((_u.scheme, _u.netloc, _u.path, _up.urlencode(_q), ""))
++            m["poster"] = live_url(_src, status=st)
++        out.append(m)
++    return out
++
++
 +async def _apply_live_covers(metas: list, catalog_id: str, is_personal: bool) -> list:
 +    from comet.services.live_art_svc import live_url, tv_url
 +    if catalog_id in ("comet_livetv", "comet_livehome"):
@@ -294,6 +326,8 @@ index 0000000..e8126d8
 +        return out
 +    if not is_personal:
 +        return metas
++    if catalog_id in ("comet_week", "comet_dubready"):
++        metas = _status_ribbons(metas, catalog_id)
 +    prog = await _progress_map()
 +    if not prog:
 +        return metas
@@ -1812,7 +1846,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..34258c6 100644
+index 94f56ae..daae481 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -1879,7 +1913,7 @@ index 94f56ae..34258c6 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +102,623 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +102,696 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -2220,6 +2254,71 @@ index 94f56ae..34258c6 100644
 +        _PRERESOLVE_IN_FLIGHT.discard(info_hash)
 +
 +
++def _curated_shortcuts(candidates: list[dict], best_stream: dict | None, blocked_set: set) -> list[dict]:
++    """📱 Leve · 💎 Máxima qualidade · 🎧 Original — cópias de fontes prontas (⚡) com nome claro."""
++    GB = 1024 ** 3
++
++    def ok(c):
++        i = c.get("_info") or {}
++        if not i or i.get("kind") == "p2p" or not i.get("cached") or i.get("is_cam"):
++            return False
++        svc = str(i.get("debrid_service") or i.get("service") or "").lower()
++        h = str(i.get("info_hash") or "").lower()
++        if not ("torbox" in svc or svc == "tb") and h in blocked_set:
++            return False
++        return True
++
++    def res_of(i):
++        return str(i.get("resolution") or "").lower()
++
++    def score_q(c):
++        i = c.get("_info") or {}
++        mi = i.get("_media") or {}
++        v = mi.get("video") or {}
++        r = {"2160p": 4, "4k": 4, "1440p": 3, "1080p": 2, "720p": 1}.get(res_of(i), 0)
++        hdr = 1 if (v.get("hdr") and v.get("hdr") != "SDR") or any(t in str(i.get("raw_title") or "").upper() for t in ("HDR", "DV", "DOLBY.VISION")) else 0
++        risky = 1 if (v.get("dv_profile") == 5) else 0
++        return (-risky, r, hdr, float(mi.get("bitrate_mbps") or 0), (i.get("size") or 0))
++
++    pool = [c for c in candidates if ok(c) and c is not best_stream]
++    best_hash = str(((best_stream or {}).get("_info") or {}).get("info_hash") or "").lower()
++    pool = [c for c in pool if str((c.get("_info") or {}).get("info_hash") or "").lower() != best_hash]
++    out, used = [], set()
++
++    def add(c, name, line):
++        i = c["_info"]
++        h = str(i.get("info_hash") or "").lower()
++        if h in used:
++            return
++        used.add(h)
++        cp = dict(c)
++        cp["behaviorHints"] = dict(c.get("behaviorHints") or {})
++        cp["name"] = name
++        size = _format_size_gb(i.get("size"))
++        res = _format_resolution(i.get("resolution"))
++        desc = (c.get("description") or "").split("\n")
++        cp["description"] = "\n".join([" · ".join(p for p in [line, res, size] if p)] + desc[1:])
++        out.append(cp)
++
++    pt = [c for c in pool if (c.get("_info") or {}).get("is_pt") and (c.get("_info") or {}).get("has_pt") != 0]
++    # 📱 Leve: dublado, 720p/1080p, até 3 GB, o menor que ainda é bom
++    light = [c for c in pt if res_of(c["_info"]) in ("720p", "1080p") and 0 < (c["_info"].get("size") or 0) <= 3 * GB]
++    if light:
++        c = min(light, key=lambda c: ((0 if res_of(c["_info"]) == "1080p" else 1), c["_info"].get("size") or 0))
++        add(c, f"📱 Leve\n{_format_resolution(c['_info'].get('resolution'))}", "Para 4G e internet fraca")
++    # 💎 Máxima qualidade: 4K (dublado se houver), HDR, maior bitrate real
++    top_pool = [c for c in (pt or pool) if res_of(c["_info"]) in ("2160p", "4k")] or [c for c in pool if res_of(c["_info"]) in ("2160p", "4k")]
++    if top_pool:
++        c = max(top_pool, key=score_q)
++        add(c, f"💎 Máxima qualidade\n{_format_resolution(c['_info'].get('resolution'))}", "Melhor imagem disponível")
++    # 🎧 Original: melhor versão sem dublagem (para ver legendado)
++    orig = [c for c in pool if not (c.get("_info") or {}).get("is_pt") and res_of(c["_info"]) in ("1080p", "2160p", "4k")]
++    if orig:
++        c = max(orig, key=lambda c: ((1 if 0 < (c["_info"].get("size") or 0) <= 15 * GB else 0), (1 if res_of(c["_info"]) == "1080p" else 0), score_q(c)[:4]))
++        add(c, f"🎧 Original\n{_format_resolution(c['_info'].get('resolution'))}", "Áudio original (use legenda)")
++    return out
++
++
 +def _apply_clean_layout(
 +    final_streams: list[dict],
 +    notice_count: int,
@@ -2472,6 +2571,14 @@ index 94f56ae..34258c6 100644
 +
 +        final_streams.insert(notice_count, copy_stream)
 +
++        # Atalhos com curadoria logo abaixo do ▶ Assistir (só quando existem e são diferentes dele)
++        try:
++            _extra = _curated_shortcuts(candidates, best_stream, blocked_set)
++            for _k, _cs in enumerate(_extra):
++                final_streams.insert(notice_count + 1 + _k, _cs)
++        except Exception as _cur_err:
++            logger.debug(f"atalhos com curadoria: {_cur_err}")
++
 +    pt_cand_list = [
 +        cand
 +        for idx, cand in enumerate(candidates)
@@ -2503,7 +2610,7 @@ index 94f56ae..34258c6 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +776,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +849,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -2541,7 +2648,7 @@ index 94f56ae..34258c6 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +814,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +887,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -2550,7 +2657,7 @@ index 94f56ae..34258c6 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +837,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +910,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -2641,7 +2748,7 @@ index 94f56ae..34258c6 100644
      return selected_info_hashes
  
  
-@@ -198,6 +930,56 @@ async def stream(
+@@ -198,6 +1003,56 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
@@ -2698,7 +2805,7 @@ index 94f56ae..34258c6 100644
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +1022,30 @@ async def stream(
+@@ -240,12 +1095,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -2730,7 +2837,7 @@ index 94f56ae..34258c6 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +1057,8 @@ async def stream(
+@@ -257,6 +1130,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -2739,7 +2846,7 @@ index 94f56ae..34258c6 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +1072,94 @@ async def stream(
+@@ -270,53 +1145,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -2869,7 +2976,7 @@ index 94f56ae..34258c6 100644
              is_empty=True,
          )
  
-@@ -329,7 +1172,7 @@ async def stream(
+@@ -329,7 +1245,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -2878,7 +2985,7 @@ index 94f56ae..34258c6 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1180,7 @@ async def stream(
+@@ -337,6 +1253,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -2886,7 +2993,7 @@ index 94f56ae..34258c6 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1192,7 @@ async def stream(
+@@ -348,7 +1265,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -2895,7 +3002,7 @@ index 94f56ae..34258c6 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1222,7 @@ async def stream(
+@@ -378,7 +1295,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -2904,7 +3011,7 @@ index 94f56ae..34258c6 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1237,40 @@ async def stream(
+@@ -393,8 +1310,40 @@ async def stream(
                  }
              )
  
@@ -2946,7 +3053,7 @@ index 94f56ae..34258c6 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1278,31 @@ async def stream(
+@@ -402,18 +1351,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -2980,7 +3087,7 @@ index 94f56ae..34258c6 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1318,164 @@ async def stream(
+@@ -429,21 +1391,164 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -3153,7 +3260,7 @@ index 94f56ae..34258c6 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1495,83 @@ async def stream(
+@@ -463,38 +1568,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -3247,7 +3354,7 @@ index 94f56ae..34258c6 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1592,10 @@ async def stream(
+@@ -515,6 +1665,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -3258,7 +3365,7 @@ index 94f56ae..34258c6 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1603,27 @@ async def stream(
+@@ -522,6 +1676,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -3286,7 +3393,7 @@ index 94f56ae..34258c6 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1635,257 @@ async def stream(
+@@ -533,12 +1708,257 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3298,9 +3405,7 @@ index 94f56ae..34258c6 100644
 +    ordered_entries = (
 +        cached_results if sort_mixed else cached_results + non_cached_results
 +    )
- 
--    if sort_mixed:
--        final_streams = cached_results
++
 +    if getattr(settings, "AUDIO_PROBE", True):
 +        try:
 +            from comet.services.audio_probe import get_probe_results_batch, format_audio_langs
@@ -3363,7 +3468,9 @@ index 94f56ae..34258c6 100644
 +        for s in direct_streams
 +        if not s.get("_is_pt")
 +    ]
-+
+ 
+-    if sort_mixed:
+-        final_streams = cached_results
 +    if settings.DEMOTE_CAM:
 +        if settings.PTBR_FIRST:
 +            pt_good = [entry for entry in ordered_entries if entry[1] and not entry[6]]
@@ -3548,7 +3655,7 @@ index 94f56ae..34258c6 100644
  
      has_results = len(final_streams) > 0
  
-@@ -546,3 +1893,12 @@ async def stream(
+@@ -546,3 +1966,12 @@ async def stream(
          {"streams": final_streams},
          is_empty=not has_results,
      )
@@ -8319,10 +8426,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..e972229
+index 0000000..30d2da4
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,4832 @@
+@@ -0,0 +1,4846 @@
 +import asyncio
 +import datetime
 +import json
@@ -8838,6 +8945,14 @@ index 0000000..e972229
 +                    "type": "series",
 +                    "id": "comet_dubready",
 +                    "name": "🔔 Chegou dublado",
++                    "extra": [
++                        {"name": "skip", "isRequired": False},
++                    ],
++                },
++                {
++                    "type": "series",
++                    "id": "comet_myweek",
++                    "name": "📅 Sua semana",
 +                    "extra": [
 +                        {"name": "skip", "isRequired": False},
 +                    ],
@@ -12230,6 +12345,12 @@ index 0000000..e972229
 +            )
 +            return []
 +
++    if catalog_id == "comet_myweek":
++        if media_type != "series" or kids or int((extra or {}).get("skip", 0) or 0) > 0:
++            return []
++        from comet.services.week_cards import catalog_items as _week_cards
++        return await _week_cards(base_url)
++
 +    if catalog_id in ("comet_orders", "comet_canon"):
 +        if media_type != "series" or int((extra or {}).get("skip", 0) or 0) > 0:
 +            return []
@@ -15311,10 +15432,10 @@ index 0000000..7654d97
 +    return to_jpeg(img)
 diff --git a/comet/services/live_art_svc.py b/comet/services/live_art_svc.py
 new file mode 100644
-index 0000000..7642611
+index 0000000..8e75154
 --- /dev/null
 +++ b/comet/services/live_art_svc.py
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,398 @@
 +"""Capas vivas: rotas que desenham imagens com informação do momento (motor em comet/services/live_art.py).
 +
 +Rotas (sem token; só desenham imagens públicas):
@@ -15345,6 +15466,7 @@ index 0000000..7642611
 +
 +CACHE_DIR = "/opt/comet/data/live_art"
 +_SEM = asyncio.Semaphore(2)
++_HERO_ASSETS: dict = {}  # imdb -> (quando, dados, fundo, logo, elenco): o caro de buscar fica 6 h
 +_ALLOWED = ("image.tmdb.org", "images.metahub.space", "episodes.metahub.space", "images.pluto.tv")
 +_IMG_HEADERS = {"Cache-Control": "public, max-age=900"}
 +_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
@@ -15556,16 +15678,25 @@ index 0000000..7642611
 +        return Response(hit, media_type="image/jpeg", headers=_IMG_HEADERS)
 +    from comet.services import live_art
 +    async with _SEM:
-+        async with aiohttp.ClientSession() as s:
-+            data = await _hero_info(mtype, imdb, s)
-+            if not data or not data["backdrop"]:
-+                raise HTTPException(404)
-+            back = await _fetch(data["backdrop"], s)
-+            if not back:
-+                raise HTTPException(404)
-+            logo = await _fetch(data["logo"], s) if data["logo"] else None
-+            photos = await asyncio.gather(*[_fetch(_tmdb_img(p, "w185"), s) if p else asyncio.sleep(0) for _, p in data["cast"]])
-+            cast = [(n, ph if isinstance(ph, bytes) else None) for (n, _), ph in zip(data["cast"], photos)]
++        assets = _HERO_ASSETS.get(f"{mtype}:{imdb}")
++        if not assets or time.time() - assets[0] > 6 * 3600:
++            async with aiohttp.ClientSession() as s:
++                data = await _hero_info(mtype, imdb, s)
++                if not data or not data["backdrop"]:
++                    raise HTTPException(404)
++                back = await _fetch(data["backdrop"], s)
++                if not back:
++                    raise HTTPException(404)
++                logo = await _fetch(data["logo"], s) if data["logo"] else None
++                photos = await asyncio.gather(*[_fetch(_tmdb_img(p, "w185"), s) if p else asyncio.sleep(0) for _, p in data["cast"]])
++                cast = [(n, ph if isinstance(ph, bytes) else None) for (n, _), ph in zip(data["cast"], photos)]
++            assets = (time.time(), data, back, logo, cast)
++            _HERO_ASSETS[f"{mtype}:{imdb}"] = assets
++            while len(_HERO_ASSETS) > 60:
++                _HERO_ASSETS.pop(next(iter(_HERO_ASSETS)))
++        _, data, back, logo, cast = assets
++        if "runtime" in data["info"]:
++            data["info"]["now"] = datetime.now()
 +        try:
 +            jpg = await asyncio.to_thread(live_art.hero_background, back, logo, data["info"], cast)
 +        except Exception as e:
@@ -15655,6 +15786,26 @@ index 0000000..7642611
 +        jpg = await asyncio.to_thread(live_art.episode_thumb, src, badges, r, bool(w))
 +    _cache_put(key, jpg)
 +    return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
++
++
++@router.get("/art/week/{key}.jpg", include_in_schema=False)
++async def art_week(key: str):
++    if not (len(key) == 8 and key.isdigit()):
++        raise HTTPException(404)
++    ck = f"week:{key}:{bucket(30)}"
++    hit = _cache_get(ck, 1800)
++    if hit:
++        return Response(hit, media_type="image/jpeg", headers=_IMG_HEADERS)
++    from comet.services import live_art
++    from comet.services.week_cards import day_card_data
++    data = await day_card_data(key)
++    if not data:
++        raise HTTPException(404)
++    day, dm, rows = data
++    async with _SEM:
++        jpg = await asyncio.to_thread(live_art.week_day_card, day, dm, rows)
++    _cache_put(ck, jpg)
++    return Response(jpg, media_type="image/jpeg", headers=_IMG_HEADERS)
 +
 +
 +@router.get("/art/live.jpg", include_in_schema=False)
@@ -16572,10 +16723,10 @@ index 0000000..2e678c2
 +    return []
 diff --git a/comet/services/marathon.py b/comet/services/marathon.py
 new file mode 100644
-index 0000000..10f22e3
+index 0000000..6e5f7b1
 --- /dev/null
 +++ b/comet/services/marathon.py
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,181 @@
 +"""Maratonas na ordem certa + anime só a história (sem filler).
 +
 +IDs (reaproveitam o prefixo `cometsaga:`, que o app do usuário já conhece, então não exige reinstalar):
@@ -16749,11 +16900,14 @@ index 0000000..10f22e3
 +        return order_meta(rest[2:])
 +    if rest.startswith("c-"):
 +        return await canon_meta(rest[2:])
++    if rest.startswith("w-"):
++        from comet.services.week_cards import week_meta
++        return await week_meta(rest[2:])
 +    return None
 +
 +
 +def is_marathon_id(meta_id: str) -> bool:
-+    return meta_id.startswith("cometsaga:o-") or meta_id.startswith("cometsaga:c-")
++    return meta_id.startswith(("cometsaga:o-", "cometsaga:c-", "cometsaga:w-"))
 diff --git a/comet/services/media_info.py b/comet/services/media_info.py
 new file mode 100644
 index 0000000..80d2408
@@ -20275,10 +20429,10 @@ index 0000000..0578131
 +    task.add_done_callback(_TASKS.discard)
 diff --git a/comet/services/row_warm.py b/comet/services/row_warm.py
 new file mode 100644
-index 0000000..b81c348
+index 0000000..07c85af
 --- /dev/null
 +++ b/comet/services/row_warm.py
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,417 @@
 +from __future__ import annotations
 +
 +import asyncio
@@ -20638,6 +20792,20 @@ index 0000000..b81c348
 +            continue
 +
 +        in_cache = await is_in_cache(target)
++        # pôster editorial (fundo da página do título): desenhado antes de o usuário abrir
++        try:
++            _imdb = str(target.get("imdb") or str(target.get("media_id") or "").split(":")[0])
++            if _imdb.startswith("tt"):
++                _ht = "movie" if target.get("type") == "movie" else "series"
++                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40)) as _hc:
++                    from comet.services.live_art_svc import bucket as _bk
++                    async with _hc.get(f"{base_url}/art/hero/{_ht}/{_imdb}.jpg?t={_bk(5)}") as _hr:
++                        await _hr.read()
++        except asyncio.CancelledError:
++            return
++        except Exception:
++            pass
++
 +        if in_cache:
 +            _stats["skipped_cache"] += 1
 +            logger.debug(f"🔥 row_warm {target['media_id']}: pulado (já em cache)")
@@ -24227,6 +24395,142 @@ index 0000000..88f1970
 +        ],
 +    },
 +}
+diff --git a/comet/services/week_cards.py b/comet/services/week_cards.py
+new file mode 100644
+index 0000000..709d6f1
+--- /dev/null
++++ b/comet/services/week_cards.py
+@@ -0,0 +1,130 @@
++"""📅 Sua semana em cartões: um cartão desenhado por dia (hoje + 6), com os episódios que estreiam.
++
++- Fileira `comet_myweek` (série, link pessoal): itens `cometsaga:w-AAAAMMDD` (prefixo já conhecido pelo app).
++- Capa: /art/week/AAAAMMDD.jpg (desenho do live_art.week_day_card).
++- Clique: meta com os episódios do dia como vídeos (ids "tt:S:E", tocam normalmente).
++A fonte é a própria fileira 📅 Estreias da semana (`comet_week`), cuja descrição é
++"📅 <Dia> DD/MM · T<S>E<E> · <status>".
++"""
++from __future__ import annotations
++
++import re
++import time
++from datetime import date, datetime, timedelta
++
++from comet.core.logger import logger
++
++_DAYS = ["SEGUNDA", "TERÇA", "QUARTA", "QUINTA", "SEXTA", "SÁBADO", "DOMINGO"]
++_DESC = re.compile(r"(\d{2})/(\d{2})\s*·\s*T(\d+)E(\d+)\s*·\s*(.+)")
++_CACHE: dict = {"ts": 0.0, "days": {}}
++
++
++async def _week_items() -> dict[str, list[dict]]:
++    """AAAAMMDD -> [{imdb, name, season, episode, dub, aired, poster}] (cache 30 min)."""
++    if time.time() - _CACHE["ts"] < 1800 and _CACHE["days"]:
++        return _CACHE["days"]
++    days: dict[str, list[dict]] = {}
++    try:
++        from comet.services.catalogs import get_catalog
++        metas = await get_catalog("series", "comet_week", extra={}, base_url="", kids=False) or []
++    except Exception as e:
++        logger.debug(f"semana: {e}")
++        metas = []
++    today = date.today()
++    for m in metas:
++        first = (m.get("description") or "").split("\n")[0]
++        mm = _DESC.search(first)
++        if not mm:
++            continue
++        d, mo, se, ep, status = mm.groups()
++        y = today.year
++        try:
++            dt = date(y, int(mo), int(d))
++            if (dt - today).days < -180:
++                dt = date(y + 1, int(mo), int(d))
++        except ValueError:
++            continue
++        days.setdefault(dt.strftime("%Y%m%d"), []).append({
++            "imdb": m.get("id"), "name": m.get("name") or "", "season": int(se), "episode": int(ep),
++            "dub": "dublado" in status.lower(), "aired": "não saiu" not in status.lower(),
++        })
++    _CACHE.update(ts=time.time(), days=days)
++    return days
++
++
++def _labels(d: date) -> tuple[str, str]:
++    today = date.today()
++    if d == today:
++        day = "HOJE"
++    elif d == today + timedelta(days=1):
++        day = "AMANHÃ"
++    else:
++        day = _DAYS[d.weekday()]
++    return day, d.strftime("%d/%m")
++
++
++async def catalog_items(base_url: str) -> list[dict]:
++    days = await _week_items()
++    out = []
++    today = date.today()
++    for k in range(7):
++        d = today + timedelta(days=k)
++        key = d.strftime("%Y%m%d")
++        items = days.get(key) or []
++        if not items:
++            continue
++        day, dm = _labels(d)
++        n_dub = sum(1 for i in items if i["dub"])
++        out.append({
++            "id": f"cometsaga:w-{key}",
++            "type": "series",
++            "name": f"{day.capitalize()} · {dm}",
++            "poster": f"{base_url}/art/week/{key}.jpg?t={int(time.time() // 1800)}",
++            "posterShape": "landscape",
++            "description": f"{len(items)} estreia(s), {n_dub} dublada(s):\n" + "\n".join(
++                f"• {i['name']} T{i['season']}E{i['episode']}" + (" 🇧🇷" if i["dub"] else "") for i in items[:8]),
++        })
++    return out
++
++
++async def day_card_data(key: str) -> tuple[str, str, list[dict]] | None:
++    try:
++        d = datetime.strptime(key, "%Y%m%d").date()
++    except ValueError:
++        return None
++    items = (await _week_items()).get(key) or []
++    day, dm = _labels(d)
++    rows = [{"title": f"{i['name']} T{i['season']}E{i['episode']}", "dub": i["dub"], "today": d == date.today()}
++            for i in items[:4]]
++    if len(items) > 4:
++        rows[-1]["title"] = f"+ {len(items) - 3} estreias"
++        rows[-1]["dub"] = False
++    return day, dm, rows
++
++
++async def week_meta(key: str) -> dict | None:
++    items = (await _week_items()).get(key)
++    if not items:
++        return None
++    d = datetime.strptime(key, "%Y%m%d").date()
++    day, dm = _labels(d)
++    videos = []
++    for n, i in enumerate(items, start=1):
++        videos.append({
++            "id": f"{i['imdb']}:{i['season']}:{i['episode']}",
++            "title": f"{i['name']} · T{i['season']}E{i['episode']}" + (" · 🇧🇷 dublado" if i["dub"] else ""),
++            "season": 1,
++            "episode": n,
++            "released": d.isoformat() + "T00:00:00.000Z",
++            "thumbnail": f"https://images.metahub.space/background/medium/{i['imdb']}/img",
++            "overview": "Já saiu" + (" e já tem dublado pronto" if i["dub"] else "") if i["aired"] else "Ainda não estreou",
++        })
++    return {
++        "id": f"cometsaga:w-{key}",
++        "type": "series",
++        "name": f"📅 {day.capitalize()} · {dm}",
++        "description": f"{len(items)} estreia(s) das suas séries e das populares neste dia.",
++        "background": f"https://images.metahub.space/background/medium/{items[0]['imdb']}/img",
++        "poster": f"https://images.metahub.space/poster/medium/{items[0]['imdb']}/img",
++        "videos": videos,
++    }
 diff --git a/comet/services/wishlist.py b/comet/services/wishlist.py
 new file mode 100644
 index 0000000..95339af

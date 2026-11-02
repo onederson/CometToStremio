@@ -32,7 +32,9 @@ A grande sacada: **no Stremio, a interface do addon são as imagens.** Capas, fu
 | 11 | **Lista de desejos + radar** (Telegram) | "Me avisa quando sair Duna 3 dublado" → baixa e avisa sozinho. Filme saiu do cinema e chegou dublado (sem CAM) → aviso |
 | 12 | **O Comet que aprende** | O que você assiste até o fim fortalece aquele tipo de release; o que abandona enfraquece. As fileiras se reordenam pelo seu uso. "Para hoje à noite" escolhe pelo dia e pela hora |
 
-**Já em andamento (02/11/2026, noite):**
+**Feito em 02/11/2026 (noite):** 1, 2, 3, 4, 5, 7, 8, 9, 10, 11 e a base (TorBox principal, compressão, uvloop, teto de fontes). **Falta:** 6 (corrigir o arquivo no caminho) e 12 (o Comet que aprende).
+
+**Como foi dividido:**
 - **5 (qualidade de verdade):** leitor completo de MKV/MP4, feito por um subagente.
 - **11 (lista de desejos + radar):** feito por outro subagente.
 - **Base:** play garantido, TorBox principal, `uvloop` e compressão, comigo.

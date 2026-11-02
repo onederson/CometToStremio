@@ -578,7 +578,9 @@ def _check_streams_payload(streams: list, min_count: int, require_pt: bool) -> t
         if not first_name.startswith("▶ Assistir"):
             return False, f"1º stream '{first_name[:20]}' não começa com '▶ Assistir'"
 
-    sub = streams[1:] if streams[0].get("name", "").startswith("▶ Assistir") else streams
+    # ▶ Assistir e os atalhos com curadoria (📱 Leve, 💎 Máxima qualidade, 🎧 Original) são cópias de propósito
+    _copies = ("▶ Assistir", "📱", "💎", "🎧")
+    sub = [s for s in streams if not s.get("name", "").startswith(_copies)]
     hashes = [get_stream_hash(s) for s in sub if get_stream_hash(s) is not None]
     dupes = [h for h, c in Counter(hashes).items() if c > 1]
     if dupes:
