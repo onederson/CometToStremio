@@ -171,7 +171,18 @@ start_flaresolverr() {
     >> "$FLARESOLVERR_OUT" 2>&1 < /dev/null &
 }
 
+# DuckDNS: mantém a71comet.duckdns.org apontando para o IP público da casa (ip= vazio = IP de quem pede).
+# Fora de casa (4G) o Stremio entra pela porta 7443 do roteador, encaminhada para o A71.
+update_duckdns() {
+  res=$(/system/bin/sh "$BASE/chroot.sh" -c 'curl -s -m 20 "https://www.duckdns.org/update?domains=a71comet&token=$(cat /etc/caddy/duckdns.token)&ip="' 2>/dev/null)
+  if [ "$res" != "OK" ]; then
+    log "DuckDNS: falha ao atualizar o IP (${res:-sem resposta})"
+  fi
+}
+
 log "watchdog iniciado (pid $$)"
+update_duckdns
+LAST_DUCKDNS=$(date +%s)
 LAST_SMOKE_RUN=$(date +%s)
 COMET_JUST_STARTED=1
 COMET_START_TIME=$(date +%s)
@@ -210,6 +221,10 @@ while true; do
   elif [ $((now - LAST_SMOKE_RUN)) -ge 3600 ]; then
     LAST_SMOKE_RUN=$now
     run_smoke
+  fi
+  if [ $((now - LAST_DUCKDNS)) -ge 600 ]; then
+    LAST_DUCKDNS=$now
+    update_duckdns
   fi
 
   cap_log "$OUT"
