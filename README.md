@@ -84,6 +84,11 @@
 - [x] Fileiras pessoais (Novos episódios, Recomendados) pelo histórico do Stremio
 - [x] Teste automático a cada hora com restauração da última versão boa
 - [x] TorBox como 2º debrid (cobre o 451 do RD), próximo episódio instantâneo, página /status
+- [x] Testes de regressão (`scripts/regress.ps1`) ligados no deploy
+- [x] Legenda traduzida quando só existe em inglês, legenda 🎓 PT+EN
+- [x] Madrugada "tudo instantâneo", fileira 🔔 Chegou dublado e aviso por ntfy (precisa de `NTFY_TOPIC`)
+- [x] Fonte que cai é pausada sozinha; áudio PT confirmado (🇧🇷✔ 🔊 PT · EN)
+- [x] 📺 TV ao vivo grátis (Pluto TV + canais abertos), busca que entende português, fillers de anime, 🎲 Sorteio do dia
 - [ ] Usuário: assinar o TorBox Essential (a conta grátis tem limite)
 - [ ] Usuário: reinstalar o Comet, esconder o Cinemeta (Addon Manager: Comet no topo e sem catálogos do Cinemeta), Trakt, OpenSubtitles v3/PRO, FenixFlix e FrostStream (Comet faz tudo)
 - [ ] Usuário reinstalar o Comet no Stremio (recurso de legendas), tirar o OpenSubtitles PRO e trocar a chave do SubDL

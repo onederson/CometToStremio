@@ -40,3 +40,24 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Concluido! Executando smoke test..."
 & "$PSScriptRoot\smoke.ps1" -Device $Device
+
+Write-Host "Executando testes de regressao..."
+& "$PSScriptRoot\regress.ps1" -Device $Device
+if ($LASTEXITCODE -ne 0) {
+  $failedStr = ""
+  try {
+    $lastJsonRaw = adb -s $Device shell "cat /data/debian/opt/comet/data/regress_last.json 2>/dev/null"
+    if ($lastJsonRaw) {
+      $lastData = $lastJsonRaw | ConvertFrom-Json
+      $failedList = @($lastData.tests | Where-Object { $_.status -eq 'FAIL' } | ForEach-Object { $_.name })
+      if ($failedList.Count -gt 0) {
+        $failedStr = $failedList -join ', '
+      }
+    }
+  } catch {}
+  if (-not $failedStr) {
+    $failedStr = "verifique os logs"
+  }
+  Write-Host "REGRESSÃO: $failedStr" -ForegroundColor Red
+  exit 1
+}
