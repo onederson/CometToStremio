@@ -18,7 +18,7 @@ Legenda:
 | 3 | **Tela inicial mais leve** | O app pede **65 fileiras** ao abrir | Escolher as ~25 que você usa (o resto vai para o Descobrir) → abre mais rápido e fica menos poluída |
 | 4 | **Capas prontas antes de você ver** | A capa montada leva 1 a 1,5 s na 1ª vez (o A71 desenha na hora) | A madrugada já desenha as capas das fileiras principais → **capas instantâneas** |
 | 5 | **1ª busca de um título mais rápida** | Hoje 5 a 45 s; os vilões são o Prowlarr (~16 s) e a consulta de cache no debrid de **1.000+ torrents** (~20 s) | Responder com as fontes rápidas e completar o resto em segundo plano; consultar o cache só dos ~300 melhores → **~5 a 8 s** na 1ª vez |
-| 6 | **Vigia externo** ✋ | O A71 não consegue avisar quando ele mesmo cai | Aviso no Telegram em até 10 min se o A71 sumir |
+| 6 | ~~Vigia externo~~ ✅ **feito em 02/11/2026** | O A71 não consegue avisar quando ele mesmo cai | Aviso no Telegram em até 10 min se o A71 sumir |
 
 ---
 

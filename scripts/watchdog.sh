@@ -180,8 +180,23 @@ update_duckdns() {
   fi
 }
 
+# Vigia externo (healthchecks.io): "estou vivo" a cada 5 min, só se o Comet responder de verdade.
+# Comet travado -> manda /fail na hora. A71 sem energia/internet -> o healthchecks avisa no Telegram
+# depois da tolerância (o próprio A71 não consegue avisar disso).
+ping_healthcheck() {
+  /system/bin/sh "$BASE/chroot.sh" -c '
+    URL=$(grep "^HEALTHCHECK_URL=" /opt/comet/.env | cut -d= -f2-)
+    [ -n "$URL" ] || exit 0
+    if curl -sf -m 15 -o /dev/null http://127.0.0.1:8000/manifest.json; then
+      curl -fsS -m 15 --retry 3 -o /dev/null "$URL"
+    else
+      curl -fsS -m 15 --retry 3 -o /dev/null "$URL/fail"
+    fi' > /dev/null 2>&1 || log "healthchecks: falha ao enviar o sinal"
+}
+
 log "watchdog iniciado (pid $$)"
 update_duckdns
+LAST_HEALTHCHECK=0
 LAST_DUCKDNS=$(date +%s)
 LAST_SMOKE_RUN=$(date +%s)
 COMET_JUST_STARTED=1
@@ -225,6 +240,11 @@ while true; do
   if [ $((now - LAST_DUCKDNS)) -ge 600 ]; then
     LAST_DUCKDNS=$now
     update_duckdns
+  fi
+  # 1º sinal só depois de o Comet ter tido tempo de subir (evita /fail falso no boot)
+  if [ $((now - COMET_START_TIME)) -ge 120 ] && [ $((now - LAST_HEALTHCHECK)) -ge 300 ]; then
+    LAST_HEALTHCHECK=$now
+    ping_healthcheck
   fi
 
   cap_log "$OUT"

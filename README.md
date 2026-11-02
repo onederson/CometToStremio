@@ -63,7 +63,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 | StremThru local | `127.0.0.1:8080` | ponte para Real-Debrid/TorBox |
 | Prowlarr + FlareSolverr | `127.0.0.1:9696` / `:8191` | indexadores BR |
 | AdGuard Home (Fase 1) | portas 53 e 3000 | DNS da casa (não mexer sem combinar) |
-| Watchdog | `/data/comet/watchdog.sh` | religa tudo, protege memória, smoke a cada hora, atualiza o DuckDNS a cada 10 min |
+| Watchdog | `/data/comet/watchdog.sh` | religa tudo, protege memória, smoke a cada hora, DuckDNS a cada 10 min, sinal para o healthchecks.io a cada 5 min |
 | Roteador Huawei WiFi BE3 | `192.168.3.1` | IP público; regra TCP/UDP 7443 → 192.168.3.44:7443 |
 
 ---
@@ -106,7 +106,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 - [x] Funciona fora de casa (4G) pela porta 7443
 - [x] Usuário reinstalou com o link **:7443** e testou no 4G (02/11/2026): funcionou
 - [ ] **Usuário (opcional):** reescrita no AdGuard `a71comet.duckdns.org` → `192.168.3.44` (deixa a casa um pouco mais rápida; não é obrigatória porque o roteador faz NAT loopback)
-- [ ] **Usuário (opcional):** vigia externo (healthchecks.io) para avisar se o A71 inteiro cair
+- [x] Vigia externo (healthchecks.io): avisa no Telegram se o A71 cair ou o Comet travar
 - [x] TorBox assinado pelo usuário (02/11/2026)
 - [ ] Achar mais addons de link direto (como FenixFlix/FrostStream) e somar em `DIRECT_ADDONS_URL`
 
