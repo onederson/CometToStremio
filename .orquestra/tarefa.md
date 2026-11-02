@@ -1,41 +1,41 @@
-# Tarefa Q: página do título mais esperta (fillers de anime, "previamente em", maratona sem trocar de dublado) + 🎓 legenda PT+EN + 🎲 sorteio do dia
+# Tarefa U: selos das capas maiores + selo do streaming (Netflix, Prime, Disney+…)
+
+## Pedido do usuário
+1. "A tag 'novo episódio' quase não dá pra ler": aumentar esse selo **e todos os outros** (`new`, `dub`, `top10`, e qualquer um futuro).
+2. Um selo novo dizendo **de qual streaming** é o título.
 
 ## Contexto
-- Comet no A71, chroot, `/opt/comet`. Meta: `comet/services/meta_ptbr.py` (já preenche `videos[].overview` em PT pelo TMDB). Streams: `comet/api/endpoints/stream.py` (`bingeGroup` em `_apply_clean_layout`: `comet|{service}|{res}|{lang_tag}|{group}`; o `▶ Assistir` usa `comet|best`). Legendas: `comet/services/subtitles.py`, tradução em `comet/services/sub_translate.py` (`ensure_auto_translated`, `translate_srt`). Catálogos: `comet/services/catalogs.py`.
-- **Comandos:** `.\scripts\a71.ps1 '<cmd>'` / `.\scripts\a71.ps1 -Chroot '<cmd>'`. Scripts com aspas: arquivo local + `adb push` pelo **PowerShell** + `mv`. LF.
-- **PROIBIDO:** imprimir chaves/tokens/URLs com token; imprimir respostas cruas do SubDL; commit; instalar pacotes; mexer no AdGuard ou no `.env`. Nada em segundo plano. Comandos com timeout ≤ 300 s.
+- Comet no A71, chroot, `/opt/comet`. Capas: `comet/services/artwork.py` (`_draw_badge`, `VALID_BADGES = {"new_ep","new","dub","top10"}`, fontes 11–20 px em `_get_font`; `_render_landscape_pillow`, `_render_poster_pillow`, cache de disco com chave `land:<backdrop>:<logo>:<badge>`), rota em `comet/api/endpoints/artwork.py`, URLs montadas em `comet/services/catalogs.py` e `comet/services/stremio_library.py` (`?b=`). Fontes: Liberation/DejaVu Bold.
+- TMDB tem `movie/<id>/watch/providers` e `tv/<id>/watch/providers` → `results.BR.flatrate[]` (`provider_id`, `provider_name`, `logo_path`, `display_priority`).
+- **Comandos:** `.\scripts\a71.ps1 '<cmd>'` / `.\scripts\a71.ps1 -Chroot '<cmd>'`. Scripts com aspas: arquivo local + `adb push` pelo **PowerShell** + `mv`. LF. O `grep` do Android não aceita `\|`: use `grep -E`.
+- **PROIBIDO:** imprimir chaves/tokens/URLs com token ou chave do TMDB; commit; instalar pacotes; mexer no AdGuard ou no `.env`. Nada em segundo plano. Comandos com timeout ≤ 300 s.
 
-## 1. Fillers de anime
-- Novo `comet/services/anime_filler.py`: para séries de anime (o meta já sabe que é anime: Kitsu/gênero animação + origem JP), busca a lista em `https://www.animefillerlist.com/shows/<slug>` (slug = nome em inglês minúsculo com hífens; tente o nome do Cinemeta e os aliases; cache 7 dias em SQLite `anime_filler(slug TEXT PRIMARY KEY, data TEXT, fetched_at INT)`; não achou = guarda vazio por 7 dias). Parse da tabela `table.EpisodeList`: nº absoluto do episódio + tipo (`Manga Canon`, `Mixed Canon/Filler`, `Filler`, `Anime Canon`).
-- No meta: episódio filler ganha no `title`/`name` o sufixo ` · 🟡 Filler` e misto ` · 🟠 Misto`; canon fica igual. Use o mapeamento absoluto que o Comet já tem (`episode_index.py::get_absolute_episode`) para casar S:E com o nº absoluto.
-- Verifique com One Piece `tt0388629` e Naruto Shippuden `tt0988824`.
+## Comportamento
+### 1. Selos maiores (todos)
+- Tamanho proporcional à imagem, não fixo: altura do selo ≈ **11 % da altura** na capa deitada e ≈ **7 % da altura** no pôster; fonte bold ≈ 62 % da altura do selo; margem interna proporcional; cantos arredondados; leve sombra/contorno escuro para ler sobre fundo claro. Na prática, numa capa deitada de ~780×439 o texto fica com ~30 px (hoje 13).
+- O `top10` cresce na mesma proporção.
+- Toda função que desenha selo usa um helper único (`_badge_metrics(canvas, is_poster)`), para selos futuros já nascerem grandes.
+- Mude a versão da chave de cache (ex.: prefixo `v2:`) para as capas antigas serem refeitas.
 
-## 2. "Previamente em…" no 1º episódio de cada temporada
-No meta, para o episódio 1 de cada temporada ≥ 2, acrescente ao final do `overview` um parágrafo `\n\n📺 Na temporada anterior: <resumo>` montado com as sinopses PT dos 3 últimos episódios da temporada anterior (frases inteiras, máx. 400 caracteres). Só se houver sinopse.
-
-## 3. Maratona sem trocar de dublado
-- O `▶ Assistir` hoje tem `bingeGroup = "comet|best"`. Troque para `comet|best|<lang_tag>` (`pt` se for dublado, senão o idioma), para o próximo episódio automático do Stremio continuar no dublado.
-- Nos demais streams o formato atual fica.
-
-## 4. 🎓 Legenda PT+EN (para aprender inglês)
-Em `search_subtitles`, quando houver uma inglesa compatível com o arquivo, acrescente 1 entrada `{"id": "dual-<provider>-<id>", "url": f"{base_url}/subs/dual/<provider>/<id>/<S>/<E>.srt", "lang": "pob"}` **depois** das PT-BR. Rota nova `/subs/dual/...`: pega a inglesa, traduz com `ensure_auto_translated` (mesmo cache) e monta um SRT em que cada fala tem a linha PT em cima e a inglesa embaixo em itálico (`<i>...</i>`), tempos da inglesa. Arquivo PT (dublado) continua devolvendo lista vazia.
-
-## 5. 🎲 Sorteio do dia
-Catálogo novo (filme e série, links pessoal e Kids, logo depois do Top 10 no manifest): id `comet_lucky`, nome `🎲 Sorteio do dia`, 10 itens escolhidos ao acaso **mas fixos no dia** (semente = data + tipo) entre: dublados prontos (`⚡ Pronto dublado`) com nota TMDB ≥ 7 que **não** estão no histórico do Stremio (`stremio_library`). Kids: só da lista Kids. Mesma capa deitada das outras fileiras.
+### 2. Selo do streaming
+- Novo parâmetro de capa `?p=<provider_id>` (pode vir junto com `?b=`). Desenhe o **logo oficial do serviço** (`https://image.tmdb.org/t/p/w92<logo_path>`, cache em disco) num quadrado arredondado no **canto superior direito** (o selo de texto fica no canto superior esquerdo, como hoje), tamanho ≈ 16 % da altura na capa deitada / 10 % no pôster.
+- Escolha do provedor: `results.BR.flatrate`, o de menor `display_priority`, preferindo esta lista quando presente: Netflix (8), Amazon Prime Video (119), Disney Plus (337), Max (1899/384), Apple TV+ (350), Paramount Plus (531), Globoplay (307), Crunchyroll (283), Star Plus (619). Sem `flatrate` no BR → sem selo.
+- Cache SQLite `watch_provider(media_key TEXT PRIMARY KEY, provider_id INT, logo_path TEXT, fetched_at INT)` (7 dias; "nenhum" também é guardado), consulta em paralelo com semáforo 8.
+- Onde aplicar: em **todas** as fileiras que já usam capa montada (`/art/...`), filmes e séries. Nas fileiras de um serviço específico (ex.: `⭐ Originais Netflix`), use o provedor da fileira sem consultar.
+- Itens cujo pôster é o original do TMDB (sem `/art/`): passe a usar `/art/poster/...` com `?p=` só se a fileira já monta capas; não troque o formato das fileiras que hoje usam pôster puro.
+- Kids: igual.
 
 ## Fora de escopo
-Tudo o resto.
+Tudo o resto (ordem das fileiras, textos, metas).
 
 ## Aplicar
-`py_compile`; reinicie (polling `curl` no `manifest`); `git -C /opt/comet add -N` dos novos; regenere o patch (`git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp`, `chmod 644`, `adb pull` para `comet-patches/ptbr-first.patch`; zero `\r`; apague temporários).
+`py_compile`; reinicie (`.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`, polling `curl` no `manifest`); regenere o patch (`git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp`, `chmod 644`, `adb pull` para `comet-patches/ptbr-first.patch`; zero `\r`; apague temporários).
 
-## Verificação (link pessoal, sem URL/token)
-1. Meta One Piece: 5 episódios filler conhecidos (ex.: absolutos 54–61 são filler) com `🟡 Filler`; 3 canon sem sufixo. Naruto Shippuden idem. Uma série não-anime (`tt0903747`) sem nenhum sufixo.
-2. Meta Breaking Bad S02E01: overview com `📺 Na temporada anterior:`.
-3. `bingeGroup` do `▶ Assistir` de Ben 10 `tt2293002:1:2` = `comet|best|pt`.
-4. Legendas de um filme com arquivo inglês: entrada `dual-`; baixe: falas com 2 linhas (PT + `<i>EN</i>`), mesma contagem da inglesa.
-5. `comet_lucky` filme e série: 10 itens, igual em 2 pedidos seguidos; nenhum do histórico.
-6. Manifest: ordem dos catálogos antigos preservada (só o novo depois do Top 10).
-7. `.\scripts\smoke.ps1` → `SMOKE OK`; `.\scripts\regress.ps1` → `REGRESS OK`. Acrescente em `scripts/regress.py` os testes `filler` (One Piece tem ≥ 1 `🟡 Filler`), `bingegroup` e `sorteio` e rode a suíte com eles.
+## Verificação (link pessoal, sem imprimir URL/token)
+1. Baixe 4 capas reais (uma de `🆕 Novos episódios` com `new_ep`, uma de `🆕 Lançamentos`, uma do Top 10, uma de `⭐ Originais Netflix`) para `/data/local/tmp/` e copie com `adb pull` para `downloads/capas-teste/` no PC (pasta já ignorada? se não, não versione). Informe as dimensões e a altura do selo em px antes/depois.
+2. Mostre quantos itens de 3 fileiras ganharam `?p=` e quais provedores apareceram (nomes).
+3. Capa sem provedor no BR: sem selo de streaming e sem erro.
+4. Tempo da 1ª carga de uma fileira com 40 itens (≤ 5 s) e da 2ª (cache).
+5. `.\scripts\smoke.ps1` → `SMOKE OK`; `.\scripts\regress.ps1` → `REGRESS OK` (acrescente ao teste `capa`: a capa de um item com `?p=` responde `image/*`).
 
-Responda em no máximo 8 linhas: arquivos alterados e resultado da verificação.
+Responda em no máximo 6 linhas: arquivos alterados e resultado da verificação.

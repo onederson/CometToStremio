@@ -471,7 +471,36 @@ def t_capa(token: str, public_base: str) -> tuple[str, str]:
     if size <= 5120:
         return "FAIL", f"tamanho {size} bytes (<= 5 KB)"
 
-    return "PASS", f"{size} bytes ({ct})"
+    # Verifica capa de um item com ?p=
+    p_url = None
+    with get_client() as client:
+        r_orig = client.get(f"/{token}/catalog/series/comet_orig_netflix.json")
+        if r_orig.status_code == 200:
+            metas_orig = r_orig.json().get("metas", [])
+            for m in metas_orig:
+                p_cand = m.get("poster", "")
+                if "p=" in p_cand:
+                    p_url = p_cand
+                    break
+
+    if not p_url:
+        sep = "&" if "?" in poster_url else "?"
+        p_url = f"{poster_url}{sep}p=8"
+
+    rw_p_url = rewrite_url(p_url, public_base, LOCAL_BASE_URL)
+    with httpx.Client(follow_redirects=True, timeout=25.0) as img_client:
+        r_p_img = img_client.get(rw_p_url)
+
+    if r_p_img.status_code != 200:
+        return "FAIL", f"status imagem com ?p= {r_p_img.status_code}"
+    ct_p = r_p_img.headers.get("content-type", "").lower()
+    if not ct_p.startswith("image/"):
+        return "FAIL", f"content-type com ?p= '{ct_p}' não é image/*"
+    size_p = len(r_p_img.content)
+    if size_p <= 5120:
+        return "FAIL", f"tamanho com ?p= {size_p} bytes (<= 5 KB)"
+
+    return "PASS", f"{size} bytes / p: {size_p} bytes ({ct})"
 
 
 def t_busca(token: str) -> tuple[str, str]:
@@ -772,28 +801,202 @@ def t_busca_inteligente(token: str) -> tuple[str, str]:
     assert p4 is None, "parse batman deve retornar None"
 
     # 2. Busca HTTP real: terror de zumbi filme >= 10 e o 1º resultado tem gênero terror no meta
-    q_enc = urllib.parse.quote("terror de zumbi")
-    with get_client(timeout=25.0) as client:
+    with get_client(timeout=35.0) as client:
+        q_enc = urllib.parse.quote("terror de zumbi")
         r = client.get(f"/{token}/catalog/movie/comet_search/search={q_enc}.json")
         if r.status_code != 200:
-            return "FAIL", f"status {r.status_code}"
+            return "FAIL", f"terror de zumbi: status {r.status_code}"
         metas = r.json().get("metas", [])
         if len(metas) < 10:
-            return "FAIL", f"retornou apenas {len(metas)} itens (< 10)"
+            return "FAIL", f"terror de zumbi: retornou apenas {len(metas)} itens (< 10)"
 
         first_id = metas[0].get("id")
         if not first_id:
-            return "FAIL", "1º resultado sem id"
+            return "FAIL", "terror de zumbi: 1º resultado sem id"
 
         r_meta = client.get(f"/{token}/meta/movie/{first_id}.json")
         if r_meta.status_code != 200:
-            return "FAIL", f"meta status {r_meta.status_code}"
+            return "FAIL", f"terror de zumbi: meta status {r_meta.status_code}"
         meta_data = r_meta.json().get("meta", {})
         genres = [g.lower() for g in meta_data.get("genres", [])]
         if not any("terror" in g or "horror" in g for g in genres):
-            return "FAIL", f"1º resultado ({meta_data.get('name')}) sem gênero terror: {genres}"
+            return "FAIL", f"terror de zumbi: 1º resultado ({meta_data.get('name')}) sem gênero terror: {genres}"
 
-    return "PASS", f"unidade OK, {len(metas)} filmes de terror de zumbi, 1º '{meta_data.get('name')}' ({', '.join(genres)})"
+        # 3. Caso 1: série anime do pirata que estica -> One Piece nos 3 primeiros
+        q1 = urllib.parse.quote("anime do pirata que estica")
+        r1 = client.get(f"/{token}/catalog/series/comet_search/search={q1}.json")
+        if r1.status_code != 200:
+            return "FAIL", f"anime do pirata que estica: status {r1.status_code}"
+        metas1 = r1.json().get("metas", [])
+        top3_names = [m.get("name", "").lower() for m in metas1[:3]]
+        if not any("one piece" in n for n in top3_names):
+            return "FAIL", f"anime do pirata que estica: One Piece não está no top 3: {[m.get('name') for m in metas1[:3]]}"
+
+        # 4. Caso 2: série serie de medicos -> >= 2 de {Grey's Anatomy, House, The Good Doctor, New Amsterdam, Plantão Médico/ER, Scrubs} no top 8
+        q2 = urllib.parse.quote("serie de medicos")
+        r2 = client.get(f"/{token}/catalog/series/comet_search/search={q2}.json")
+        if r2.status_code != 200:
+            return "FAIL", f"serie de medicos: status {r2.status_code}"
+        metas2 = r2.json().get("metas", [])
+        med_targets = ["grey's anatomy", "greys anatomy", "house", "dr. house", "the good doctor", "new amsterdam", "plantão médico", "plantao medico", "er", "scrubs"]
+        med_matches = [m.get("name") for m in metas2[:8] if any(t in m.get("name", "").lower() for t in med_targets)]
+        if len(med_matches) < 2:
+            return "FAIL", f"serie de medicos: menos de 2 médicos no top 8 ({len(med_matches)} achados: {med_matches})"
+
+        # 5. Caso 3: filme filme de advogado -> >= 10 resultados
+        q3 = urllib.parse.quote("filme de advogado")
+        r3 = client.get(f"/{token}/catalog/movie/comet_search/search={q3}.json")
+        if r3.status_code != 200:
+            return "FAIL", f"filme de advogado: status {r3.status_code}"
+        metas3 = r3.json().get("metas", [])
+        if len(metas3) < 10:
+            return "FAIL", f"filme de advogado: retornou apenas {len(metas3)} itens (< 10)"
+
+        # 6. Caso 4: série desenho do cachorro detetive -> Scooby-Doo nos 8 primeiros
+        q4 = urllib.parse.quote("desenho do cachorro detetive")
+        r4 = client.get(f"/{token}/catalog/series/comet_search/search={q4}.json")
+        if r4.status_code != 200:
+            return "FAIL", f"desenho do cachorro detetive: status {r4.status_code}"
+        metas4 = r4.json().get("metas", [])
+        top8_names = [m.get("name", "").lower() for m in metas4[:8]]
+        if not any("scooby" in n for n in top8_names):
+            return "FAIL", f"desenho do cachorro detetive: Scooby-Doo não está no top 8: {[m.get('name') for m in metas4[:8]]}"
+
+    return "PASS", f"unidade OK, terror zumbi, pirata que estica (One Piece), médicos (>=2), advogado ({len(metas3)}), cachorro detetive (Scooby) OK"
+
+
+def t_busca_bateria(token: str) -> tuple[str, str]:
+    if not token:
+        return "FAIL", "PERSONAL_LINK_TOKEN não encontrado no .env"
+
+    import unicodedata
+
+    def _is_non_latin(text: str) -> bool:
+        if not text:
+            return False
+        has_letter = False
+        for ch in text:
+            try:
+                name = unicodedata.name(ch, "")
+            except Exception:
+                continue
+            if "LETTER" in name or "IDEOGRAPH" in name:
+                has_letter = True
+                if "LATIN" in name:
+                    return False
+        return has_letter
+
+    tests = [
+        # 10 com Esperado
+        {
+            "type": "series", "query": "serie de bombeiros",
+            "check": lambda metas: any(t in m.get("name", "").lower() for m in metas[:8] for t in ("9-1-1", "chicago fire", "station 19", "estação 19")),
+            "desc": "9-1-1, Chicago Fire ou Station 19 no top 8"
+        },
+        {
+            "type": "series", "query": "anime de cozinha",
+            "check": lambda metas: any(t in m.get("name", "").lower() for m in metas[:8] for t in ("food wars", "shokugeki")),
+            "desc": "Food Wars no top 8"
+        },
+        {
+            "type": "series", "query": "serie de cozinha competicao",
+            "check": lambda metas: any(t in m.get("name", "").lower() for m in metas[:8] for t in ("masterchef", "hell's kitchen", "top chef")),
+            "desc": "MasterChef, Hell's Kitchen ou Top Chef no top 8"
+        },
+        {
+            "type": "movie", "query": "filme de cachorro que fala",
+            "check": lambda metas: sum(1 for m in metas[:8] if any(t in m.get("name", "").lower() for t in ("scooby", "bolt", "peabody", "ruim pra cachorro", "como cães e gatos", "como caes e gatos", "beethoven", "homeward bound", "a caminho de casa", "supercão", "supercao", "up: altas", "gato de botas", "flow"))) >= 3,
+            "desc": "≥ 3 cachorros falantes no top 8"
+        },
+        {
+            "type": "movie", "query": "filme espacial com astronauta perdido",
+            "check": lambda metas: any(t in m.get("name", "").lower() for m in metas[:8] for t in ("perdido em marte", "the martian")),
+            "desc": "Perdido em Marte no top 8"
+        },
+        {
+            "type": "movie", "query": "terror em hospital abandonado",
+            "check": lambda metas: len(metas) >= 8,
+            "desc": "≥ 8 filmes de terror"
+        },
+        {
+            "type": "series", "query": "serie de policia brasileira",
+            "check": lambda metas: len(metas) >= 4,
+            "desc": "≥ 4 séries policiais brasileiras"
+        },
+        {
+            "type": "series", "query": "anime de ninja",
+            "check": lambda metas: len(metas) >= 8 and not any(_is_non_latin(m.get("name", "")) for m in metas[:8]) and ("naruto" in metas[0].get("name", "").lower() if metas else False),
+            "desc": "sem não-latino no top 8 e Naruto no topo"
+        },
+        {
+            "type": "movie", "query": "filme do cara que acorda sempre no mesmo dia",
+            "check": lambda metas: any(t in m.get("name", "").lower() for m in metas[:8] for t in ("feitiço do tempo", "feitico do tempo", "groundhog day", "no limite do amanhã", "no limite do amanha", "edge of tomorrow", "a morte te dá parabéns", "a morte te da parabens")),
+            "desc": "Feitiço do Tempo / No Limite do Amanhã / A Morte Te Dá Parabéns no top 8"
+        },
+        {
+            "type": "movie", "query": "filme de dinossauro",
+            "check": lambda metas: any("jurassic" in m.get("name", "").lower() for m in metas[:3]),
+            "desc": "Jurassic Park/World no top 3"
+        },
+        # 22 Não Podem Piorar
+        {"type": "movie", "query": "filme de viagem no tempo", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de assalto a banco", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "fim do mundo", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "serie de vampiro adolescente", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de boxe", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "anime de futebol", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de natal para familia", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "serie de advogado", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme sobre a segunda guerra", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "desenho de super heroi", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "serie de zumbi", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "comedia romantica dos anos 2000", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de tubarao assassino", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de corrida de carro", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "anime de robo gigante", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "anime do pirata que estica", "check": lambda m: any("one piece" in x.get("name", "").lower() for x in m[:3]), "desc": "One Piece no top 3"},
+        {"type": "series", "query": "serie de medicos", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "filme de advogado", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "desenho do cachorro detetive", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "movie", "query": "batman", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+        {"type": "series", "query": "one piece", "check": lambda m: any("one piece" in x.get("name", "").lower() for x in m[:3]), "desc": "One Piece no top 3"},
+        {"type": "movie", "query": "filme com Tom Hanks dos anos 90", "check": lambda m: len(m) >= 8, "desc": "≥ 8 itens"},
+    ]
+
+    passed = 0
+    failed_cases = []
+    with get_client(timeout=35.0) as client:
+        for item in tests:
+            t = item["type"]
+            q = item["query"]
+            q_enc = urllib.parse.quote(q)
+            try:
+                r = client.get(f"/{token}/catalog/{t}/comet_search/search={q_enc}.json")
+                if r.status_code == 200:
+                    metas = r.json().get("metas", [])
+                    if item["check"](metas):
+                        passed += 1
+                        continue
+                    else:
+                        top6 = [m.get("name") for m in metas[:6]]
+                        failed_cases.append(f"{q}: {len(metas)} itens, top6: {top6} (esperado: {item['desc']})")
+                else:
+                    failed_cases.append(f"{q}: status {r.status_code}")
+            except Exception as e:
+                failed_cases.append(f"{q}: {type(e).__name__}")
+
+    total = len(tests)
+    rate = passed / total
+    detail = f"{passed}/{total} frases passaram ({rate*100:.0f}%)"
+    if failed_cases:
+        detail += f" | falhas: {'; '.join(failed_cases[:3])}"
+
+    if rate >= 0.90:
+        return "PASS", detail
+    elif rate >= 0.75:
+        return "WARN", detail
+    else:
+        return "FAIL", detail
 
 
 def t_livetv(token: str) -> tuple[str, str]:
@@ -813,6 +1016,28 @@ def t_livetv(token: str) -> tuple[str, str]:
             return "FAIL", "nenhum canal Pluto encontrado no catálogo"
         first_id = pluto_items[0]["id"]
 
+        bh = pluto_items[0].get("behaviorHints") or {}
+        if bh.get("defaultVideoId") != first_id:
+            return "FAIL", f"defaultVideoId no catálogo {bh.get('defaultVideoId')} != {first_id}"
+
+        r_meta = client.get(f"/{token}/meta/tv/{first_id}.json")
+        if r_meta.status_code != 200:
+            return "FAIL", f"meta status {r_meta.status_code}"
+        meta_data = r_meta.json().get("meta") or {}
+        m_bh = meta_data.get("behaviorHints") or {}
+        if m_bh.get("defaultVideoId") != first_id:
+            return "FAIL", f"meta behaviorHints.defaultVideoId {m_bh.get('defaultVideoId')} != {first_id}"
+        m_videos = meta_data.get("videos") or []
+        if not m_videos or m_videos[0].get("id") != first_id:
+            return "FAIL", f"meta videos[0].id inválido: {m_videos}"
+
+        r_home = client.get(f"/{token}/catalog/tv/comet_livehome.json")
+        if r_home.status_code != 200:
+            return "FAIL", f"comet_livehome status {r_home.status_code}"
+        home_metas = r_home.json().get("metas", [])
+        if len(home_metas) < 15:
+            return "FAIL", f"comet_livehome retornou {len(home_metas)} canais (< 15)"
+
         r_stream = client.get(f"/{token}/stream/tv/{first_id}.json")
         if r_stream.status_code != 200:
             return "FAIL", f"stream status {r_stream.status_code}"
@@ -830,7 +1055,7 @@ def t_livetv(token: str) -> tuple[str, str]:
         if not r_hls.text.startswith("#EXTM3U"):
             return "FAIL", f"corpo não começa com #EXTM3U: {r_hls.text[:40]}"
 
-    return "PASS", f"{len(metas)} canais, stream Pluto HLS OK"
+    return "PASS", f"{len(metas)} canais, livehome {len(home_metas)} canais, stream Pluto HLS OK"
 
 
 def t_play(token: str, public_base: str, shared_state: dict) -> tuple[str, str]:
@@ -958,6 +1183,70 @@ def t_sorteio(token: str) -> tuple[str, str]:
     return "PASS", "10 filmes e 10 séries sorteados com sucesso"
 
 
+def t_saga(token: str, public_base: str) -> tuple[str, str]:
+    with get_client(timeout=30.0) as client:
+        # 1. Meta Harry Potter
+        r_hp = client.get(f"/{token}/meta/series/cometsaga:1241.json")
+        if r_hp.status_code != 200:
+            return "FAIL", f"meta HP status {r_hp.status_code}"
+        meta_hp = r_hp.json().get("meta") or {}
+        v_hp = meta_hp.get("videos") or []
+        if len(v_hp) != 8:
+            return "FAIL", f"HP videos: {len(v_hp)} != 8"
+        if v_hp[0].get("id") != "tt0241527":
+            return "FAIL", f"HP 1º vídeo id '{v_hp[0].get('id')}' != tt0241527"
+
+        # 2. Meta Star Wars e Velozes
+        r_sw = client.get(f"/{token}/meta/series/cometsaga:10.json")
+        if r_sw.status_code != 200:
+            return "FAIL", f"meta Star Wars status {r_sw.status_code}"
+        v_sw = (r_sw.json().get("meta") or {}).get("videos") or []
+        if len(v_sw) != 9:
+            return "FAIL", f"Star Wars videos: {len(v_sw)} != 9"
+
+        r_fast = client.get(f"/{token}/meta/series/cometsaga:9485.json")
+        if r_fast.status_code != 200:
+            return "FAIL", f"meta Velozes status {r_fast.status_code}"
+        v_fast = (r_fast.json().get("meta") or {}).get("videos") or []
+        if len(v_fast) < 10:
+            return "FAIL", f"Velozes videos: {len(v_fast)} (< 10)"
+
+        # 3. Stream series vs movie tt0241527
+        r_movie = client.get(f"/{token}/stream/movie/tt0241527.json")
+        r_series = client.get(f"/{token}/stream/series/tt0241527.json")
+        if r_series.status_code != 200:
+            return "FAIL", f"stream series status {r_series.status_code}"
+        if r_movie.status_code != 200:
+            return "FAIL", f"stream movie status {r_movie.status_code}"
+
+        streams_movie = r_movie.json().get("streams") or []
+        streams_series = r_series.json().get("streams") or []
+        if len(streams_series) != len(streams_movie):
+            return "FAIL", f"qtd streams series ({len(streams_series)}) != movie ({len(streams_movie)})"
+        if streams_series and streams_movie:
+            if streams_series[0].get("name") != streams_movie[0].get("name"):
+                return "FAIL", f"1º stream series '{streams_series[0].get('name')}' != movie '{streams_movie[0].get('name')}'"
+
+        # ▶ Assistir abre no player
+        assistir_stream = next((s for s in streams_series if s.get("name", "").startswith("▶ Assistir")), None)
+        if assistir_stream and assistir_stream.get("url"):
+            play_url = rewrite_url(assistir_stream["url"], public_base, LOCAL_BASE_URL)
+            headers = {
+                "User-Agent": "ExoPlayerLib/2.19.1",
+                "Range": "bytes=0-1023",
+            }
+            try:
+                with httpx.Client(follow_redirects=True, timeout=20.0) as play_client:
+                    r_play = play_client.get(play_url, headers=headers)
+                if r_play.status_code not in (200, 206):
+                    return "FAIL", f"play Assistir status {r_play.status_code}"
+            except Exception as e:
+                return "FAIL", f"erro play Assistir: {e}"
+
+    return "PASS", f"HP: 8 vids, SW: 9 vids, Velozes: {len(v_fast)} vids, streams match ({len(streams_series)})"
+
+
+
 # =====================================================================
 # Runner Principal
 # =====================================================================
@@ -1065,9 +1354,11 @@ def main():
         ("configure", lambda: t_configure()),
         ("livetv", lambda: t_livetv(token)),
         ("busca_inteligente", lambda: t_busca_inteligente(token)),
+        ("busca_bateria", lambda: t_busca_bateria(token)),
         ("filler", lambda: t_filler(token)),
         ("bingegroup", lambda: t_bingegroup(token)),
         ("sorteio", lambda: t_sorteio(token)),
+        ("saga", lambda: t_saga(token, public_base)),
     ]
 
     selected_parallel = [

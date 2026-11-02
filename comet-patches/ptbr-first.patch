@@ -84,10 +84,10 @@ index f7832d1..11064ca 100644
  for stremio_router in stremio_routers:
 diff --git a/comet/api/endpoints/artwork.py b/comet/api/endpoints/artwork.py
 new file mode 100644
-index 0000000..3dd9acd
+index 0000000..360a93c
 --- /dev/null
 +++ b/comet/api/endpoints/artwork.py
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,98 @@
 +from fastapi import APIRouter, HTTPException, Response
 +
 +from comet.services.artwork import (
@@ -105,9 +105,9 @@ index 0000000..3dd9acd
 +    summary="Top 10 Artwork",
 +    description="Returns composite top 10 artwork with rank number.",
 +)
-+async def get_art_top10(rank: int, poster_file: str):
++async def get_art_top10(rank: int, poster_file: str, p: int | None = None):
 +    try:
-+        data = await render_top10(rank, poster_file)
++        data = await render_top10(rank, poster_file, provider_id=p)
 +        return Response(
 +            content=data,
 +            media_type="image/jpeg",
@@ -124,11 +124,13 @@ index 0000000..3dd9acd
 +    summary="Poster Artwork with Badge",
 +    description="Returns portrait poster artwork with optional badge.",
 +)
-+async def get_art_poster(poster_file: str, b: str | None = None):
++async def get_art_poster(
++    poster_file: str, b: str | None = None, p: int | None = None
++):
 +    if b and b not in ("new_ep", "new", "dub", "top10"):
 +        raise HTTPException(status_code=404, detail="Invalid badge")
 +    try:
-+        data = await render_poster(poster_file, badge=b)
++        data = await render_poster(poster_file, badge=b, provider_id=p)
 +        return Response(
 +            content=data,
 +            media_type="image/jpeg",
@@ -145,11 +147,13 @@ index 0000000..3dd9acd
 +    summary="Landscape Artwork without Logo",
 +    description="Returns landscape artwork with dark gradients.",
 +)
-+async def get_art_land_no_logo(backdrop_file: str, b: str | None = None):
++async def get_art_land_no_logo(
++    backdrop_file: str, b: str | None = None, p: int | None = None
++):
 +    if b and b not in ("new_ep", "new", "dub", "top10"):
 +        raise HTTPException(status_code=404, detail="Invalid badge")
 +    try:
-+        data = await render_landscape(backdrop_file, None, badge=b)
++        data = await render_landscape(backdrop_file, None, badge=b, provider_id=p)
 +        return Response(
 +            content=data,
 +            media_type="image/jpeg",
@@ -166,11 +170,13 @@ index 0000000..3dd9acd
 +    summary="Landscape Artwork with Logo",
 +    description="Returns landscape artwork with logo and dark gradients.",
 +)
-+async def get_art_land_with_logo(backdrop_file: str, logo_file: str, b: str | None = None):
++async def get_art_land_with_logo(
++    backdrop_file: str, logo_file: str, b: str | None = None, p: int | None = None
++):
 +    if b and b not in ("new_ep", "new", "dub", "top10"):
 +        raise HTTPException(status_code=404, detail="Invalid badge")
 +    try:
-+        data = await render_landscape(backdrop_file, logo_file, badge=b)
++        data = await render_landscape(backdrop_file, logo_file, badge=b, provider_id=p)
 +        return Response(
 +            content=data,
 +            media_type="image/jpeg",
@@ -182,7 +188,7 @@ index 0000000..3dd9acd
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..b358f39
+index 0000000..28b4be2
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
 @@ -0,0 +1,94 @@
@@ -258,7 +264,7 @@ index 0000000..b358f39
 +        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or f"{request.url.scheme}://{request.url.netloc}").rstrip("/")
 +        kids = is_kids_request(b64config)
 +        is_personal = bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
-+        if id == "comet_livetv" and b64config is not None and not is_personal and not kids:
++        if id in ("comet_livetv", "comet_livehome") and b64config is not None and not is_personal and not kids:
 +            return JSONResponse(
 +                content={"metas": []},
 +                headers={"Cache-Control": "public, max-age=600"},
@@ -281,7 +287,7 @@ index 0000000..b358f39
 +            headers={"Cache-Control": "public, max-age=600"},
 +        )
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
-index bce0fec..36fffe8 100644
+index bce0fec..ae04666 100644
 --- a/comet/api/endpoints/manifest.py
 +++ b/comet/api/endpoints/manifest.py
 @@ -1,8 +1,12 @@
@@ -298,7 +304,7 @@ index bce0fec..36fffe8 100644
  from comet.utils.cache import CachePolicies, cached_json_response
  
  router = APIRouter()
-@@ -29,16 +33,60 @@ async def manifest(request: Request, b64config: str | None = None):
+@@ -29,16 +33,61 @@ async def manifest(request: Request, b64config: str | None = None):
          "resources": [
              {
                  "name": "stream",
@@ -326,6 +332,7 @@ index bce0fec..36fffe8 100644
 +
 +    kids = is_kids_request(b64config)
 +    is_personal = bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
++    meta_prefixes = ["tt", "cometlive:", "cometsaga:"] if getattr(settings, "LIVE_TV", True) else ["tt", "cometsaga:"]
 +    if kids:
 +        base_manifest["id"] = f"{settings.ADDON_ID}.kids"
 +        base_manifest["catalogs"] = build_manifest_catalogs(kids=True)
@@ -334,7 +341,7 @@ index bce0fec..36fffe8 100644
 +            {
 +                "name": "meta",
 +                "types": ["movie", "series", "tv"] if getattr(settings, "LIVE_TV", True) else ["movie", "series"],
-+                "idPrefixes": ["tt", "cometlive:"] if getattr(settings, "LIVE_TV", True) else ["tt"],
++                "idPrefixes": meta_prefixes,
 +            }
 +        )
 +    elif settings.CATALOGS_ENABLED:
@@ -344,7 +351,7 @@ index bce0fec..36fffe8 100644
 +            {
 +                "name": "meta",
 +                "types": ["movie", "series", "tv"] if getattr(settings, "LIVE_TV", True) else ["movie", "series"],
-+                "idPrefixes": ["tt", "cometlive:"] if getattr(settings, "LIVE_TV", True) else ["tt"],
++                "idPrefixes": meta_prefixes,
 +            }
 +        )
 +
@@ -362,7 +369,7 @@ index bce0fec..36fffe8 100644
      config = config_check(b64config, strict_b64config=True)
      if not config:
          base_manifest["name"] = "❌ | Comet"
-@@ -47,7 +95,10 @@ async def manifest(request: Request, b64config: str | None = None):
+@@ -47,7 +96,10 @@ async def manifest(request: Request, b64config: str | None = None):
          )
          return base_manifest
  
@@ -376,10 +383,10 @@ index bce0fec..36fffe8 100644
          request,
 diff --git a/comet/api/endpoints/meta.py b/comet/api/endpoints/meta.py
 new file mode 100644
-index 0000000..06db903
+index 0000000..fb65bf6
 --- /dev/null
 +++ b/comet/api/endpoints/meta.py
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,89 @@
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
 +
@@ -417,6 +424,30 @@ index 0000000..06db903
 +            headers={"Cache-Control": "public, max-age=1800"},
 +        )
 +
++    if clean_id.startswith("cometsaga:"):
++        try:
++            if b64config:
++                config = config_check(b64config)
++                if not config:
++                    return JSONResponse(
++                        content={"meta": None},
++                        headers={"Cache-Control": "public, max-age=21600"},
++                    )
++            from comet.services.catalogs import get_saga_meta
++            meta = await get_saga_meta(clean_id)
++            return JSONResponse(
++                content={"meta": meta},
++                headers={"Cache-Control": "public, max-age=86400"},
++            )
++        except Exception as e:
++            logger.warning(
++                f"Error handling saga meta request for {type}/{id}: {type(e).__name__}"
++            )
++            return JSONResponse(
++                content={"meta": None},
++                headers={"Cache-Control": "public, max-age=86400"},
++            )
++
 +    if type not in ("movie", "series") or not clean_id.startswith("tt"):
 +        return JSONResponse(
 +            content={"meta": None},
@@ -446,7 +477,7 @@ index 0000000..06db903
 +            headers={"Cache-Control": "public, max-age=21600"},
 +        )
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
-index 35b1121..9982d1d 100644
+index 35b1121..533ebd5 100644
 --- a/comet/api/endpoints/playback.py
 +++ b/comet/api/endpoints/playback.py
 @@ -1,6 +1,10 @@
@@ -810,7 +841,16 @@ index 35b1121..9982d1d 100644
  ):
      config = config_check(b64config, strict_b64config=True)
      if not config:
-@@ -232,6 +549,24 @@ async def playback(
+@@ -227,11 +544,33 @@ async def playback(
+         debrid_service, debrid_api_key = get_debrid_credentials(
+             config, parsed_service_index
+         )
++        if media_type == "series" and media_id and media_id.startswith("tt") and ":" not in media_id:
++            media_type = "movie"
++            season = None
++            episode = None
+     except ValueError:
+         return build_status_video_response(
              ["BAD_REQUEST"],
              default_key="BAD_REQUEST",
          )
@@ -835,7 +875,7 @@ index 35b1121..9982d1d 100644
      account_key_hash = build_account_key_hash(debrid_api_key)
  
      session = await http_client_manager.get_session()
-@@ -331,10 +666,29 @@ async def playback(
+@@ -331,10 +670,29 @@ async def playback(
                      default_key="BAD_REQUEST",
                  )
  
@@ -868,7 +908,7 @@ index 35b1121..9982d1d 100644
  
          debrid = get_debrid(
              session,
-@@ -345,22 +699,133 @@ async def playback(
+@@ -345,22 +703,133 @@ async def playback(
              ip if not should_proxy else "",
          )
          try:
@@ -1523,7 +1563,7 @@ index 0000000..c954512
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..c411032 100644
+index 94f56ae..c22fb1b 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -1590,7 +1630,7 @@ index 94f56ae..c411032 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +102,533 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +102,535 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -1838,13 +1878,15 @@ index 94f56ae..c411032 100644
 +                        c_tok,
 +                        client_ip,
 +                    )
++                    c_season = _norm_se(cand.get("season"))
++                    c_episode = _norm_se(cand.get("episode"))
 +                    c_link = await c_deb.generate_download_link(
 +                        c_hash,
 +                        c_fidx,
 +                        c_name,
 +                        cand.get("torrent_title", ""),
-+                        cand.get("season"),
-+                        cand.get("episode"),
++                        c_season,
++                        c_episode,
 +                        cand.get("sources") or [],
 +                        aliases or {},
 +                    )
@@ -1862,7 +1904,7 @@ index 94f56ae..c411032 100644
 +                        else:
 +                            record_probe_failure()
 +                except Exception as cand_err:
-+                    logger.debug(f"audio_probe candidato extra {c_hash[:8]} falhou: {cand_err}")
++                    logger.log("PLAYBACK", f"audio_probe candidato extra {c_hash[:8]} falhou: {str(cand_err)[:80]}")
 +    except DebridLinkGenerationError as err:
 +        if (
 +            err.payload.get("status_code") == 451
@@ -2124,7 +2166,7 @@ index 94f56ae..c411032 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +686,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +688,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -2162,7 +2204,7 @@ index 94f56ae..c411032 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +724,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +726,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -2171,7 +2213,7 @@ index 94f56ae..c411032 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +747,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +749,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -2262,7 +2304,7 @@ index 94f56ae..c411032 100644
      return selected_info_hashes
  
  
-@@ -198,6 +840,14 @@ async def stream(
+@@ -198,6 +842,18 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
@@ -2274,10 +2316,14 @@ index 94f56ae..c411032 100644
 +            request, {"streams": live_streams}, is_empty=(len(live_streams) == 0)
 +        )
 +
++    if media_type == "series" and clean_id.startswith("tt") and ":" not in clean_id:
++        media_type = "movie"
++        media_id = clean_id
++
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +890,30 @@ async def stream(
+@@ -240,12 +896,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -2309,7 +2355,7 @@ index 94f56ae..c411032 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +925,8 @@ async def stream(
+@@ -257,6 +931,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -2318,7 +2364,7 @@ index 94f56ae..c411032 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +940,94 @@ async def stream(
+@@ -270,53 +946,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -2448,7 +2494,7 @@ index 94f56ae..c411032 100644
              is_empty=True,
          )
  
-@@ -329,7 +1040,7 @@ async def stream(
+@@ -329,7 +1046,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -2457,7 +2503,7 @@ index 94f56ae..c411032 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1048,7 @@ async def stream(
+@@ -337,6 +1054,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -2465,7 +2511,7 @@ index 94f56ae..c411032 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1060,7 @@ async def stream(
+@@ -348,7 +1066,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -2474,7 +2520,7 @@ index 94f56ae..c411032 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1090,7 @@ async def stream(
+@@ -378,7 +1096,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -2483,7 +2529,7 @@ index 94f56ae..c411032 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1105,40 @@ async def stream(
+@@ -393,8 +1111,40 @@ async def stream(
                  }
              )
  
@@ -2525,7 +2571,7 @@ index 94f56ae..c411032 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1146,31 @@ async def stream(
+@@ -402,18 +1152,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -2559,7 +2605,7 @@ index 94f56ae..c411032 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1186,171 @@ async def stream(
+@@ -429,21 +1192,171 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -2739,7 +2785,7 @@ index 94f56ae..c411032 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1370,83 @@ async def stream(
+@@ -463,38 +1376,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -2833,7 +2879,7 @@ index 94f56ae..c411032 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1467,10 @@ async def stream(
+@@ -515,6 +1473,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -2844,7 +2890,7 @@ index 94f56ae..c411032 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1478,27 @@ async def stream(
+@@ -522,6 +1484,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -2872,7 +2918,7 @@ index 94f56ae..c411032 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1510,218 @@ async def stream(
+@@ -533,12 +1516,218 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3097,10 +3143,10 @@ index 94f56ae..c411032 100644
  
 diff --git a/comet/api/endpoints/subtitles.py b/comet/api/endpoints/subtitles.py
 new file mode 100644
-index 0000000..8a72622
+index 0000000..ffdd3da
 --- /dev/null
 +++ b/comet/api/endpoints/subtitles.py
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,446 @@
 +import asyncio
 +import hashlib
 +import os
@@ -3159,6 +3205,11 @@ index 0000000..8a72622
 +    extra: str | None = None,
 +    b64config: str | None = None,
 +):
++    clean_id = media_id.removesuffix(".json")
++    if media_type == "series" and clean_id.startswith("tt") and ":" not in clean_id:
++        media_type = "movie"
++        media_id = clean_id
++
 +    if not settings.SUBTITLES_ENABLED:
 +        return JSONResponse(
 +            content={"subtitles": []},
@@ -6078,10 +6129,10 @@ index 0000000..fd74bc2
 +    return {}
 diff --git a/comet/services/artwork.py b/comet/services/artwork.py
 new file mode 100644
-index 0000000..5a09f5b
+index 0000000..4e0304a
 --- /dev/null
 +++ b/comet/services/artwork.py
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,733 @@
 +import asyncio
 +import hashlib
 +import io
@@ -6090,8 +6141,9 @@ index 0000000..5a09f5b
 +import time
 +
 +import aiohttp
-+from PIL import Image, ImageDraw, ImageFont
++from PIL import Image, ImageChops, ImageDraw, ImageFont
 +
++from comet.core.database import database
 +from comet.core.logger import logger
 +
 +FILENAME_REGEX = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|png)$")
@@ -6108,6 +6160,32 @@ index 0000000..5a09f5b
 +]
 +
 +VALID_BADGES = {"new_ep", "new", "dub", "top10"}
++
++_WP_TABLE_INIT = False
++_WP_TABLE_LOCK = asyncio.Lock()
++_WP_MEM_CACHE: dict[str, tuple[float, int | None, str | None]] = {}
++_WP_TTL = 7 * 86400  # 7 days
++_WP_SEMAPHORE = asyncio.Semaphore(8)
++
++_PROVIDER_LOGO_BYTES_CACHE: dict[int, bytes] = {}
++_PROVIDER_LOGO_PATH_CACHE: dict[int, str] = {}
++
++KNOWN_PROVIDER_LOGOS = {
++    8: "/rK1KljqmbvO9HQa1PBFLILWah72.png",     # Netflix
++    119: "/gMZdpavHmxFNnLpMHwVxfqeux2g.png",   # Amazon Prime Video
++    337: "/5eZ872CghnHFLB1j8grszbrx0dx.png",   # Disney Plus
++    1899: "/skypuy7SXuugIQeYg0IglmzoKaS.png",  # Max
++    384: "/skypuy7SXuugIQeYg0IglmzoKaS.png",   # Max (HBO Max)
++    350: "/9icYBfYFcwgCbky5VdGUIKJ4C5i.png",   # Apple TV+
++    531: "/pkx3klJlwW5JdtaulvDx6hDNtch.png",   # Paramount Plus
++    307: "/9A6Oxd3F7iXm7mds7CxYOBicojs.png",   # Globoplay
++    283: "/uFL3c4Cq8M6WoLymlC5Y8bmGytV.png",   # Crunchyroll
++    619: "/bPqd9nypuR4iA3o2a93K5lK4Fh8.png",   # Star Plus
++}
++
++PREFERRED_PROVIDERS = [8, 119, 337, 1899, 384, 350, 531, 307, 283, 619]
++PREFERRED_ORDER = {pid: i for i, pid in enumerate(PREFERRED_PROVIDERS)}
++PREFERRED_ORDER[384] = PREFERRED_ORDER[1899]
 +
 +
 +class ArtworkNotFound(Exception):
@@ -6214,27 +6292,56 @@ index 0000000..5a09f5b
 +        raise ArtworkNotFound(f"Download failed for {url}: {e}")
 +
 +
++def _badge_metrics(canvas: Image.Image, is_poster: bool = False) -> dict:
++    W, H = canvas.size
++    badge_h = max(24, round(H * (0.07 if is_poster else 0.11)))
++    font_size = max(12, round(badge_h * 0.62))
++    pad_y = max(4, round((badge_h - font_size) / 2))
++    pad_x = max(8, round(badge_h * 0.35))
++    radius = max(4, round(badge_h * 0.16))
++    margin = max(10, round(H * (0.025 if is_poster else 0.035)))
++    top10_s = round(badge_h * 1.85)
++    provider_size = max(24, round(H * (0.10 if is_poster else 0.16)))
++    return {
++        "badge_h": badge_h,
++        "font_size": font_size,
++        "pad_x": pad_x,
++        "pad_y": pad_y,
++        "radius": radius,
++        "margin": margin,
++        "top10_s": top10_s,
++        "provider_size": provider_size,
++    }
++
++
 +def _draw_badge(canvas: Image.Image, badge: str | None, is_poster: bool = False):
 +    if not badge or badge not in VALID_BADGES:
 +        return
 +    W, H = canvas.size
++    metrics = _badge_metrics(canvas, is_poster=is_poster)
 +    draw = ImageDraw.Draw(canvas)
++
 +    if badge == "top10":
-+        S = 48 if is_poster else 46
-+        x0 = W - 14 - S
-+        y0 = 14
++        S = metrics["top10_s"]
++        margin = metrics["margin"]
++        radius = max(4, round(S * 0.12))
++        x0 = margin
++        y0 = margin
 +        x1 = x0 + S
 +        y1 = y0 + S
-+        draw.rounded_rectangle([x0, y0, x1, y1], radius=4, fill="#E50914")
-+        font_top = _get_font(11)
-+        font_10 = _get_font(20 if is_poster else 19)
++
++        draw.rounded_rectangle([x0 + 1, y0 + 1, x1 + 1, y1 + 1], radius=radius, fill=(0, 0, 0, 90))
++        draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill="#E50914", outline=(0, 0, 0, 100), width=1)
++
++        font_top = _get_font(round(S * 0.25))
++        font_10 = _get_font(round(S * 0.44))
 +        bb_top = draw.textbbox((0, 0), "TOP", font=font_top)
 +        w_top = bb_top[2] - bb_top[0]
 +        h_top = bb_top[3] - bb_top[1]
 +        bb_10 = draw.textbbox((0, 0), "10", font=font_10)
 +        w_10 = bb_10[2] - bb_10[0]
 +        h_10 = bb_10[3] - bb_10[1]
-+        gap = 1
++        gap = max(1, round(S * 0.02))
 +        total_h = h_top + gap + h_10
 +        start_y = y0 + (S - total_h) / 2
 +        tx_top = x0 + (S - w_top) / 2 - bb_top[0]
@@ -6250,31 +6357,269 @@ index 0000000..5a09f5b
 +            "dub": ("DUBLADO", "#1565C0"),
 +        }
 +        text, bg = text_map[badge]
-+        font = _get_font(15 if is_poster else 13)
++        font = _get_font(metrics["font_size"])
 +        bb = draw.textbbox((0, 0), text, font=font)
 +        tw = bb[2] - bb[0]
 +        th = bb[3] - bb[1]
-+        pad_x = 12 if is_poster else 9
-+        pad_y = 6 if is_poster else 5
++        pad_x = metrics["pad_x"]
 +        bw = tw + 2 * pad_x
-+        bh = th + 2 * pad_y
++        bh = metrics["badge_h"]
++        margin = metrics["margin"]
++        radius = metrics["radius"]
++
 +        if is_poster:
 +            x0 = (W - bw) // 2
-+            y1 = H - 14
++            y1 = H - margin
 +            y0 = y1 - bh
 +            x1 = x0 + bw
 +        else:
-+            x0 = 14
-+            y0 = 14
++            x0 = margin
++            y0 = margin
 +            x1 = x0 + bw
 +            y1 = y0 + bh
-+        draw.rounded_rectangle([x0, y0, x1, y1], radius=4, fill=bg)
++
++        draw.rounded_rectangle([x0 + 1, y0 + 1, x1 + 1, y1 + 1], radius=radius, fill=(0, 0, 0, 90))
++        draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=bg, outline=(0, 0, 0, 100), width=1)
 +        tx = x0 + (bw - tw) / 2 - bb[0]
 +        ty = y0 + (bh - th) / 2 - bb[1]
 +        draw.text((tx, ty), text, font=font, fill="#FFFFFF")
 +
 +
-+def _render_top10_pillow(rank: int, poster_bytes: bytes) -> bytes:
++def _draw_provider_logo(canvas: Image.Image, logo_bytes: bytes, is_poster: bool = False):
++    try:
++        W, H = canvas.size
++        metrics = _badge_metrics(canvas, is_poster=is_poster)
++        S = metrics["provider_size"]
++        margin = metrics["margin"]
++        x1 = W - margin
++        x0 = x1 - S
++        y0 = margin
++        y1 = y0 + S
++        radius = max(4, round(S * 0.18))
++
++        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
++        logo_resized = logo.resize((S, S), Image.Resampling.LANCZOS)
++
++        mask = Image.new("L", (S, S), 0)
++        mask_draw = ImageDraw.Draw(mask)
++        mask_draw.rounded_rectangle([0, 0, S, S], radius=radius, fill=255)
++
++        if "A" in logo_resized.getbands():
++            alpha = logo_resized.split()[3]
++            mask = ImageChops.multiply(mask, alpha)
++
++        draw = ImageDraw.Draw(canvas)
++        draw.rounded_rectangle([x0 + 1, y0 + 1, x1 + 1, y1 + 1], radius=radius, fill=(0, 0, 0, 90))
++        canvas.paste(logo_resized, (x0, y0), mask=mask)
++        draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, outline=(0, 0, 0, 80), width=1)
++    except Exception as e:
++        logger.warning(f"Error drawing provider logo: {e}")
++
++
++async def ensure_watch_provider_table():
++    global _WP_TABLE_INIT
++    if _WP_TABLE_INIT:
++        return
++    async with _WP_TABLE_LOCK:
++        if not _WP_TABLE_INIT:
++            try:
++                await database.execute(
++                    """
++                    CREATE TABLE IF NOT EXISTS watch_provider (
++                        media_key TEXT PRIMARY KEY,
++                        provider_id INT,
++                        logo_path TEXT,
++                        fetched_at INT
++                    )
++                    """
++                )
++                _WP_TABLE_INIT = True
++            except Exception as e:
++                logger.warning(f"Error ensuring watch_provider table: {e}")
++
++
++def pick_best_provider(flatrate_list: list[dict]) -> tuple[int | None, str | None]:
++    if not flatrate_list:
++        return None, None
++    valid = [p for p in flatrate_list if isinstance(p, dict) and p.get("provider_id")]
++    if not valid:
++        return None, None
++
++    def _sort_key(p):
++        pid = p.get("provider_id")
++        disp = p.get("display_priority")
++        if disp is None:
++            disp = 999
++        if pid in PREFERRED_ORDER:
++            return (0, PREFERRED_ORDER[pid], disp)
++        return (1, disp, 0)
++
++    best = min(valid, key=_sort_key)
++    pid = best.get("provider_id")
++    logo = best.get("logo_path")
++    return pid, logo
++
++
++async def preload_watch_providers(media_keys: list[str]):
++    if not media_keys:
++        return
++    await ensure_watch_provider_table()
++    now = time.time()
++    needed = [k for k in media_keys if k not in _WP_MEM_CACHE or (now - _WP_MEM_CACHE[k][0] >= _WP_TTL)]
++    if not needed:
++        return
++    try:
++        placeholders = ",".join(f":k{i}" for i in range(len(needed)))
++        params = {f"k{i}": k for i, k in enumerate(needed)}
++        rows = await database.fetch_all(
++            f"SELECT media_key, provider_id, logo_path, fetched_at FROM watch_provider WHERE media_key IN ({placeholders})",
++            params,
++        )
++        for r in rows:
++            mk = r["media_key"]
++            pid = r["provider_id"]
++            lp = r["logo_path"]
++            fa = float(r["fetched_at"] or 0)
++            if now - fa < _WP_TTL:
++                _WP_MEM_CACHE[mk] = (fa, pid, lp)
++                if pid and lp:
++                    _PROVIDER_LOGO_PATH_CACHE[pid] = lp
++    except Exception as e:
++        logger.warning(f"Error preloading watch_providers: {e}")
++
++
++async def resolve_single_watch_provider(
++    tmdb_type: str,
++    tmdb_id: int,
++    session: aiohttp.ClientSession,
++    tmdb,
++) -> int | None:
++    media_key = f"{tmdb_type}:{tmdb_id}"
++    now = time.time()
++    if media_key in _WP_MEM_CACHE:
++        fa, pid, lp = _WP_MEM_CACHE[media_key]
++        if now - fa < _WP_TTL:
++            return pid
++
++    async with _WP_SEMAPHORE:
++        if media_key in _WP_MEM_CACHE:
++            fa, pid, lp = _WP_MEM_CACHE[media_key]
++            if now - fa < _WP_TTL:
++                return pid
++
++        pid = None
++        lp = None
++        try:
++            data = await tmdb._get_json(
++                f"{tmdb_type}/{tmdb_id}/watch/providers",
++                f"watch providers {tmdb_type} {tmdb_id}",
++            )
++            flatrate = []
++            if isinstance(data, dict):
++                flatrate = data.get("results", {}).get("BR", {}).get("flatrate", [])
++            pid, lp = pick_best_provider(flatrate)
++        except Exception as e:
++            logger.warning(f"Failed to fetch watch providers for {media_key}: {e}")
++
++        _WP_MEM_CACHE[media_key] = (now, pid, lp)
++        if pid and lp:
++            _PROVIDER_LOGO_PATH_CACHE[pid] = lp
++
++        try:
++            await database.execute(
++                """
++                INSERT OR REPLACE INTO watch_provider (media_key, provider_id, logo_path, fetched_at)
++                VALUES (:mk, :pid, :lp, :fa)
++                """,
++                {"mk": media_key, "pid": pid, "lp": lp, "fa": int(now)},
++            )
++        except Exception as e:
++            logger.warning(f"Failed to save watch_provider for {media_key}: {e}")
++
++        return pid
++
++
++async def resolve_watch_providers(
++    media_type: str,
++    items: list[dict],
++    session: aiohttp.ClientSession,
++    tmdb,
++) -> dict[int, int | None]:
++    if not items:
++        return {}
++    tmdb_type = "movie" if media_type == "movie" else "tv"
++    valid_items = [it for it in items if isinstance(it, dict) and it.get("id")]
++    if not valid_items:
++        return {}
++
++    media_keys = [f"{tmdb_type}:{it['id']}" for it in valid_items]
++    await preload_watch_providers(media_keys)
++
++    tasks = [
++        resolve_single_watch_provider(tmdb_type, it["id"], session, tmdb)
++        for it in valid_items
++    ]
++    results = await asyncio.gather(*tasks, return_exceptions=True)
++
++    out = {}
++    for it, res in zip(valid_items, results):
++        tid = it["id"]
++        out[tid] = res if isinstance(res, int) else None
++    return out
++
++
++async def get_provider_logo_bytes(provider_id: int) -> bytes | None:
++    if not provider_id:
++        return None
++    if provider_id in _PROVIDER_LOGO_BYTES_CACHE:
++        return _PROVIDER_LOGO_BYTES_CACHE[provider_id]
++
++    logo_path = _PROVIDER_LOGO_PATH_CACHE.get(provider_id)
++    if not logo_path and provider_id in KNOWN_PROVIDER_LOGOS:
++        logo_path = KNOWN_PROVIDER_LOGOS[provider_id]
++
++    if not logo_path:
++        await ensure_watch_provider_table()
++        try:
++            row = await database.fetch_one(
++                "SELECT logo_path FROM watch_provider WHERE provider_id = :pid AND logo_path IS NOT NULL AND logo_path != '' LIMIT 1",
++                {"pid": provider_id},
++            )
++            if row and row["logo_path"]:
++                logo_path = row["logo_path"]
++        except Exception:
++            pass
++
++    if not logo_path:
++        return None
++
++    _PROVIDER_LOGO_PATH_CACHE[provider_id] = logo_path
++    clean_logo = logo_path.lstrip("/")
++
++    cache_path = os.path.join(CACHE_DIR, f"prov_{clean_logo}")
++    if os.path.exists(cache_path):
++        try:
++            with open(cache_path, "rb") as f:
++                data = f.read()
++                if len(data) > 0:
++                    _PROVIDER_LOGO_BYTES_CACHE[provider_id] = data
++                    return data
++        except Exception:
++            pass
++
++    try:
++        data = await _fetch_tmdb_image("w92", clean_logo)
++        _save_atomic(cache_path, data)
++        _PROVIDER_LOGO_BYTES_CACHE[provider_id] = data
++        return data
++    except Exception as e:
++        logger.warning(f"Could not fetch TMDB provider logo for {provider_id} ({clean_logo}): {e}")
++        return None
++
++
++def _render_top10_pillow(
++    rank: int, poster_bytes: bytes, provider_logo_bytes: bytes | None = None
++) -> bytes:
 +    """Tile 500x500 estilo Netflix: numero grande contornado a esquerda, poster a direita
 +    sobrepondo um pouco o numero."""
 +    from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -6317,13 +6662,19 @@ index 0000000..5a09f5b
 +    canvas = Image.composite(Image.new("RGB", (W, H), "#000000"), canvas, shadow)
 +    canvas.paste(poster, (px, py))
 +
++    if provider_logo_bytes:
++        _draw_provider_logo(canvas, provider_logo_bytes, is_poster=False)
++
 +    out = io.BytesIO()
 +    canvas.save(out, "JPEG", quality=85, optimize=True)
 +    return out.getvalue()
 +
 +
 +def _render_landscape_pillow(
-+    backdrop_bytes: bytes, logo_bytes: bytes | None, badge: str | None = None
++    backdrop_bytes: bytes,
++    logo_bytes: bytes | None,
++    badge: str | None = None,
++    provider_logo_bytes: bytes | None = None,
 +) -> bytes:
 +    W, H = 780, 439
 +    bg = Image.open(io.BytesIO(backdrop_bytes)).convert("RGBA")
@@ -6350,12 +6701,19 @@ index 0000000..5a09f5b
 +    if badge:
 +        _draw_badge(canvas, badge, is_poster=False)
 +
++    if provider_logo_bytes:
++        _draw_provider_logo(canvas, provider_logo_bytes, is_poster=False)
++
 +    out = io.BytesIO()
 +    canvas.convert("RGB").save(out, format="JPEG", quality=85, optimize=True)
 +    return out.getvalue()
 +
 +
-+def _render_poster_pillow(poster_bytes: bytes, badge: str | None = None) -> bytes:
++def _render_poster_pillow(
++    poster_bytes: bytes,
++    badge: str | None = None,
++    provider_logo_bytes: bytes | None = None,
++) -> bytes:
 +    W, H = 500, 750
 +    bg = Image.open(io.BytesIO(poster_bytes)).convert("RGBA")
 +    scale = max(W / bg.width, H / bg.height)
@@ -6369,12 +6727,17 @@ index 0000000..5a09f5b
 +    if badge:
 +        _draw_badge(canvas, badge, is_poster=True)
 +
++    if provider_logo_bytes:
++        _draw_provider_logo(canvas, provider_logo_bytes, is_poster=True)
++
 +    out = io.BytesIO()
 +    canvas.convert("RGB").save(out, format="JPEG", quality=85, optimize=True)
 +    return out.getvalue()
 +
 +
-+async def render_top10(rank: int, poster_file: str) -> bytes:
++async def render_top10(
++    rank: int, poster_file: str, provider_id: int | None = None
++) -> bytes:
 +    if rank < 1 or rank > 10:
 +        raise ArtworkNotFound(f"Invalid rank: {rank}")
 +
@@ -6382,7 +6745,7 @@ index 0000000..5a09f5b
 +    if not FILENAME_REGEX.match(clean_poster):
 +        raise ArtworkNotFound(f"Invalid poster filename: {poster_file}")
 +
-+    cache_key = f"top10v2:{rank}:{clean_poster}"
++    cache_key = f"top10v3:{rank}:{clean_poster}:{provider_id or ''}"
 +    cache_path = os.path.join(
 +        CACHE_DIR, f"{hashlib.sha1(cache_key.encode('utf-8')).hexdigest()}.jpg"
 +    )
@@ -6403,14 +6766,18 @@ index 0000000..5a09f5b
 +                pass
 +
 +        poster_bytes = await _fetch_tmdb_image("w500", clean_poster)
-+        jpeg_bytes = await asyncio.to_thread(_render_top10_pillow, rank, poster_bytes)
++        provider_logo_bytes = await get_provider_logo_bytes(provider_id) if provider_id else None
++        jpeg_bytes = await asyncio.to_thread(_render_top10_pillow, rank, poster_bytes, provider_logo_bytes)
 +        _save_atomic(cache_path, jpeg_bytes)
 +        _cleanup_cache_if_needed()
 +        return jpeg_bytes
 +
 +
 +async def render_landscape(
-+    backdrop_file: str, logo_file: str | None = None, badge: str | None = None
++    backdrop_file: str,
++    logo_file: str | None = None,
++    badge: str | None = None,
++    provider_id: int | None = None,
 +) -> bytes:
 +    clean_backdrop = backdrop_file.lstrip("/")
 +    if not FILENAME_REGEX.match(clean_backdrop):
@@ -6424,11 +6791,7 @@ index 0000000..5a09f5b
 +    if clean_badge and clean_badge not in VALID_BADGES:
 +        raise ArtworkNotFound(f"Invalid badge: {badge}")
 +
-+    cache_key = (
-+        f"land:{clean_backdrop}:{clean_logo or ''}:{clean_badge}"
-+        if clean_badge
-+        else f"land:{clean_backdrop}:{clean_logo or ''}"
-+    )
++    cache_key = f"landv2:{clean_backdrop}:{clean_logo or ''}:{clean_badge or ''}:{provider_id or ''}"
 +    cache_path = os.path.join(
 +        CACHE_DIR, f"{hashlib.sha1(cache_key.encode('utf-8')).hexdigest()}.jpg"
 +    )
@@ -6453,15 +6816,20 @@ index 0000000..5a09f5b
 +        if clean_logo:
 +            logo_bytes = await _fetch_tmdb_image("w500", clean_logo)
 +
++        provider_logo_bytes = await get_provider_logo_bytes(provider_id) if provider_id else None
 +        jpeg_bytes = await asyncio.to_thread(
-+            _render_landscape_pillow, backdrop_bytes, logo_bytes, clean_badge
++            _render_landscape_pillow, backdrop_bytes, logo_bytes, clean_badge, provider_logo_bytes
 +        )
 +        _save_atomic(cache_path, jpeg_bytes)
 +        _cleanup_cache_if_needed()
 +        return jpeg_bytes
 +
 +
-+async def render_poster(poster_file: str, badge: str | None = None) -> bytes:
++async def render_poster(
++    poster_file: str,
++    badge: str | None = None,
++    provider_id: int | None = None,
++) -> bytes:
 +    clean_poster = poster_file.lstrip("/")
 +    if not FILENAME_REGEX.match(clean_poster):
 +        raise ArtworkNotFound(f"Invalid poster filename: {poster_file}")
@@ -6470,7 +6838,7 @@ index 0000000..5a09f5b
 +    if clean_badge and clean_badge not in VALID_BADGES:
 +        raise ArtworkNotFound(f"Invalid badge: {badge}")
 +
-+    cache_key = f"poster:{clean_poster}:{clean_badge or ''}"
++    cache_key = f"posterv2:{clean_poster}:{clean_badge or ''}:{provider_id or ''}"
 +    cache_path = os.path.join(
 +        CACHE_DIR, f"{hashlib.sha1(cache_key.encode('utf-8')).hexdigest()}.jpg"
 +    )
@@ -6491,8 +6859,9 @@ index 0000000..5a09f5b
 +                pass
 +
 +        poster_bytes = await _fetch_tmdb_image("w500", clean_poster)
++        provider_logo_bytes = await get_provider_logo_bytes(provider_id) if provider_id else None
 +        jpeg_bytes = await asyncio.to_thread(
-+            _render_poster_pillow, poster_bytes, clean_badge
++            _render_poster_pillow, poster_bytes, clean_badge, provider_logo_bytes
 +        )
 +        _save_atomic(cache_path, jpeg_bytes)
 +        _cleanup_cache_if_needed()
@@ -7178,15 +7547,16 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..d5e06c9
+index 0000000..3b4254f
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,2922 @@
+@@ -0,0 +1,3657 @@
 +import asyncio
 +import datetime
 +import json
 +import os
 +import random
++import re
 +import time
 +import unicodedata
 +import urllib.parse
@@ -7198,8 +7568,18 @@ index 0000000..d5e06c9
 +from comet.core.logger import logger
 +from comet.core.models import settings
 +from comet.metadata.tmdb import TMDBApi
++from comet.services.artwork import resolve_watch_providers
 +from comet.services.filtering import apply_ptbr_detection, is_cam_release
-+from comet.services.smart_search import parse_query
++from comet.services.smart_search import parse_query, strip_accents, STOPWORDS, DOMAIN_SYNONYMS, COMMON_PLOTS
++
++
++def _build_art_query(badge: str | None = None, provider_id: int | None = None) -> str:
++    params = []
++    if badge:
++        params.append(f"b={badge}")
++    if provider_id:
++        params.append(f"p={provider_id}")
++    return f"?{'&'.join(params)}" if params else ""
 +
 +PROVIDERS = {
 +    "netflix": ("Netflix", 8),
@@ -7284,7 +7664,8 @@ index 0000000..d5e06c9
 +_CATALOG_CACHE_TTL = 6 * 3600  # 6 hours
 +
 +_READY_CACHE: dict[str, tuple[float, list[str]]] = {}
-+_SAGA_CACHE: dict[int, tuple[float, list[dict]]] = {}
++_SAGA_CACHE: dict[int, tuple[float, dict, list[dict]]] = {}
++_SAGA_META_CACHE: dict[int, tuple[float, dict]] = {}
 +
 +SAGAS = [
 +    ("Harry Potter", 1241),
@@ -7310,6 +7691,15 @@ index 0000000..d5e06c9
 +]
 +SAGA_MAP = {name: cid for name, cid in SAGAS}
 +SAGA_OPTIONS = [s[0] for s in SAGAS]
++_MOVIE_GENRE_REVERSE = {v: k for k, v in MOVIE_GENRE_MAP.items()}
++
++
++def _clean_collection_name(raw_name: str) -> str:
++    cleaned = re.sub(
++        r"(?i)\s*[-:]?\s*cole[cç][aã]o.*|\s*[-:]?\s*collection.*", "", raw_name
++    ).strip()
++    return cleaned or raw_name
++
 +
 +
 +def _ensure_imdb_map_loaded():
@@ -7509,6 +7899,17 @@ index 0000000..d5e06c9
 +            },
 +        ]
 +        if getattr(settings, "LIVE_TV", True):
++            catalogs.insert(
++                1,
++                {
++                    "type": "tv",
++                    "id": "comet_livehome",
++                    "name": "📺 Ao vivo agora",
++                    "extra": [
++                        {"name": "skip", "isRequired": False},
++                    ],
++                },
++            )
 +            from comet.services.live_tv import get_live_tv_categories
 +            catalogs.append(
 +                {
@@ -7904,6 +8305,20 @@ index 0000000..d5e06c9
 +    )
 +
 +    if is_personal and getattr(settings, "LIVE_TV", True):
++        idx = next((i for i, c in enumerate(catalogs) if c.get("id") == "comet_new" and c.get("type") == "series"), -1)
++        livehome_cat = {
++            "type": "tv",
++            "id": "comet_livehome",
++            "name": "📺 Ao vivo agora",
++            "extra": [
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++        if idx >= 0:
++            catalogs.insert(idx + 1, livehome_cat)
++        else:
++            catalogs.append(livehome_cat)
++
 +        from comet.services.live_tv import get_live_tv_categories
 +        catalogs.append(
 +            {
@@ -8626,6 +9041,25 @@ index 0000000..d5e06c9
 +        ready_tt_list = (await ready_task) if ready_task else []
 +        ready_set = set(ready_tt_list)
 +
++        # Provider resolution for row
++        row_mounts_art = is_landscape or catalog_id == "comet_top10" or catalog_id.startswith("comet_orig_")
++        row_provider_id = None
++        if catalog_id.startswith("comet_orig_"):
++            pkey = catalog_id[len("comet_orig_"):]
++            if pkey in PROVIDERS:
++                row_provider_id = PROVIDERS[pkey][1]
++        elif catalog_id.startswith("comet_"):
++            pkey = catalog_id[len("comet_"):]
++            if pkey in PROVIDERS:
++                row_provider_id = PROVIDERS[pkey][1]
++
++        item_providers: dict[int, int | None] = {}
++        if row_mounts_art:
++            if row_provider_id:
++                item_providers = {it["id"]: row_provider_id for it in unique_raw_items if it.get("id")}
++            else:
++                item_providers = await resolve_watch_providers(media_type, unique_raw_items, session, tmdb)
++
 +        today_date = datetime.date.today()
 +        metas = []
 +        seen_imdb = set()
@@ -8671,8 +9105,10 @@ index 0000000..d5e06c9
 +                "imdbRating": rating_str,
 +            }
 +
++            provider_id = item_providers.get(it.get("id"))
 +            if catalog_id == "comet_top10" and poster_path:
 +                meta["_raw_poster_path"] = poster_path
++                meta["_provider_id"] = provider_id
 +
 +            badge = None
 +            if needs_badges:
@@ -8693,6 +9129,7 @@ index 0000000..d5e06c9
 +                if not badge and catalog_id != "comet_ready" and imdb_id in ready_set:
 +                    badge = "dub"
 +
++            q_str = _build_art_query(badge=badge, provider_id=provider_id)
 +            if is_landscape:
 +                backdrop_file = None
 +                logo_file = None
@@ -8705,16 +9142,18 @@ index 0000000..d5e06c9
 +                if backdrop_file:
 +                    b_clean = backdrop_file.lstrip("/")
 +                    l_clean = logo_file.lstrip("/") if logo_file else None
-+                    b_param = f"?b={badge}" if badge else ""
 +                    if l_clean:
-+                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{b_param}"
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
 +                    else:
-+                        meta["poster"] = f"{base_url}/art/land/{b_clean}{b_param}"
++                        meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
 +                    meta["posterShape"] = "landscape"
-+            elif catalog_id.startswith("comet_orig_"):
-+                if badge and poster_path:
++                elif poster_path and (provider_id or badge):
 +                    p_clean = poster_path.lstrip("/")
-+                    meta["poster"] = f"{base_url}/art/poster/{p_clean}?b={badge}"
++                    meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
++            elif catalog_id.startswith("comet_orig_"):
++                if poster_path:
++                    p_clean = poster_path.lstrip("/")
++                    meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
 +
 +            metas.append(meta)
 +
@@ -8724,9 +9163,11 @@ index 0000000..d5e06c9
 +            for idx, item_meta in enumerate(metas, start=1):
 +                item_meta["posterShape"] = "square"
 +                p_file = item_meta.pop("_raw_poster_path", None)
++                pid = item_meta.pop("_provider_id", None)
 +                if p_file:
 +                    p_clean = p_file.lstrip("/")
-+                    item_meta["poster"] = f"{base_url}/art/top10/{idx}/{p_clean}"
++                    p_param = f"?p={pid}" if pid else ""
++                    item_meta["poster"] = f"{base_url}/art/top10/{idx}/{p_clean}{p_param}"
 +
 +        return metas
 +
@@ -8918,6 +9359,7 @@ index 0000000..d5e06c9
 +                    "description": it.get("overview") or "",
 +                    "releaseInfo": year,
 +                    "imdbRating": rating_str,
++                    "_vote_count": it.get("vote_count", 0),
 +                }
 +                results.append(meta)
 +
@@ -8933,6 +9375,137 @@ index 0000000..d5e06c9
 +        return results
 +
 +
++_TRANSLATE_CACHE: dict[str, tuple[str, float]] = {}
++TRANSLATE_TTL = 7 * 86400
++
++async def _translate_pt_en(text: str) -> str:
++    key = text.strip().lower()
++    if key in _TRANSLATE_CACHE:
++        val, ts = _TRANSLATE_CACHE[key]
++        if time.time() - ts < TRANSLATE_TTL:
++            return val
++    try:
++        from comet.services.sub_translate import fetch_gtx
++        res = await fetch_gtx(text, sl="pt", tl="en")
++        trans = res.strip().lower() if res else text.strip().lower()
++    except Exception as e:
++        logger.warning(f"Erro na tradução PT->EN: {e}")
++        trans = text.strip().lower()
++    _TRANSLATE_CACHE[key] = (trans, time.time())
++    return trans
++
++_KEYWORD_CACHE: dict[str, int | None] = {}
++_KEYWORD_CANDIDATES_CACHE: dict[str, list[int]] = {}
++_EN_TITLE_CACHE: dict[str, str | None] = {}
++
++
++def to_singular(word: str) -> str:
++    w = word.strip().lower()
++    if w.endswith("ies") and len(w) > 4:
++        return w[:-3] + "y"
++    if w.endswith("es") and len(w) > 4 and w[-3] in ("s", "x", "z", "c", "h"):
++        return w[:-2]
++    if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
++        return w[:-1]
++    return w
++
++
++def is_all_non_latin(text: str) -> bool:
++    if not text:
++        return False
++    has_letter = False
++    for ch in text:
++        try:
++            name = unicodedata.name(ch, "")
++        except Exception:
++            continue
++        if "LETTER" in name or "IDEOGRAPH" in name:
++            has_letter = True
++            if "LATIN" in name:
++                return False
++    return has_letter
++
++
++async def _get_keyword_id(tmdb: TMDBApi, query: str) -> int | None:
++    q_norm = query.strip().lower()
++    if q_norm in _KEYWORD_CACHE:
++        return _KEYWORD_CACHE[q_norm]
++    k_enc = urllib.parse.quote(q_norm)
++    data = await tmdb._get_json(f"search/keyword?query={k_enc}", f"kw {q_norm}")
++    kid = None
++    if isinstance(data, dict) and data.get("results"):
++        for r in data["results"]:
++            r_name = r.get("name", "").lower()
++            if r_name == q_norm or q_norm in r_name:
++                kid = r["id"]
++                break
++        if kid is None and data["results"]:
++            kid = data["results"][0].get("id")
++    _KEYWORD_CACHE[q_norm] = kid
++    return kid
++
++
++async def _get_keyword_candidates(tmdb: TMDBApi, term: str) -> list[int]:
++    t_norm = term.strip().lower()
++    if not t_norm:
++        return []
++    if t_norm in _KEYWORD_CANDIDATES_CACHE:
++        return _KEYWORD_CANDIDATES_CACHE[t_norm]
++
++    candidates = []
++    t_enc = urllib.parse.quote(t_norm)
++    data = await tmdb._get_json(f"search/keyword?query={t_enc}", f"kw cand {t_norm}")
++    if isinstance(data, dict) and data.get("results"):
++        for r in data["results"]:
++            r_name = r.get("name", "").lower()
++            if t_norm in r_name:
++                rid = r.get("id")
++                if rid and rid not in candidates:
++                    candidates.append(rid)
++                    if len(candidates) >= 3:
++                        break
++
++    sing = to_singular(t_norm)
++    if sing != t_norm and len(candidates) < 3:
++        s_enc = urllib.parse.quote(sing)
++        s_data = await tmdb._get_json(f"search/keyword?query={s_enc}", f"kw cand sing {sing}")
++        if isinstance(s_data, dict) and s_data.get("results"):
++            for r in s_data["results"]:
++                r_name = r.get("name", "").lower()
++                if sing in r_name:
++                    rid = r.get("id")
++                    if rid and rid not in candidates:
++                        candidates.append(rid)
++                        if len(candidates) >= 3:
++                            break
++
++    _KEYWORD_CANDIDATES_CACHE[t_norm] = candidates
++    return candidates
++
++
++FIXED_SYNONYMS = {
++    "doctor": ["doctor", "hospital", "medical drama"],
++    "doctors": ["doctor", "hospital", "medical drama"],
++    "medical": ["doctor", "hospital", "medical drama"],
++    "medic": ["doctor", "hospital", "medical drama"],
++    "medics": ["doctor", "hospital", "medical drama"],
++    "lawyer": ["lawyer", "courtroom"],
++    "lawyers": ["lawyer", "courtroom"],
++    "attorney": ["lawyer", "courtroom"],
++    "attorneys": ["lawyer", "courtroom"],
++    "courtroom": ["lawyer", "courtroom"],
++    "police": ["police", "detective"],
++    "detective": ["police", "detective"],
++    "detectives": ["police", "detective"],
++    "school": ["high school"],
++    "schools": ["high school"],
++    "high school": ["high school"],
++    "superhero": ["superhero"],
++    "superheroes": ["superhero"],
++    "pirate": ["pirate"],
++    "pirates": ["pirate"],
++}
++
 +async def _fetch_smart_search_items(
 +    media_type: str,
 +    query: str,
@@ -8944,9 +9517,9 @@ index 0000000..d5e06c9
 +
 +    async def _fetch_discover():
 +        if filters.get("media_type_hint") and filters["media_type_hint"] != media_type:
-+            return []
++            return [], [], []
 +
-+        timeout = aiohttp.ClientTimeout(total=12.0)
++        timeout = aiohttp.ClientTimeout(total=14.0)
 +        async with aiohttp.ClientSession(timeout=timeout) as session:
 +            tmdb = TMDBApi(session)
 +
@@ -8958,21 +9531,154 @@ index 0000000..d5e06c9
 +                    f"search person {filters['person']}",
 +                )
 +                if isinstance(p_data, dict) and p_data.get("results"):
-+                    with_people = p_data["results"][0].get("id")
-+                else:
-+                    return []
-+
-+            with_keywords = None
-+            if filters.get("keyword"):
-+                k_enc = urllib.parse.quote(filters["keyword"])
-+                k_data = await tmdb._get_json(
-+                    f"search/keyword?query={k_enc}",
-+                    f"search keyword {filters['keyword']}",
++                    top_p = p_data["results"][0]
++                    pop = float(top_p.get("popularity", 0) or 0)
++                    dept = top_p.get("known_for_department")
++                    if pop >= 1.0 or dept in ("Acting", "Directing"):
++                        with_people = top_p.get("id")
++                if not with_people:
++                    p_toks = [w for w in strip_accents(filters["person"]).lower().split() if w not in STOPWORDS]
++                    if p_toks:
++                        extra_theme = " ".join(p_toks)
++                        curr_theme = filters.get("theme_query") or ""
++                        filters["theme_query"] = (curr_theme + " " + extra_theme).strip()
++            elif filters.get("person_candidate"):
++                cand = filters["person_candidate"]
++                p_enc = urllib.parse.quote(cand)
++                p_data = await tmdb._get_json(
++                    f"search/person?query={p_enc}&language=pt-BR",
++                    f"search person candidate {cand}",
 +                )
-+                if isinstance(k_data, dict) and k_data.get("results"):
-+                    with_keywords = k_data["results"][0].get("id")
++                matched_id = None
++                if isinstance(p_data, dict) and p_data.get("results"):
++                    cand_words = [w for w in strip_accents(cand).lower().split() if w]
++                    for pr in p_data["results"]:
++                        dept = pr.get("known_for_department")
++                        pop = float(pr.get("popularity", 0) or 0)
++                        if dept in ("Acting", "Directing") and pop >= 5.0:
++                            pr_name = strip_accents(pr.get("name", "")).lower()
++                            if cand_words and all(w in pr_name for w in cand_words):
++                                matched_id = pr.get("id")
++                                break
++                if matched_id:
++                    with_people = matched_id
 +                else:
-+                    return []
++                    c_tokens = [w for w in strip_accents(cand).lower().split() if w not in STOPWORDS]
++                    if c_tokens:
++                        extra_theme = " ".join(c_tokens)
++                        curr_theme = filters.get("theme_query") or ""
++                        filters["theme_query"] = (curr_theme + " " + extra_theme).strip()
++
++            concepts: list[list[int]] = []
++            concept_words: list[str] = []
++
++            # 1. Palavra-chave primária se informada
++            if filters.get("keyword"):
++                kw_raw = filters["keyword"].lower()
++                k_ids = await _get_keyword_candidates(tmdb, kw_raw)
++                if not k_ids:
++                    kid = await _get_keyword_id(tmdb, kw_raw)
++                    if kid:
++                        k_ids = [kid]
++                if k_ids:
++                    concepts.append(k_ids)
++                    concept_words.append(kw_raw)
++
++            # 2. Tradução contextual da frase inteira (Item 2)
++            raw_q = filters.get("raw_query") or query
++            trans_en = await _translate_pt_en(raw_q)
++
++            MEDIA_WORDS = {"movie", "movies", "film", "films", "series", "serie", "tv", "show", "shows", "anime", "animes", "cartoon", "cartoons", "animation"}
++            STOP_EN = {"a", "an", "the", "of", "in", "on", "at", "with", "about", "who", "which", "that", "always", "day", "from", "for", "to", "and", "by"}
++
++            GENERIC_WORDS = {"guy", "cara", "wakes", "acorda", "same", "mesmo", "day", "dia", "sempre", "always", "one", "two", "man", "woman", "person", "people", "thing", "things"}
++            COUNTRY_WORDS = {"brazilian", "brazil", "national", "japanese", "japan", "american", "korean", "british", "french", "spanish", "german", "italian", "chinese"}
++            GENRE_WORDS = {"comedy", "comedies", "romance", "romantic", "horror", "action", "adventure", "drama", "animation", "thriller", "fantasy", "crime", "war", "documentary", "musical", "mystery", "western", "sci-fi", "scifi"}
++
++            en_words = [
++                w for w in re.findall(r"[a-z0-9]+", trans_en.lower())
++                if w not in MEDIA_WORDS and w not in STOP_EN and not re.match(r"^\d{2,4}s?$", w)
++            ]
++
++            # Se pessoa foi identificada, não traduz o nome dela como tema
++            if with_people and filters.get("person"):
++                p_lower_words = [w.lower() for w in filters["person"].split()]
++                en_words = [w for w in en_words if w not in p_lower_words]
++            if filters.get("epoch"):
++                ep_label = filters["epoch"].get("label", "")
++                ep_words = [w.lower() for w in ep_label.split()]
++                en_words = [w for w in en_words if w not in ep_words and not w.isdigit() and not re.match(r"^\d{2,4}s?$", w)]
++            if filters.get("origin_country") or filters.get("original_language"):
++                en_words = [w for w in en_words if w not in COUNTRY_WORDS]
++            if filters.get("keyword"):
++                en_words = [w for w in en_words if w not in GENERIC_WORDS]
++            if filters.get("genres"):
++                en_words = [w for w in en_words if w not in GENRE_WORDS]
++
++            # 3. Item 1: Candidatos de keyword
++            # Tente bigramas primeiro (prefira o bigrama quando existir como keyword)
++            used_indices = set()
++            if len(en_words) >= 2:
++                for i in range(len(en_words) - 1):
++                    bg = f"{en_words[i]} {en_words[i+1]}"
++                    bg_ids = await _get_keyword_candidates(tmdb, bg)
++                    if not bg_ids:
++                        rev_bg = f"{en_words[i+1]} {en_words[i]}"
++                        bg_ids = await _get_keyword_candidates(tmdb, rev_bg)
++                        if bg_ids:
++                            bg = rev_bg
++                    if bg_ids:
++                        if bg_ids not in concepts:
++                            concepts.append(bg_ids)
++                            concept_words.append(bg)
++                            used_indices.add(i)
++                            used_indices.add(i + 1)
++
++            # Sinônimos de domínio para palavras não usadas em bigramas
++            norm_q = strip_accents(raw_q).lower()
++            domain_covered = set()
++            for pt_w, syns in DOMAIN_SYNONYMS.items():
++                if re.search(rf"\b{re.escape(pt_w)}\b", norm_q):
++                    matching_indices = [idx for idx, w in enumerate(en_words) if w in syns]
++                    if matching_indices and all(idx in used_indices for idx in matching_indices):
++                        continue
++                    syn_concept_ids: list[int] = []
++                    for syn in syns:
++                        s_ids = await _get_keyword_candidates(tmdb, syn)
++                        if s_ids:
++                            for sid in s_ids:
++                                if sid not in syn_concept_ids:
++                                    syn_concept_ids.append(sid)
++                            domain_covered.add(syn)
++                            for w in syn.split():
++                                domain_covered.add(w)
++                    if syn_concept_ids and syn_concept_ids not in concepts:
++                        concepts.append(syn_concept_ids)
++                        concept_words.append("/".join(syns))
++                        for idx in matching_indices:
++                            used_indices.add(idx)
++
++            # Palavras soltas como conceitos complementares/alternativas
++            fallback_single = []
++            for idx, w in enumerate(en_words):
++                w_ids = await _get_keyword_candidates(tmdb, w)
++                if not w_ids:
++                    continue
++                if idx in used_indices or w in domain_covered:
++                    fallback_single.append(w_ids)
++                    continue
++                if w_ids not in concepts:
++                    concepts.append(w_ids)
++                    concept_words.append(w)
++
++            # Item 4: Votos mínimos
++            is_ptbr = (filters.get("origin_country") == "BR" or filters.get("original_language") == "pt")
++            if filters.get("vote_count_gte") is not None:
++                base_vote_count = filters["vote_count_gte"]
++            elif is_ptbr:
++                base_vote_count = 5
++            else:
++                base_vote_count = 50 if media_type == "movie" else 20
 +
 +            params = {
 +                "language": "pt-BR",
@@ -8987,7 +9693,6 @@ index 0000000..d5e06c9
 +                params["with_origin_country"] = filters["origin_country"]
 +            if filters.get("vote_average_gte") is not None:
 +                params["vote_average.gte"] = str(filters["vote_average_gte"])
-+                params["vote_count.gte"] = str(filters["vote_count_gte"])
 +            if media_type == "movie" and filters.get("runtime_lte") is not None:
 +                params["with_runtime.lte"] = str(filters["runtime_lte"])
 +            if filters.get("epoch"):
@@ -9010,36 +9715,144 @@ index 0000000..d5e06c9
 +                            params["first_air_date.lte"] = ep["lte"]
 +            if with_people:
 +                params["with_people"] = str(with_people)
-+            if with_keywords:
-+                params["with_keywords"] = str(with_keywords)
 +
-+            qs1 = urllib.parse.urlencode({**params, "page": 1})
-+            d1 = await tmdb._get_json(
-+                f"discover/{tmdb_type}?{qs1}",
-+                f"discover {tmdb_type} {query} p1",
-+            )
-+            if not isinstance(d1, dict) or not d1.get("results"):
-+                return []
-+            raw_items = list(d1.get("results", []))
-+            if d1.get("total_pages", 1) >= 2:
-+                qs2 = urllib.parse.urlencode({**params, "page": 2})
-+                d2 = await tmdb._get_json(
-+                    f"discover/{tmdb_type}?{qs2}",
-+                    f"discover {tmdb_type} {query} p2",
++            async def run_query(kw_arg: str | None, vote_cnt: int) -> list[dict]:
++                q_params = dict(params)
++                q_params["vote_count.gte"] = str(vote_cnt)
++                if kw_arg:
++                    q_params["with_keywords"] = kw_arg
++                qs1 = urllib.parse.urlencode({**q_params, "page": 1})
++                d1 = await tmdb._get_json(
++                    f"discover/{tmdb_type}?{qs1}",
++                    f"discover {tmdb_type} {query} p1",
 +                )
-+                if isinstance(d2, dict) and d2.get("results"):
-+                    raw_items.extend(d2.get("results", []))
++                if not isinstance(d1, dict) or not d1.get("results"):
++                    return []
++                items = list(d1.get("results", []))
++                if d1.get("total_pages", 1) >= 2 and len(items) < 30:
++                    qs2 = urllib.parse.urlencode({**q_params, "page": 2})
++                    d2 = await tmdb._get_json(
++                        f"discover/{tmdb_type}?{qs2}",
++                        f"discover {tmdb_type} {query} p2",
++                    )
++                    if isinstance(d2, dict) and d2.get("results"):
++                        items.extend(d2.get("results", []))
++                return items
 +
-+            unique_raw = []
++            # Item 3: Cadeia de alternativas
++            collected_items: list[dict] = []
 +            seen_tmdb = set()
-+            for it in raw_items:
-+                if not isinstance(it, dict):
-+                    continue
-+                tid = it.get("id")
-+                if not tid or tid in seen_tmdb:
-+                    continue
-+                seen_tmdb.add(tid)
-+                unique_raw.append(it)
++
++            def add_batch(items: list[dict], match_weight: int):
++                for it in items:
++                    if not isinstance(it, dict):
++                        continue
++                    tid = it.get("id")
++                    if not tid or tid in seen_tmdb:
++                        continue
++                    seen_tmdb.add(tid)
++                    it["_concept_matches"] = match_weight
++                    collected_items.append(it)
++
++            # Step 1: E entre conceitos
++            if len(concepts) > 1:
++                and_kw = ",".join("|".join(str(k) for k in c) for c in concepts)
++                items1 = await run_query(and_kw, base_vote_count)
++                add_batch(items1, len(concepts))
++
++            # Step 2: OU entre todos (se etapa vencedora tiver < 20, completa com seguintes até 40)
++            if len(collected_items) < 20 and concepts:
++                all_ids = list(dict.fromkeys(k for c in concepts for k in c))
++                or_kw = "|".join(str(k) for k in all_ids)
++                items2 = await run_query(or_kw, base_vote_count)
++                add_batch(items2, 1)
++
++            # Step 3: só o conceito com mais resultados
++            if len(collected_items) < 20 and len(concepts) > 1:
++                best_items = []
++                for c in concepts:
++                    c_kw = "|".join(str(k) for k in c)
++                    c_items = await run_query(c_kw, base_vote_count)
++                    if len(c_items) > len(best_items):
++                        best_items = c_items
++                add_batch(best_items, 1)
++
++            # Step 4: mesmo de novo com vote_count.gte reduzido a 5
++            if len(collected_items) < 20 and base_vote_count > 5:
++                all_ids = list(dict.fromkeys(k for c in concepts for k in c))
++                kw_arg = "|".join(str(k) for k in all_ids) if all_ids else None
++                items4 = await run_query(kw_arg, 5)
++                add_batch(items4, 1)
++
++            # Step 4b: se ainda < 20 e palavras soltas formaram bigrama, tenta com elas
++            if len(collected_items) < 20 and fallback_single:
++                for sc in fallback_single:
++                    sc_kw = "|".join(str(k) for k in sc)
++                    items_sc = await run_query(sc_kw, 5)
++                    add_batch(items_sc, 1)
++                    if len(collected_items) >= 20:
++                        break
++
++            # Step 5: por fim search/movie|tv com a tradução inglesa
++            if len(collected_items) < 20:
++                search_q = trans_en if trans_en else query
++                s_enc = urllib.parse.quote(search_q)
++                s_data = await tmdb._get_json(
++                    f"search/{tmdb_type}?query={s_enc}&language=pt-BR&page=1",
++                    f"search en {search_q}",
++                )
++                if isinstance(s_data, dict) and s_data.get("results"):
++                    add_batch(s_data["results"], 1)
++
++            # Se não houver conceitos
++            if not concepts and not collected_items:
++                items_gen = await run_query(None, base_vote_count)
++                add_batch(items_gen, 1)
++
++            # Item 5: Título - escrita não latina -> en-US ou descarte
++            async def resolve_latin_title(it: dict) -> dict | None:
++                name = (
++                    it.get("title") or it.get("original_title") or ""
++                    if media_type == "movie"
++                    else it.get("name") or it.get("original_name") or ""
++                )
++                if not is_all_non_latin(name):
++                    return it
++
++                cache_key = f"{tmdb_type}:{it['id']}"
++                en_title = _EN_TITLE_CACHE.get(cache_key)
++                if en_title is None:
++                    data = await tmdb._get_json(
++                        f"{tmdb_type}/{it['id']}?language=en-US",
++                        f"en title {it['id']}",
++                    )
++                    if isinstance(data, dict):
++                        en_title = (
++                            data.get("title") or data.get("original_title") or ""
++                            if media_type == "movie"
++                            else data.get("name") or data.get("original_name") or ""
++                        )
++                    else:
++                        en_title = ""
++                    _EN_TITLE_CACHE[cache_key] = en_title
++
++                if en_title and not is_all_non_latin(en_title):
++                    if media_type == "movie":
++                        it["title"] = en_title
++                    else:
++                        it["name"] = en_title
++                    return it
++
++                return None
++
++            title_resolved = await asyncio.gather(
++                *[resolve_latin_title(it) for it in collected_items],
++                return_exceptions=True,
++            )
++            unique_raw = [
++                it for it in title_resolved
++                if isinstance(it, dict)
++            ]
 +
 +            if kids:
 +                if media_type == "movie":
@@ -9056,6 +9869,75 @@ index 0000000..d5e06c9
 +                        it for it in unique_raw
 +                        if any(g in (10762, 10751, 16) for g in (it.get("genre_ids") or []))
 +                    ]
++
++            # Item 1 (Rodada 2): Relevância = nº de conceitos distintos cobertos; empate -> popularity desc.
++            # Frase de 1 conceito = ordem por popularidade pura.
++            if len(concepts) <= 1:
++                unique_raw.sort(
++                    key=lambda it: float(it.get("popularity", 0) or 0),
++                    reverse=True,
++                )
++            else:
++                concept_term_sets: list[set[str]] = []
++                SYNONYM_TERMS = {
++                    "christmas": {"natal", "christmas", "xmas"},
++                    "family": {"familia", "family"},
++                    "dog": {"dog", "dogs", "cachorro", "cachorros", "cao", "caes", "scooby"},
++                    "detective": {"detective", "detetive", "investigation", "investigacao", "misterio", "mystery", "scooby"},
++                    "space": {"space", "espaco", "espacial"},
++                    "astronaut": {"astronaut", "astronauta"},
++                    "lost": {"lost", "perdido", "perdida"},
++                    "hospital": {"hospital"},
++                    "abandoned": {"abandoned", "abandonado", "abandonada"},
++                    "horror": {"horror", "terror"},
++                    "ninja": {"ninja", "naruto"},
++                    "pirate": {"pirate", "pirata", "one piece", "luffy"},
++                    "cooking": {"cooking", "cozinha", "culinaria", "chef", "food"},
++                    "competition": {"competition", "competicao"},
++                    "car": {"car", "carro", "carros"},
++                    "race": {"race", "racing", "corrida"},
++                    "robot": {"robot", "robo"},
++                    "giant": {"giant", "gigante"},
++                    "shark": {"shark", "tubarao"},
++                    "killer": {"killer", "assassino", "assassina"},
++                }
++                for cw in concept_words:
++                    terms = set()
++                    for w in cw.lower().split():
++                        if len(w) > 2:
++                            terms.add(w)
++                            for syn_k, syn_vals in SYNONYM_TERMS.items():
++                                if syn_k in w or w in syn_k:
++                                    terms.update(syn_vals)
++                    if not terms:
++                        terms.add(cw.lower())
++                    concept_term_sets.append(terms)
++
++                for it in unique_raw:
++                    c_matches = it.get("_concept_matches", 1)
++                    if c_matches >= len(concepts):
++                        it["_covered_concepts"] = len(concepts)
++                    else:
++                        item_name = (
++                            it.get("title") or it.get("original_title") or ""
++                            if media_type == "movie"
++                            else it.get("name") or it.get("original_name") or ""
++                        )
++                        name_norm = strip_accents(item_name).lower()
++                        overview_norm = strip_accents(it.get("overview") or "").lower()
++                        text_norm = f"{name_norm} {overview_norm}"
++
++                        covered = 0
++                        for terms in concept_term_sets:
++                            if any(term in text_norm for term in terms):
++                                covered += 1
++                        it["_covered_concepts"] = max(c_matches, covered)
++
++                unique_raw.sort(
++                    key=lambda it: (it.get("_covered_concepts", 1), float(it.get("popularity", 0) or 0)),
++                    reverse=True,
++                )
++            unique_raw = unique_raw[:40]
 +
 +            sem = asyncio.Semaphore(10)
 +            cache_updated = False
@@ -9131,22 +10013,36 @@ index 0000000..d5e06c9
 +                    "description": it.get("overview") or "",
 +                    "releaseInfo": year,
 +                    "imdbRating": rating_str,
++                    "_vote_count": it.get("vote_count", 0),
 +                })
-+            return disc_metas
++            return disc_metas, concepts, concept_words
 +
 +    discover_res, title_res = await asyncio.gather(
 +        _fetch_discover(),
 +        _fetch_search_items(media_type, query, kids=kids),
 +        return_exceptions=True,
 +    )
-+    discover_metas = discover_res if isinstance(discover_res, list) else []
++    if isinstance(discover_res, tuple):
++        discover_metas, concepts, concept_words = discover_res
++    else:
++        if isinstance(discover_res, Exception):
++            logger.warning(f"Erro em _fetch_discover: {discover_res}")
++        discover_metas, concepts, concept_words = (discover_res if isinstance(discover_res, list) else []), [], []
 +    title_metas = title_res if isinstance(title_res, list) else []
 +
 +    if filters.get("dublado"):
 +        ready_tt = set(await _get_ready_tt_list(media_type))
-+        # Dublados prontos primeiro; o resto continua (o banco só conhece o que já foi buscado)
 +        discover_metas = sorted(discover_metas, key=lambda m: m.get("id") not in ready_tt)
 +        title_metas = sorted(title_metas, key=lambda m: m.get("id") not in ready_tt)
++
++    has_theme = bool(concepts or filters.get("keyword") or filters.get("theme_query"))
++    if discover_metas and has_theme:
++        filtered_title_metas = [
++            m for m in title_metas
++            if m.get("_vote_count", 0) >= 20
++        ]
++    else:
++        filtered_title_metas = title_metas
 +
 +    final_metas = []
 +    seen_ids = set()
@@ -9159,7 +10055,7 @@ index 0000000..d5e06c9
 +                break
 +
 +    if len(final_metas) < 60:
-+        for m in title_metas:
++        for m in filtered_title_metas:
 +            mid = m.get("id")
 +            if mid and mid not in seen_ids:
 +                seen_ids.add(mid)
@@ -9167,8 +10063,21 @@ index 0000000..d5e06c9
 +                if len(final_metas) >= 60:
 +                    break
 +
-+    summary = filters.get("summary") or ", ".join(filters.get("signals", []))
-+    logger.info(f'🔎 busca inteligente "{query}" → {summary}: {len(final_metas)}')
++    # 5. Log: 🔎 busca inteligente "<texto>" → tema [<palavras EN>] keywords [<ids>] ...: <n>
++    if concepts:
++        all_kw_ids = []
++        for c in concepts:
++            for kid in c:
++                if kid not in all_kw_ids:
++                    all_kw_ids.append(kid)
++        other_signals = [s for s in filters.get("signals", []) if not s.startswith("tema")]
++        other_str = f" {', '.join(other_signals)}" if other_signals else ""
++        logger.info(
++            f'🔎 busca inteligente "{query}" → tema {concept_words} keywords {all_kw_ids}{other_str}: {len(final_metas)}'
++        )
++    else:
++        summary = filters.get("summary") or ", ".join(filters.get("signals", []))
++        logger.info(f'🔎 busca inteligente "{query}" → {summary}: {len(final_metas)}')
 +    return final_metas
 +
 +
@@ -9510,17 +10419,23 @@ index 0000000..d5e06c9
 +            elif meta.get("_backdrop_path"):
 +                backdrop_file = meta["_backdrop_path"]
 +
++            provider_id = ready_providers.get(tid)
++            q_str = _build_art_query(badge=badge, provider_id=provider_id)
 +            if backdrop_file:
 +                b_clean = backdrop_file.lstrip("/")
 +                l_clean = logo_file.lstrip("/") if logo_file else None
-+                b_param = f"?b={badge}" if badge else ""
 +                if l_clean:
-+                    meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{b_param}"
++                    meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
 +                else:
-+                    meta["poster"] = f"{base_url}/art/land/{b_clean}{b_param}"
++                    meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
 +                meta["posterShape"] = "landscape"
++            elif meta.get("_poster_path") and (provider_id or badge):
++                p_clean = meta["_poster_path"].lstrip("/")
++                meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
 +            return meta
 +
++        ready_raw_items = [{"id": m["_tmdb_id"]} for m in raw_metas if m.get("_tmdb_id")]
++        ready_providers = await resolve_watch_providers(media_type, ready_raw_items, session, tmdb)
 +        processed_metas = await asyncio.gather(*[process_ready_item(m) for m in raw_metas], return_exceptions=True)
 +        if landscape_cache_updated:
 +            await asyncio.to_thread(_save_landscape_map)
@@ -9565,13 +10480,24 @@ index 0000000..d5e06c9
 +                return []
 +            chosen = rng.sample(candidates, min(len(candidates), 10))
 +
++            find_metas = await asyncio.gather(
++                *[_resolve_find_imdb(tmdb, item.get("id"), media_type) for item in chosen],
++                return_exceptions=True,
++            )
++            lucky_raw = [
++                {"id": fm["_tmdb_id"]}
++                for fm in find_metas
++                if isinstance(fm, dict) and fm.get("_tmdb_id")
++            ]
++            lucky_provs = await resolve_watch_providers(media_type, lucky_raw, session, tmdb)
++
 +            result = []
-+            for item in chosen:
++            for item, find_meta in zip(chosen, find_metas):
 +                m = dict(item)
-+                imdb_id = m.get("id")
-+                find_meta = await _resolve_find_imdb(tmdb, imdb_id, media_type)
-+                if find_meta and find_meta.get("_tmdb_id"):
++                if isinstance(find_meta, dict) and find_meta.get("_tmdb_id"):
 +                    tid = find_meta["_tmdb_id"]
++                    pid = lucky_provs.get(tid)
++                    q_str = _build_art_query(provider_id=pid)
 +                    ls_data = await _resolve_landscape_data(
 +                        tmdb, media_type, tid, fallback_backdrop=find_meta.get("_backdrop_path"), sem=sem
 +                    )
@@ -9581,10 +10507,13 @@ index 0000000..d5e06c9
 +                        b_clean = backdrop_file.lstrip("/")
 +                        l_clean = logo_file.lstrip("/") if logo_file else None
 +                        if l_clean:
-+                            m["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}"
++                            m["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
 +                        else:
-+                            m["poster"] = f"{base_url}/art/land/{b_clean}"
++                            m["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
 +                        m["posterShape"] = "landscape"
++                    elif find_meta.get("_poster_path") and pid:
++                        p_clean = find_meta["_poster_path"].lstrip("/")
++                        m["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
 +                result.append(m)
 +            return result
 +
@@ -9620,11 +10549,16 @@ index 0000000..d5e06c9
 +            return []
 +        chosen = rng.sample(candidates, min(len(candidates), 10))
 +
++        lucky_raw = [{"id": m["_tmdb_id"]} for m in chosen if m.get("_tmdb_id")]
++        lucky_provs = await resolve_watch_providers(media_type, lucky_raw, session, tmdb)
++
 +        result = []
 +        for m in chosen:
 +            item = dict(m)
 +            tid = item.get("_tmdb_id")
 +            if tid:
++                pid = lucky_provs.get(tid)
++                q_str = _build_art_query(provider_id=pid)
 +                ls_data = await _resolve_landscape_data(
 +                    tmdb, media_type, tid, fallback_backdrop=item.get("_backdrop_path"), sem=sem
 +                )
@@ -9634,10 +10568,13 @@ index 0000000..d5e06c9
 +                    b_clean = backdrop_file.lstrip("/")
 +                    l_clean = logo_file.lstrip("/") if logo_file else None
 +                    if l_clean:
-+                        item["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}"
++                        item["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
 +                    else:
-+                        item["poster"] = f"{base_url}/art/land/{b_clean}"
++                        item["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
 +                    item["posterShape"] = "landscape"
++                elif item.get("_poster_path") and pid:
++                    p_clean = item["_poster_path"].lstrip("/")
++                    item["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
 +            item.pop("_tmdb_id", None)
 +            item.pop("_backdrop_path", None)
 +            item.pop("_poster_path", None)
@@ -9647,52 +10584,164 @@ index 0000000..d5e06c9
 +
 +
 +
++async def _get_collection_data(tmdb: TMDBApi, cid: int) -> tuple[dict, list[dict]]:
++    now = time.time()
++    today_str = datetime.date.today().isoformat()
++    cached = _SAGA_CACHE.get(cid)
++    if cached is not None and (now - cached[0]) < 86400 and len(cached) == 3:
++        return cached[1], cached[2]
++    try:
++        data = await tmdb._get_json(
++            f"collection/{cid}?language=pt-BR", f"coll {cid}"
++        )
++        if isinstance(data, dict) and isinstance(data.get("parts"), list):
++            released = [
++                p
++                for p in data["parts"]
++                if isinstance(p, dict)
++                and p.get("release_date")
++                and p.get("release_date") <= today_str
++            ]
++            released.sort(key=lambda x: x.get("release_date") or "")
++            _SAGA_CACHE[cid] = (now, data, released)
++            return data, released
++    except Exception as e:
++        logger.warning(f"Error fetching collection {cid}: {e}")
++    return {}, []
++
++
 +async def _fetch_saga_items(genre: str | None, skip: int) -> list[dict]:
 +    _ensure_imdb_map_loaded()
-+    today_str = datetime.date.today().isoformat()
 +    now = time.time()
 +
 +    timeout = aiohttp.ClientTimeout(total=8.0)
 +    async with aiohttp.ClientSession(timeout=timeout) as session:
 +        tmdb = TMDBApi(session)
 +
-+        async def get_collection_parts(cid: int) -> list[dict]:
-+            cached = _SAGA_CACHE.get(cid)
-+            if cached is not None and (now - cached[0]) < 86400:
-+                return cached[1]
-+            try:
-+                data = await tmdb._get_json(
-+                    f"collection/{cid}?language=pt-BR", f"coll {cid}"
-+                )
-+                if isinstance(data, dict) and isinstance(data.get("parts"), list):
-+                    released = [
-+                        p
-+                        for p in data["parts"]
-+                        if isinstance(p, dict)
-+                        and p.get("release_date")
-+                        and p.get("release_date") <= today_str
-+                    ]
-+                    released.sort(key=lambda x: x.get("release_date") or "")
-+                    _SAGA_CACHE[cid] = (now, released)
-+                    return released
-+            except Exception as e:
-+                logger.warning(f"Error fetching collection {cid}: {e}")
-+            return []
-+
 +        if genre:
 +            cid = SAGA_MAP.get(genre)
 +            if not cid:
 +                return []
-+            parts = await get_collection_parts(cid)
++            _, parts = await _get_collection_data(tmdb, cid)
 +            selected_parts = parts[skip : skip + 40]
-+        else:
-+            tasks = [get_collection_parts(cid) for _, cid in SAGAS]
-+            collections_parts = await asyncio.gather(*tasks, return_exceptions=True)
-+            first_parts = []
-+            for res in collections_parts:
-+                if isinstance(res, list) and res:
-+                    first_parts.append(res[0])
-+            selected_parts = first_parts[skip : skip + 40]
++
++            sem = asyncio.Semaphore(10)
++            cache_updated = False
++
++            async def resolve_imdb(tmdb_id: int) -> str | None:
++                nonlocal cache_updated
++                cache_key = f"movie:{tmdb_id}"
++                if cache_key in _IMDB_MAP:
++                    return _IMDB_MAP[cache_key]
++                async with sem:
++                    data = await tmdb._get_json(
++                        f"movie/{tmdb_id}/external_ids", f"movie external_ids {tmdb_id}"
++                    )
++                    if isinstance(data, dict):
++                        imdb_id = data.get("imdb_id")
++                        if isinstance(imdb_id, str) and imdb_id.startswith("tt"):
++                            _IMDB_MAP[cache_key] = imdb_id
++                            cache_updated = True
++                            return imdb_id
++                return None
++
++            imdb_ids = await asyncio.gather(
++                *[resolve_imdb(it["id"]) for it in selected_parts],
++                return_exceptions=True,
++            )
++
++            if cache_updated:
++                await asyncio.to_thread(_save_imdb_map)
++
++            metas = []
++            for it, imdb_id in zip(selected_parts, imdb_ids):
++                if not isinstance(imdb_id, str) or not imdb_id.startswith("tt"):
++                    continue
++                poster_path = it.get("poster_path")
++                backdrop_path = it.get("backdrop_path")
++                name = it.get("title") or it.get("original_title") or ""
++                date_str = it.get("release_date") or ""
++                year = date_str[:4] if len(date_str) >= 4 else ""
++                vote_avg = it.get("vote_average")
++                rating_str = f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++
++                metas.append({
++                    "id": imdb_id,
++                    "type": "movie",
++                    "name": name,
++                    "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
++                    "background": f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
++                    "description": it.get("overview") or "",
++                    "releaseInfo": year,
++                    "imdbRating": rating_str,
++                })
++            return metas
++
++        # Fileira 🎬 Sagas (sem filtro de gênero): cada item vira a saga
++        selected_sagas = SAGAS[skip : skip + 40]
++        results = await asyncio.gather(
++            *[_get_collection_data(tmdb, cid) for _, cid in selected_sagas],
++            return_exceptions=True,
++        )
++
++        metas = []
++        for (label, cid), res in zip(selected_sagas, results):
++            if not isinstance(res, tuple) or not res[0]:
++                continue
++            coll_data, released = res
++            if not released:
++                continue
++
++            clean_name = _clean_collection_name(coll_data.get("name") or label)
++
++            first_part = released[0]
++            last_part = released[-1]
++            y1 = (first_part.get("release_date") or "")[:4]
++            yN = (last_part.get("release_date") or "")[:4]
++            year_range = f"{y1}–{yN}" if y1 and yN and y1 != yN else (y1 or "")
++
++            poster_path = coll_data.get("poster_path") or first_part.get("poster_path")
++            backdrop_path = coll_data.get("backdrop_path") or first_part.get("backdrop_path")
++            poster = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
++            background = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
++
++            n_movies = len(released)
++            prefix = f"{n_movies} filmes · {year_range}" if year_range else f"{n_movies} filmes"
++            overview = (coll_data.get("overview") or "").strip()
++            desc = f"{prefix}\n\n{overview}".strip() if overview else prefix
++
++            metas.append({
++                "id": f"cometsaga:{cid}",
++                "type": "series",
++                "name": clean_name,
++                "poster": poster,
++                "background": background,
++                "description": desc,
++                "releaseInfo": year_range,
++            })
++        return metas
++
++
++async def get_saga_meta(meta_id: str) -> dict | None:
++    try:
++        cid_str = meta_id.split("cometsaga:")[1]
++        cid = int(cid_str)
++    except Exception:
++        return None
++
++    now = time.time()
++    cached = _SAGA_META_CACHE.get(cid)
++    if cached is not None and (now - cached[0]) < 86400:
++        return cached[1]
++
++    _ensure_imdb_map_loaded()
++
++    timeout = aiohttp.ClientTimeout(total=10.0)
++    async with aiohttp.ClientSession(timeout=timeout) as session:
++        tmdb = TMDBApi(session)
++        coll_data, released = await _get_collection_data(tmdb, cid)
++        if not coll_data or not released:
++            return None
 +
 +        sem = asyncio.Semaphore(10)
 +        cache_updated = False
@@ -9715,36 +10764,86 @@ index 0000000..d5e06c9
 +            return None
 +
 +        imdb_ids = await asyncio.gather(
-+            *[resolve_imdb(it["id"]) for it in selected_parts],
++            *[resolve_imdb(p["id"]) for p in released],
 +            return_exceptions=True,
 +        )
 +
 +        if cache_updated:
 +            await asyncio.to_thread(_save_imdb_map)
 +
-+        metas = []
-+        for it, imdb_id in zip(selected_parts, imdb_ids):
++        videos = []
++        valid_parts = []
++        ep_num = 1
++        for p, imdb_id in zip(released, imdb_ids):
 +            if not isinstance(imdb_id, str) or not imdb_id.startswith("tt"):
 +                continue
-+            poster_path = it.get("poster_path")
-+            backdrop_path = it.get("backdrop_path")
-+            name = it.get("title") or it.get("original_title") or ""
-+            date_str = it.get("release_date") or ""
-+            year = date_str[:4] if len(date_str) >= 4 else ""
-+            vote_avg = it.get("vote_average")
-+            rating_str = f"{float(vote_avg):.1f}" if vote_avg is not None else ""
++            rdate = p.get("release_date") or ""
++            year = rdate[:4] if len(rdate) >= 4 else ""
++            title_pt = p.get("title") or p.get("original_title") or ""
++            bd = p.get("backdrop_path")
++            thumb = f"https://image.tmdb.org/t/p/w780{bd}" if bd else None
++            overview_pt = p.get("overview") or ""
++            video_title = f"{ep_num}. {title_pt} ({year})" if year else f"{ep_num}. {title_pt}"
 +
-+            metas.append({
++            videos.append({
 +                "id": imdb_id,
-+                "type": "movie",
-+                "name": name,
-+                "poster": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
-+                "background": f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
-+                "description": it.get("overview") or "",
-+                "releaseInfo": year,
-+                "imdbRating": rating_str,
++                "title": video_title,
++                "season": 1,
++                "episode": ep_num,
++                "released": f"{rdate}T00:00:00.000Z" if rdate else None,
++                "thumbnail": thumb,
++                "overview": overview_pt,
 +            })
-+        return metas
++            valid_parts.append(p)
++            ep_num += 1
++
++        first_part = valid_parts[0] if valid_parts else (released[0] if released else {})
++        last_part = valid_parts[-1] if valid_parts else (released[-1] if released else {})
++
++        y1 = (first_part.get("release_date") or "")[:4]
++        yN = (last_part.get("release_date") or "")[:4]
++        year_range = f"{y1}–{yN}" if y1 and yN and y1 != yN else (y1 or "")
++
++        clean_name = _clean_collection_name(coll_data.get("name") or "")
++
++        poster_path = coll_data.get("poster_path") or first_part.get("poster_path")
++        backdrop_path = coll_data.get("backdrop_path") or first_part.get("backdrop_path")
++        poster = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
++        background = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
++
++        genres = [
++            _MOVIE_GENRE_REVERSE[gid]
++            for gid in first_part.get("genre_ids", [])
++            if gid in _MOVIE_GENRE_REVERSE
++        ]
++
++        logo = None
++        if first_part.get("id"):
++            ls = await _resolve_landscape_data(tmdb, "movie", first_part["id"])
++            if ls and ls.get("logo"):
++                logo = f"https://image.tmdb.org/t/p/w500/{ls['logo'].lstrip('/')}"
++
++        n_videos = len(videos)
++        prefix = f"{n_videos} filmes · {year_range}" if year_range else f"{n_videos} filmes"
++        coll_overview = (coll_data.get("overview") or "").strip()
++        description = f"{prefix}\n\n{coll_overview}".strip() if coll_overview else prefix
++
++        meta = {
++            "id": f"cometsaga:{cid}",
++            "type": "series",
++            "name": clean_name,
++            "poster": poster,
++            "background": background,
++            "description": description,
++            "genres": genres,
++            "releaseInfo": year_range,
++            "videos": videos,
++        }
++        if logo:
++            meta["logo"] = logo
++
++        _SAGA_META_CACHE[cid] = (now, meta)
++        return meta
 +
 +
 +def _strip_accents(s: str) -> str:
@@ -9923,6 +11022,11 @@ index 0000000..d5e06c9
 +            return []
 +        from comet.services.live_tv import get_live_tv_catalog
 +        return await get_live_tv_catalog(extra=extra, kids=kids)
++    if catalog_id == "comet_livehome":
++        if not getattr(settings, "LIVE_TV", True):
++            return []
++        from comet.services.live_tv import get_live_tv_home_catalog
++        return await get_live_tv_home_catalog(extra=extra, kids=kids)
 +    if not base_url:
 +        # chamadas internas (warmup) nao tem request: sem isso o cache guarda posters relativos
 +        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
@@ -11073,10 +12177,10 @@ index 81fb382..f1528ef 100644
  
 diff --git a/comet/services/live_tv.py b/comet/services/live_tv.py
 new file mode 100644
-index 0000000..8c38609
+index 0000000..ca3a565
 --- /dev/null
 +++ b/comet/services/live_tv.py
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,676 @@
 +import asyncio
 +import datetime
 +import hashlib
@@ -11495,8 +12599,9 @@ index 0000000..8c38609
 +            background = (ch.get("featuredImage") or {}).get("path") or logo
 +            desc = _format_agora_depois(ch.get("timelines", []), now_utc)
 +
++            cid = f"cometlive:pluto:{ch['_id']}"
 +            metas.append({
-+                "id": f"cometlive:pluto:{ch['_id']}",
++                "id": cid,
 +                "type": "tv",
 +                "name": name,
 +                "poster": logo,
@@ -11504,6 +12609,11 @@ index 0000000..8c38609
 +                "background": background,
 +                "description": desc,
 +                "genres": [cat] if cat else [],
++                "releaseInfo": "Ao vivo",
++                "behaviorHints": {
++                    "defaultVideoId": cid,
++                    "hasScheduledVideos": False,
++                },
 +            })
 +
 +    # 2. IPTV-org open channels
@@ -11516,8 +12626,9 @@ index 0000000..8c38609
 +                if search_q and search_q not in name.lower():
 +                    continue
 +                logo = ch.get("logo") or ""
++                cid = ch["id"]
 +                metas.append({
-+                    "id": ch["id"],
++                    "id": cid,
 +                    "type": "tv",
 +                    "name": name,
 +                    "poster": logo,
@@ -11525,13 +12636,115 @@ index 0000000..8c38609
 +                    "background": logo,
 +                    "description": "▶ Transmissão ao vivo 24h",
 +                    "genres": ["Canais abertos"],
++                    "releaseInfo": "Ao vivo",
++                    "behaviorHints": {
++                        "defaultVideoId": cid,
++                        "hasScheduledVideos": False,
++                    },
 +                })
 +
 +    return metas
 +
 +
++async def get_live_tv_home_catalog(extra: dict | None = None, kids: bool = False) -> list[dict]:
++    extra = extra or {}
++    skip = 0
++    try:
++        if extra.get("skip"):
++            skip = int(extra["skip"])
++    except Exception:
++        skip = 0
++
++    now_utc = datetime.datetime.now(datetime.timezone.utc)
++    pluto_channels = await get_pluto_channels()
++
++    def _get_num(c):
++        n = c.get("number")
++        try:
++            return int(n)
++        except Exception:
++            return 999999
++
++    sorted_pluto = sorted(pluto_channels, key=_get_num)
++    selected_channels = []
++    seen_ids = set()
++
++    if kids:
++        for ch in sorted_pluto:
++            cat = ch.get("category") or ""
++            if cat.lower() in KIDS_CATEGORIES:
++                cid = ch.get("_id")
++                if cid and cid not in seen_ids:
++                    seen_ids.add(cid)
++                    selected_channels.append(ch)
++                    if len(selected_channels) == 20:
++                        break
++    else:
++        category_quotas = [
++            ("Filmes", lambda cat: cat == "Filmes", 4),
++            ("Séries", lambda cat: cat == "Séries", 3),
++            ("Infantil", lambda cat: cat.lower() in KIDS_CATEGORIES, 3),
++            ("Notícias", lambda cat: cat == "Notícias", 2),
++            ("Esportes", lambda cat: cat == "Esportes", 2),
++            ("Anime & Geek", lambda cat: cat == "Anime & Geek", 2),
++            ("Novelas/TV Brasileira", lambda cat: cat in ("Novelas", "TV Brasileira"), 2),
++            ("Comédia", lambda cat: cat == "Comédia", 2),
++        ]
++        for name, match_fn, quota in category_quotas:
++            count = 0
++            for ch in sorted_pluto:
++                cat = ch.get("category") or ""
++                if match_fn(cat):
++                    cid = ch.get("_id")
++                    if cid and cid not in seen_ids:
++                        seen_ids.add(cid)
++                        selected_channels.append(ch)
++                        count += 1
++                        if count == quota:
++                            break
++
++        if len(selected_channels) < 20:
++            for ch in sorted_pluto:
++                cid = ch.get("_id")
++                if cid and cid not in seen_ids:
++                    seen_ids.add(cid)
++                    selected_channels.append(ch)
++                    if len(selected_channels) == 20:
++                        break
++
++    metas = []
++    for ch in selected_channels:
++        cat = ch.get("category") or ""
++        name = ch.get("name") or "Canal"
++        logo = (ch.get("colorLogoPNG") or {}).get("path") or (ch.get("logo") or {}).get("path") or ""
++        background = (ch.get("featuredImage") or {}).get("path") or logo
++        desc = _format_agora_depois(ch.get("timelines", []), now_utc)
++        cid = f"cometlive:pluto:{ch['_id']}"
++
++        metas.append({
++            "id": cid,
++            "type": "tv",
++            "name": name,
++            "poster": logo,
++            "posterShape": "square",
++            "background": background,
++            "description": desc,
++            "genres": [cat] if cat else [],
++            "releaseInfo": "Ao vivo",
++            "behaviorHints": {
++                "defaultVideoId": cid,
++                "hasScheduledVideos": False,
++            },
++        })
++
++    if skip:
++        return metas[skip:skip + 20]
++    return metas[:20]
++
++
 +async def get_live_tv_meta(media_id: str) -> dict | None:
 +    now_utc = datetime.datetime.now(datetime.timezone.utc)
++    iso_now = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 +    if media_id.startswith("cometlive:pluto:"):
 +        pluto_id = media_id.split(":", 2)[2]
 +        ch = await get_pluto_channel_by_id(pluto_id)
@@ -11541,6 +12754,7 @@ index 0000000..8c38609
 +        background = (ch.get("featuredImage") or {}).get("path") or logo
 +        cat = ch.get("category") or ""
 +        desc = _format_meta_programming(ch.get("timelines", []), now_utc, ch.get("summary", ""))
++        overview = _format_agora_depois(ch.get("timelines", []), now_utc)
 +        return {
 +            "id": media_id,
 +            "type": "tv",
@@ -11551,6 +12765,20 @@ index 0000000..8c38609
 +            "background": background,
 +            "description": desc,
 +            "genres": [cat] if cat else [],
++            "releaseInfo": "Ao vivo",
++            "behaviorHints": {
++                "defaultVideoId": media_id,
++                "hasScheduledVideos": False,
++            },
++            "videos": [
++                {
++                    "id": media_id,
++                    "title": "📺 Assistir ao vivo",
++                    "released": iso_now,
++                    "thumbnail": background,
++                    "overview": overview,
++                }
++            ],
 +        }
 +
 +    if media_id.startswith("cometlive:iptv:"):
@@ -11568,6 +12796,20 @@ index 0000000..8c38609
 +            "background": logo,
 +            "description": "Transmissão ao vivo",
 +            "genres": ["Canais abertos"],
++            "releaseInfo": "Ao vivo",
++            "behaviorHints": {
++                "defaultVideoId": media_id,
++                "hasScheduledVideos": False,
++            },
++            "videos": [
++                {
++                    "id": media_id,
++                    "title": "📺 Assistir ao vivo",
++                    "released": iso_now,
++                    "thumbnail": logo,
++                    "overview": "▶ Transmissão ao vivo 24h",
++                }
++            ],
 +        }
 +
 +    return None
@@ -11590,11 +12832,10 @@ index 0000000..8c38609
 +        return [
 +            {
 +                "name": "📺 Ao vivo",
-+                "title": f"{channel_name} · Pluto TV",
 +                "description": f"{channel_name} · Pluto TV",
 +                "url": stream_url,
 +                "behaviorHints": {
-+                    "notWebReady": False,
++                    "notWebReady": True,
 +                },
 +            }
 +        ]
@@ -11607,8 +12848,7 @@ index 0000000..8c38609
 +        return [
 +            {
 +                "name": "📺 Ao vivo",
-+                "title": f"{channel_name} · Pluto TV" if "pluto" in channel_name.lower() else f"{channel_name} · Canal aberto",
-+                "description": f"{channel_name} · Pluto TV" if "pluto" in channel_name.lower() else f"{channel_name} · Canal aberto",
++                "description": f"{channel_name} · Canal aberto",
 +                "url": ch["url"],
 +                "behaviorHints": {
 +                    "notWebReady": False,
@@ -13466,10 +14706,10 @@ index 0000000..e819a67
 +    task.add_done_callback(_TASKS.discard)
 diff --git a/comet/services/smart_search.py b/comet/services/smart_search.py
 new file mode 100644
-index 0000000..20c918d
+index 0000000..efec780
 --- /dev/null
 +++ b/comet/services/smart_search.py
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,492 @@
 +"""
 +Smart Search query parser for Comet.
 +Pure Python, no network calls.
@@ -13647,6 +14887,69 @@ index 0000000..20c918d
 +    "mutantes": "mutant",
 +}
 +
++# Item 6: Enredos comuns (frases que descrevem a história)
++COMMON_PLOTS = [
++    (r"\b(mesmo dia|dia se repete|preso no tempo)\b", "time loop"),
++    (r"\b(troca de corpos?)\b", "body swap"),
++    (r"\b(perde(?:u)? a memoria|amnesia)\b", "amnesia"),
++    (r"\b(invasao alienigena|invasao alien|et invade|aliens invadem)\b", "alien invasion"),
++    (r"\b(casa assombrada)\b", "haunted house"),
++    (r"\b(vinganca)\b", "revenge"),
++    (r"\b(viagem de carro|pe na estrada)\b", "road trip"),
++    (r"\b(fim do mundo|apocalipse)\b", "apocalypse"),
++    (r"\b(ilha deserta|naufrag(?:o|os|io))\b", "deserted island"),
++    (r"\b(basead[oa] em fatos reais|historia real)\b", "based on true story"),
++    (r"\b(inteligencia artificial|ia|robo que pensa)\b", "artificial intelligence"),
++    (r"\b(serial killer|assassin[oa] em serie)\b", "serial killer"),
++    (r"\b(luta de rua|artes marciais)\b", "martial arts"),
++]
++
++# Item 2: Sinônimos de domínio
++DOMAIN_SYNONYMS = {
++    # cozinha → cooking, chef, food
++    "cozinha": ["cooking", "chef"],
++    "cozinheiro": ["chef", "cooking"],
++    "cozinheiros": ["chef", "cooking"],
++    "culinaria": ["cooking"],
++    "comida": ["food", "cooking"],
++    "gastronomia": ["cooking"],
++    "chef": ["chef", "cooking"],
++    # polícia → police, detective
++    "policia": ["police"],
++    "policial": ["police"],
++    "policiais": ["police"],
++    "detetive": ["detective"],
++    "detetives": ["detective"],
++    # espaço/espacial → space, astronaut
++    "espaco": ["space"],
++    "espacial": ["space"],
++    "astronauta": ["astronaut"],
++    "astronautas": ["astronaut"],
++    # bombeiro → firefighter, fire department
++    "bombeiro": ["firefighter", "fire department"],
++    "bombeiros": ["firefighter", "fire department"],
++    # outros comuns
++    "medico": ["doctor", "hospital"],
++    "medicos": ["doctor", "hospital"],
++    "hospital": ["hospital"],
++    "advogado": ["lawyer", "courtroom"],
++    "advogados": ["lawyer", "courtroom"],
++    "cachorro": ["dog"],
++    "cachorros": ["dog"],
++    "cao": ["dog"],
++    "caes": ["dog"],
++    "dinossauro": ["dinosaur"],
++    "dinossauros": ["dinosaur"],
++    "ninja": ["ninja"],
++    "ninjas": ["ninja"],
++    "zumbi": ["zombie"],
++    "zumbis": ["zombie"],
++    "vampiro": ["vampire"],
++    "vampiros": ["vampire"],
++    "tubarao": ["shark"],
++    "tubaroes": ["shark"],
++}
++
 +GENRES_CONFIG = [
 +    # pattern, movie_ids, tv_ids, label, extra_lang
 +    (r"\b(animes?)\b", [16], [16], "anime", "ja"),
@@ -13661,13 +14964,22 @@ index 0000000..20c918d
 +    (r"\b(ficcao\s+cientifica|ficcao-cientifica|sci-fi|scifi)\b", [878], [10765], "ficção científica", None),
 +    (r"\b(fantasias?)\b", [14], [10765], "fantasia", None),
 +    (r"\b(documentarios?)\b", [99], [99], "documentário", None),
-+    (r"\b(crimes?|policiais|policial)\b", [80], [80], "policial", None),
++    (r"\b(crimes?|policiais|policial|policias?)\b", [80], [80], "policial", None),
 +    (r"\b(guerras?)\b", [10752], [10768], "guerra", None),
 +    (r"\b(faroestes?|westerns?)\b", [37], [37], "faroeste", None),
 +    (r"\b(musicais|musical)\b", [10402], [10402], "musical", None),
 +    (r"\b(misterios?)\b", [9648], [9648], "mistério", None),
 +    (r"\b(familias?|familiar|infantis|infantil)\b", [10751], [10751], "família", None),
 +]
++
++STOPWORDS = {
++    "de", "do", "da", "dos", "das", "que", "com", "um", "uma", "o", "a", "os", "as",
++    "e", "em", "no", "na", "nos", "nas", "pra", "para", "sobre", "filme", "filmes",
++    "serie", "series", "série", "séries", "desenho", "desenhos", "anime", "animes",
++    "tipo", "onde", "quando",
++}
++
++CONNECTORS_PATTERN = r"\b(de|do|da|dos|das|sobre|com|tipo)\b"
 +
 +
 +def parse_query(text: str) -> dict | None:
@@ -13684,10 +14996,13 @@ index 0000000..20c918d
 +    media_type_hint = None
 +
 +    # 1. Media type hint (filme / série)
++    has_media_hint = False
 +    if re.search(r"\b(filmes?)\b", norm):
 +        media_type_hint = "movie"
++        has_media_hint = True
 +    elif re.search(r"\b(series?)\b", norm):
 +        media_type_hint = "series"
++        has_media_hint = True
 +
 +    # 2. Quality / Language / Country
 +    dublado = False
@@ -13716,7 +15031,6 @@ index 0000000..20c918d
 +    epoch = None
 +    now_year = datetime.date.today().year
 +
-+    # Anos XX / XXXX / XXXXs
 +    decade_match = re.search(r"\b(?:dos\s+|de\s+|na\s+|da\s+decada\s+de\s+|decada\s+de\s+)?anos\s+(\d{2,4})s?\b", norm)
 +    if not decade_match:
 +        decade_match = re.search(r"\b(\d{4})s\b", norm)
@@ -13753,7 +15067,6 @@ index 0000000..20c918d
 +        }
 +        signals.append("recente")
 +    else:
-+        # Specific year: de 1994, em 1994, etc.
 +        year_match = re.search(r"\b(?:de|em|do\s+ano\s+de)\s+(\d{4})\b", norm)
 +        if year_match:
 +            y = int(year_match.group(1))
@@ -13768,8 +15081,10 @@ index 0000000..20c918d
 +                signals.append(f"ano {y}")
 +
 +    # 4. Genres
++    has_genre = False
 +    for pattern, mg_ids, tg_ids, label, lang in GENRES_CONFIG:
 +        if re.search(pattern, norm):
++            has_genre = True
 +            for gid in mg_ids:
 +                if gid not in matched_genres_movie:
 +                    matched_genres_movie.append(gid)
@@ -13780,78 +15095,89 @@ index 0000000..20c918d
 +                original_language = lang
 +            signals.append(label)
 +
-+    # 5. Person & Theme
-+    # Check for "com <person>"
++    # 5. Person
++    # "Pessoa só quando: com <nome>; ou do/da/de/dos <nome> em que o search/person..."
 +    person = None
++    person_candidate = None
 +    com_match = re.search(r"\bcom\s+([A-Za-z0-9À-ÿ\s]+)", raw, re.IGNORECASE)
 +    if com_match:
 +        cand = com_match.group(1).strip()
-+        # Clean trailing epoch/quality phrases if any (e.g. "Tom Hanks dos anos 90")
 +        cand = re.split(
 +            r"\b(?:dos\s+anos|anos|de\s+\d{4}|dublad[oa]|naciona|brasileir|bem\s+avaliad|melhores|curt[oa]|de\b|sobre\b)",
 +            cand,
 +            flags=re.IGNORECASE,
 +        )[0].strip()
-+        if cand:
++        cand_norm = strip_accents(cand).lower()
++        if cand and cand_norm not in THEME_KEYWORDS and cand_norm not in DOMAIN_SYNONYMS and not any(w in DOMAIN_SYNONYMS for w in cand_norm.split()):
 +            person = cand
 +            signals.append(f"pessoa '{person}'")
 +
-+    # Check for director "do/da/de <director>" if person not found
 +    if not person:
-+        dir_match = re.search(r"\b(?:do|da)\s+([A-Za-z0-9À-ÿ\s]+)", raw, re.IGNORECASE)
++        dir_match = re.search(r"\b(?:do|da|dos|das|de)\s+([A-Za-z0-9À-ÿ\s]+)", raw, re.IGNORECASE)
 +        if dir_match:
 +            cand = dir_match.group(1).strip()
 +            cand = re.split(
-+                r"\b(?:dos\s+anos|anos|de\s+\d{4}|dublad[oa]|naciona|brasileir|bem\s+avaliad|melhores|curt[oa]|de\b|sobre\b)",
++                r"\b(?:dos\s+anos|anos|de\s+\d{4}|dublad[oa]|naciona|brasileir|bem\s+avaliad|melhores|curt[oa]|sobre\b)",
 +                cand,
 +                flags=re.IGNORECASE,
 +            )[0].strip()
-+            # Verify it's not a generic word like "brasil"
-+            if cand and strip_accents(cand).lower() not in ("brasil", "ano", "mundo"):
-+                person = cand
-+                signals.append(f"diretor/pessoa '{person}'")
++            cand_norm = strip_accents(cand).lower()
++            if cand and cand_norm not in ("brasil", "ano", "mundo") and cand_norm not in THEME_KEYWORDS and cand_norm not in DOMAIN_SYNONYMS and not any(w in DOMAIN_SYNONYMS for w in cand_norm.split()):
++                person_candidate = cand
 +
-+    # 6. Theme: "de/sobre <palavra>"
++    # 6. Themes & Keywords
 +    theme = None
 +    keyword = None
++    theme_query = None
 +
-+    # Check multi-word themes first, then single-word
-+    sorted_themes = sorted(THEME_KEYWORDS.keys(), key=lambda x: len(x), reverse=True)
-+    for t_key in sorted_themes:
-+        pattern = rf"\b(?:de|sobre|do|da)\s+{re.escape(t_key)}\b"
++    matched_plot = None
++    for pattern, kw in COMMON_PLOTS:
 +        if re.search(pattern, norm):
-+            theme = t_key
-+            keyword = THEME_KEYWORDS[t_key]
-+            signals.append(f"tema '{keyword}'")
++            matched_plot = kw
++            keyword = kw
++            signals.append(f"enredo '{kw}'")
 +            break
 +
-+    # If no theme found via "de/sobre", check if there's "sobre <palavra>"
-+    if not theme and not person:
-+        sobre_match = re.search(r"\bsobre\s+([a-z0-9]+)\b", norm)
-+        if sobre_match:
-+            cand = sobre_match.group(1)
-+            if cand in THEME_KEYWORDS:
-+                theme = cand
-+                keyword = THEME_KEYWORDS[cand]
-+            else:
-+                theme = cand
-+                keyword = cand
-+            signals.append(f"tema '{keyword}'")
++    if not keyword:
++        sorted_themes = sorted(THEME_KEYWORDS.keys(), key=lambda x: len(x), reverse=True)
++        for t_key in sorted_themes:
++            if re.search(rf"\b{re.escape(t_key)}\b", norm):
++                if person and t_key in strip_accents(person).lower():
++                    continue
++                theme = t_key
++                keyword = THEME_KEYWORDS[t_key]
++                signals.append(f"tema '{keyword}'")
++                break
 +
-+    # If still no theme and no person, check "de <diretor/pessoa>"
-+    if not person and not theme:
-+        de_person_match = re.search(r"\bde\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", raw)
-+        if de_person_match:
-+            cand = de_person_match.group(1).strip()
-+            cand_norm = strip_accents(cand).lower()
-+            if cand_norm not in (
-+                "comedia", "terror", "acao", "aventura", "suspense", "drama",
-+                "romance", "ficcao", "guerra", "fantasia", "policial", "crime"
-+            ):
-+                person = cand
-+                signals.append(f"pessoa '{person}'")
++    # Strip recognized signals and stopwords from norm to find remaining words for generic theme
++    clean_text = norm
++    for pattern, _ in COMMON_PLOTS:
++        clean_text = re.sub(pattern, " ", clean_text)
++    for pattern, _, _, _, _ in GENRES_CONFIG:
++        clean_text = re.sub(pattern, " ", clean_text)
++    clean_text = re.sub(r"\b(?:dos\s+|de\s+|na\s+|da\s+decada\s+de\s+|decada\s+de\s+)?anos\s+\d{2,4}s?\b", " ", clean_text)
++    clean_text = re.sub(r"\b\d{4}s\b", " ", clean_text)
++    clean_text = re.sub(r"\b(?:de|em|do\s+ano\s+de)\s+\d{4}\b", " ", clean_text)
++    clean_text = re.sub(r"\b(antig[oa]s?|classic[oa]s?|recentes?|nov[oa]s?|lancamentos?)\b", " ", clean_text)
++    clean_text = re.sub(r"\b(dublad[oa]s?|naciona(l|is)|brasileir[oa]s?|do\s+brasil|mais\s+bem\s+avaliad[oa]s?|bem\s+avaliad[oa]s?|melhores|aclamad[oa]s?|curt[oa]s?)\b", " ", clean_text)
++    if theme:
++        clean_text = re.sub(rf"\b{re.escape(theme)}\b", " ", clean_text)
++    if person:
++        for pw in strip_accents(person).lower().split():
++            clean_text = re.sub(rf"\b{re.escape(pw)}\b", " ", clean_text)
 +
-+    if not signals:
++    has_connector = bool(re.search(CONNECTORS_PATTERN, norm))
++    remaining_tokens = [w for w in re.findall(r"[a-z0-9]+", clean_text) if w not in STOPWORDS]
++
++    if remaining_tokens and (has_media_hint or has_connector or has_genre or epoch or dublado or origin_country or keyword):
++        theme_query = " ".join(remaining_tokens)
++        if not keyword:
++            signals.append(f"tema '{theme_query}'")
++
++    if not signals and not person_candidate:
++        return None
++
++    if not (has_genre or epoch or dublado or origin_country or vote_average_gte or person or person_candidate or keyword or theme_query):
 +        return None
 +
 +    return {
@@ -13863,8 +15189,10 @@ index 0000000..20c918d
 +        "original_language": original_language,
 +        "epoch": epoch,
 +        "person": person,
++        "person_candidate": person_candidate,
 +        "theme": theme,
 +        "keyword": keyword,
++        "theme_query": theme_query,
 +        "dublado": dublado,
 +        "origin_country": origin_country,
 +        "vote_average_gte": vote_average_gte,
@@ -13876,10 +15204,10 @@ index 0000000..20c918d
 +    }
 diff --git a/comet/services/stremio_library.py b/comet/services/stremio_library.py
 new file mode 100644
-index 0000000..b0ad64e
+index 0000000..cbb321f
 --- /dev/null
 +++ b/comet/services/stremio_library.py
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,554 @@
 +"""
 +Stremio library service for personal catalogs:
 +- Minha lista (comet_mylist)
@@ -13993,6 +15321,7 @@ index 0000000..b0ad64e
 +    tmdb_id: int | None,
 +    base_url: str = "",
 +    badge: str | None = None,
++    provider_id: int | None = None,
 +    sem: asyncio.Semaphore | None = None,
 +) -> dict[str, Any]:
 +    meta: dict[str, Any] = {
@@ -14012,15 +15341,23 @@ index 0000000..b0ad64e
 +        )
 +        backdrop_file = (ls_data.get("backdrop") if ls_data else None) or backdrop_path
 +        logo_file = ls_data.get("logo") if ls_data else None
++        params = []
++        if badge:
++            params.append(f"b={badge}")
++        if provider_id:
++            params.append(f"p={provider_id}")
++        q_str = f"?{'&'.join(params)}" if params else ""
 +        if backdrop_file:
 +            b_clean = backdrop_file.lstrip("/")
 +            l_clean = logo_file.lstrip("/") if logo_file else None
-+            b_param = f"?b={badge}" if badge else ""
 +            if l_clean:
-+                meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{b_param}"
++                meta["poster"] = f"{base_url}/art/land/{b_clean}/{l_clean}{q_str}"
 +            else:
-+                meta["poster"] = f"{base_url}/art/land/{b_clean}{b_param}"
++                meta["poster"] = f"{base_url}/art/land/{b_clean}{q_str}"
 +            meta["posterShape"] = "landscape"
++        elif poster_path and (provider_id or badge):
++            p_clean = poster_path.lstrip("/")
++            meta["poster"] = f"{base_url}/art/poster/{p_clean}{q_str}"
 +    return meta
 +
 +
@@ -14427,10 +15764,10 @@ index 0000000..b0ad64e
 +    return []
 diff --git a/comet/services/sub_translate.py b/comet/services/sub_translate.py
 new file mode 100644
-index 0000000..6c9ffb7
+index 0000000..6855d37
 --- /dev/null
 +++ b/comet/services/sub_translate.py
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,307 @@
 +import asyncio
 +import hashlib
 +import os
@@ -14512,6 +15849,57 @@ index 0000000..6c9ffb7
 +    return f"{line1}\n{line2}"
 +
 +
++async def fetch_gtx(
++    text_query: str,
++    sl: str = "en",
++    tl: str = "pt",
++    session: AsyncSession | None = None,
++) -> str | None:
++    if not text_query:
++        return ""
++    url = (
++        f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q="
++        + urllib.parse.quote(text_query)
++    )
++    should_close = False
++    if session is None:
++        session = AsyncSession(impersonate="chrome")
++        should_close = True
++    try:
++        for attempt in range(2):
++            try:
++                r = await session.get(url, timeout=10.0)
++                if r.status_code == 200:
++                    data = r.json()
++                    if data and isinstance(data, list) and data[0]:
++                        return "".join(
++                            seg[0] for seg in data[0] if seg and seg[0]
++                        )
++                    return ""
++                elif r.status_code == 429:
++                    if attempt == 0:
++                        await asyncio.sleep(2.0)
++                        continue
++                    logger.warning("Tradutor: HTTP 429 ratelimit")
++                    return None
++                else:
++                    if attempt == 0:
++                        await asyncio.sleep(2.0)
++                        continue
++                    logger.warning(f"Tradutor: HTTP {r.status_code}")
++                    return None
++            except Exception as e:
++                if attempt == 0:
++                    await asyncio.sleep(2.0)
++                    continue
++                logger.warning(f"Tradutor: erro ({type(e).__name__}): {e}")
++                return None
++        return None
++    finally:
++        if should_close:
++            await session.close()
++
++
 +async def translate_srt(srt_text: str) -> str | None:
 +    if not srt_text or not srt_text.strip():
 +        return None
@@ -14549,41 +15937,7 @@ index 0000000..6c9ffb7
 +
 +    async with AsyncSession(impersonate="chrome") as session:
 +        async def _fetch_gtx(text_query: str) -> str | None:
-+            if not text_query:
-+                return ""
-+            url = (
-+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=pt&dt=t&q="
-+                + urllib.parse.quote(text_query)
-+            )
-+            for attempt in range(2):
-+                try:
-+                    r = await session.get(url, timeout=10.0)
-+                    if r.status_code == 200:
-+                        data = r.json()
-+                        if data and isinstance(data, list) and data[0]:
-+                            return "".join(
-+                                seg[0] for seg in data[0] if seg and seg[0]
-+                            )
-+                        return ""
-+                    elif r.status_code == 429:
-+                        if attempt == 0:
-+                            await asyncio.sleep(2.0)
-+                            continue
-+                        logger.warning("Tradutor: HTTP 429 ratelimit")
-+                        return None
-+                    else:
-+                        if attempt == 0:
-+                            await asyncio.sleep(2.0)
-+                            continue
-+                        logger.warning(f"Tradutor: HTTP {r.status_code}")
-+                        return None
-+                except Exception as e:
-+                    if attempt == 0:
-+                        await asyncio.sleep(2.0)
-+                        continue
-+                    logger.warning(f"Tradutor: erro ({type(e).__name__}): {e}")
-+                    return None
-+            return None
++            return await fetch_gtx(text_query, sl="en", tl="pt", session=session)
 +
 +        async def process_batch(b_indices: list[int]) -> list[str] | None:
 +            b_lines = [cleaned_texts[i] for i in b_indices]
