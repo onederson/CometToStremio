@@ -7,9 +7,86 @@ Legenda:
 - **Esforço:** quanto trabalho dá para mim. Nenhum item exige gastar dinheiro.
 - ✋ marca o que depende de você.
 
+O documento tem duas partes:
+- **★ O salto para o perfeito:** as melhorias que mudam a experiência de verdade, cada uma baseada em algo que medi ou vi acontecer no seu A71.
+- **Partes 0 a 8:** a base (rapidez, interface, bot, segurança), que também vale fazer.
+
 ---
 
-## 0. As 6 primeiras que eu faria (maior ganho por menor esforço)
+## ★ O salto para o perfeito
+
+### O que as medições mostraram (02/11/2026, à noite)
+| Medição | Resultado |
+|---|---|
+| Velocidade do **TorBox** até a sua casa | começa a tocar em **0,5 s** e entrega **130–146 Mbit/s** (folga até para 4K HDR) |
+| **"⚡ Real-Debrid"** de Interestelar 4K e Breaking Bad 4K | **não tocou**: o RD bloqueou na hora do play (451, direito autoral), o Comet tentou outra opção, e o primeiro byte chegou em **3 a 15 s** |
+| Checagem de áudio dos candidatos | **já tinha descoberto** esse bloqueio antes (`infringing_file`), mas **não guardou** (bug) |
+| Lista de Interestelar | 1.489 fontes, 878 KB, nada compactado |
+| Motor de rede do Comet | Python puro, **sem `uvloop`** (o motor rápido) |
+
+### 1. "⚡ pronto" tem que significar "toca na hora" 🔥🔥🔥
+Hoje **⚡** quer dizer "o arquivo está no cache do debrid", mas não garante que o RD vá liberar. A BLUDV, que tem quase todo o 4K dublado, é muito bloqueada pelo RD.
+- **Verificação ativa:** quando você abre um título, o Comet testa em segundo plano as 5 melhores opções de verdade (pede o link e lê o 1º pedaço do vídeo). Bloqueada vai para o TorBox ou some; lenta perde posição.
+- **Corrigir o bug:** todo `infringing_file` descoberto, em qualquer caminho, entra na lista de bloqueados na hora.
+- **Resultado:** o `▶ Assistir` e os ⚡ do topo **sempre começam em ~1 s**, sem "trocando de fonte…".
+
+### 2. TorBox como serviço principal, RD como reserva 🔥🔥🔥
+Com o TorBox assinado e medido (0,5 s; 130+ Mbit/s; muito menos bloqueios em dublado), inverter a prioridade: **TorBox ⚡ → RD ⚡ → baixar**.
+- **Bônus de segurança:** o RD só permite **um IP por vez**. Assistir em casa e no 4G ao mesmo tempo pelo RD pode gerar alerta ou bloqueio da conta. Fora de casa, o Comet passa a usar **só o TorBox**.
+
+### 3. Dublado "de primeira", sem trocar a faixa de áudio 🔥🔥🔥
+Muitos arquivos DUAL trazem o **inglês como 1ª faixa**, e o player começa em inglês. A checagem de áudio já lê a ordem das faixas.
+- O `▶ Assistir` passa a preferir arquivos em que o **português é a faixa padrão**. Empate → o de PT em 2º perde pouco, mas perde.
+- A lista mostra `🔊 PT primeiro` ou `🔊 EN · PT` para você saber antes de dar play.
+- ✋ **Ajuste no app (1 min, em cada aparelho):** Stremio → **Configurações → Player → Idioma de áudio preferido: Português**. Assim o player escolhe o PT sozinho mesmo quando não é a 1ª faixa.
+
+### 4. Áudio confirmado em toda a lista, não só no topo 🔥🔥
+Hoje só o `▶ Assistir` e 2 candidatos têm o áudio lido. Uma fila em segundo plano vai sondando, aos poucos, todas as opções 🇧🇷 dos títulos que você abre e dos aquecidos pela madrugada. Com o tempo, quase tudo vira `🇧🇷✔` ou perde o 🇧🇷 falso.
+- **Dublagem por IA / redublagem:** releases marcadas com "IA", "AI dub" ou "redublagem" ganham o rótulo `🤖 Dublagem IA` e vão para o fim dos dublados.
+
+### 5. Maratona perfeita: a temporada inteira do mesmo arquivo 🔥🔥🔥
+Quando você dá play num episódio que veio de um **pacote da temporada**, os próximos episódios desse pacote já estão na conta do debrid: tocam na hora e com a **mesma dublagem, o mesmo volume e a mesma qualidade**.
+- O `▶ Assistir` dos episódios seguintes prefere o pacote que você já começou.
+- Os pacotes "já na sua conta" aparecem com `📦 Na sua conta`.
+
+### 6. O Comet aprende o seu gosto 🔥🔥🔥
+O Comet sabe o que você toca, e o Stremio sabe até onde você assistiu.
+- **Ranking que aprende:** a release que você assistiu até o fim ganha pontos para o grupo dela (BLUDV, PiA…). A que você abandonou em menos de 2 min perde. Com o tempo, o `▶ Assistir` acerta de primeira com mais frequência.
+- **Fileiras que se organizam:** as fileiras que você abre sobem e as que você ignora descem, sem precisar configurar nada.
+- **"Para hoje à noite":** em dia de semana, sugestões mais curtas e séries que você está vendo; no fim de semana, filmes longos e sagas.
+
+### 7. Página do título que leva a outros títulos 🔥🔥
+O protocolo do Stremio permite "botões" (links) na página do título. Hoje quase não usamos isso.
+- `🔎 Mais como este` abre uma fileira com títulos parecidos (TMDB, com os dublados primeiro).
+- `🎬 Da mesma saga` · `🎥 Do mesmo diretor` · `👤 <ator principal>`
+- Em séries: `🇧🇷 Dublado: T1–T3 · T4 legendado`, e o 🇧🇷 em cada episódio que já tem dublado pronto.
+
+### 8. Pedir pelo Telegram e esquecer 🔥🔥🔥
+- **Lista de desejos:** "me avisa quando sair Duna 3 dublado". A madrugada confere todo dia; quando aparecer dublado, baixa e avisa: "⚡ Duna 3 dublado pronto". Vale também para "quando sair o episódio dublado de X".
+- **Radar de lançamentos:** filmes que saíram do cinema avisam quando chegam dublados em boa qualidade (sem CAM).
+- **Botões na resposta:** "▶ Abrir no Stremio", "Outra versão", "Baixar a temporada inteira".
+
+### 9. Motor mais rápido no A71 🔥🔥
+- **`uvloop`:** o motor de rede rápido do Python; costuma dar de 2 a 4× mais vazão em servidores como o Comet, sem mudar nada no resto.
+- **Busca progressiva:** responde com as fontes que já chegaram e completa o resto em segundo plano (a 1ª busca cai de 5–45 s para ~5–8 s).
+- **Cache do debrid seletivo:** consulta primeiro os ~300 melhores torrents, e não os 1.000+.
+- **Previsão de uso:** pelo seu histórico (séries que você vê toda noite, horário em que costuma assistir), o Comet aquece **antes** os próximos episódios prováveis.
+
+### 10. Nunca ficar sem Comet 🔥🔥
+- **Backup diário criptografado** (banco, `.env`, patch) mandado pelo bot só para você. Se o A71 morrer, outro celular volta ao ar a partir do backup.
+- **Saúde do A71:** temperatura, bateria e espaço no `/status`, com aviso no Telegram. Se esquentar, um modo economia diminui o aquecimento até baixar.
+- **Proteção da porta pública:** limite de pedidos por IP e bloqueio de robôs que varrem a internet.
+
+### Ordem que eu proponho
+1. **Itens 1, 2 e 9** (`uvloop` + compressão + limite de fontes): play que sempre começa e app mais leve. São o maior ganho imediato.
+2. **Itens 3 e 5:** dublado de primeira e maratona perfeita.
+3. **Itens 4 e 7:** áudio confirmado em tudo e página do título com links.
+4. **Itens 6 e 8:** o Comet que aprende e a lista de desejos no Telegram.
+5. **Item 10:** backup e saúde do A71.
+
+---
+
+## 0. A base: as 6 primeiras que eu faria (maior ganho por menor esforço)
 
 | # | Melhoria | Por quê | Ganho esperado |
 |---|---|---|---|
