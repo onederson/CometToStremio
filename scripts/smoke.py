@@ -141,13 +141,22 @@ def restart_comet(token: str) -> bool:
 
 
 def send_notification(ntfy_topic: str, failed_names: list, restored: bool):
-    if not ntfy_topic:
-        return
     text = f"Comet: SMOKE FALHOU ({', '.join(failed_names)})"
     if restored:
         text += " - restaurado para a última versão boa"
+    if ntfy_topic:
+        try:
+            httpx.post(f"https://ntfy.sh/{ntfy_topic}", content=text.encode("utf-8"), timeout=10.0)
+        except Exception:
+            pass
+    # Telegram (bot do Comet), se configurado no .env
     try:
-        httpx.post(f"https://ntfy.sh/{ntfy_topic}", content=text.encode("utf-8"), timeout=10.0)
+        env = load_env()
+        tg_token, tg_chat = env.get("TELEGRAM_BOT_TOKEN"), env.get("TELEGRAM_CHAT_ID")
+        if tg_token and tg_chat:
+            msg = ("🚨 " if not restored else "🛠️ ") + text.replace("Comet: ", "Comet do A71: ")
+            httpx.post(f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                       json={"chat_id": tg_chat, "text": msg}, timeout=10.0)
     except Exception:
         pass
 

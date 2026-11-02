@@ -1,49 +1,41 @@
-# Tarefa X: fileiras de "mood", 🎌 Animes dublados e 📅 Estreias da semana
+# Tarefa Z3: notas IMDb/Rotten/Metacritic + selo do Oscar + fileiras de prestígio
 
 ## Contexto
-- Comet no A71, chroot, `/opt/comet`. Catálogos: `comet/services/catalogs.py` (manifest de catálogos, `get_catalog`, capas deitadas `_build_landscape_meta`/`/art/...` com selos `?b=` e streaming `?p=`, `_get_ready_tt_list` / `⚡ Pronto dublado`, cache de catálogo), `comet/api/endpoints/catalog.py`, `comet/services/stremio_library.py` (histórico), `comet/services/nightly.py` (madrugada, `dub_watch`), `comet/services/smart_search.py` (keywords TMDB com cache). Kids tem lista própria de catálogos.
+- Comet no A71, chroot, `/opt/comet`. Meta: `comet/services/meta_ptbr.py` (descrição, `links`, `trailerStreams`). Catálogos: `comet/services/catalogs.py` (capas `/art/...` com selo de texto `?b=` e de streaming `?p=`; helper único de selo em `comet/services/artwork.py`, `VALID_BADGES`). Madrugada: `comet/services/nightly.py`.
+- `OMDB_API_KEY` já está no `.env` (plano grátis: **1000 consultas/dia**). `GET https://www.omdbapi.com/?i=<tt>&apikey=<chave>` → `imdbRating`, `imdbVotes`, `Metascore`, `Ratings[]` (`Rotten Tomatoes` "89%"), `Awards` ("Won 3 Oscars. …" / "Nominated for 7 Oscars. …").
 - **Comandos:** `.\scripts\a71.ps1 '<cmd>'` / `.\scripts\a71.ps1 -Chroot '<cmd>'`. Scripts com aspas: arquivo local + `adb push` pelo **PowerShell** + `mv`. LF. O `grep` do Android não aceita `\|`: use `grep -E`.
-- **PROIBIDO:** imprimir chaves/tokens/URLs com token ou chave do TMDB; commit; instalar pacotes; mexer no AdGuard ou no `.env`. Nada em segundo plano (seus comandos): rode tudo em primeiro plano e espere. Comandos com timeout ≤ 300 s.
-- **Mudança de manifest:** não crie prefixo de id novo (use `tt…`), para não exigir nada além de reinstalar uma vez.
+- **PROIBIDO:** imprimir a chave do OMDb, tokens ou URLs com token; commit; instalar pacotes; mexer no AdGuard ou no `.env`; mexer em `comet/services/prefetch.py` e no começo da função `stream` de `stream.py`. Nada em segundo plano (seus comandos). Comandos com timeout ≤ 300 s.
 
-## 1. Fileiras de "mood" (link pessoal; no Kids só as marcadas)
-Bloco logo depois de `📺 Ao vivo agora` no manifest pessoal, nesta ordem, cada uma com ~30 itens, capa deitada com logo (igual às outras), selos de streaming (`?p=`), e **ordem que muda todo dia** (embaralhar com semente = data entre os 100 melhores do discover), com os **dublados prontos primeiro**:
-| id | nome | tipo | critério (TMDB discover, `language=pt-BR`) |
+## 1. Notas (OMDb com orçamento)
+- `comet/services/omdb.py`: `models.py` `OMDB_API_KEY: str | None = None`, `OMDB_DAILY_BUDGET: int = 900`. Cache SQLite `omdb_cache(imdb_id TEXT PRIMARY KEY, data TEXT, fetched_at INT)`: 30 dias para filme/série com mais de 1 ano, 3 dias para lançamento; "não encontrado" também é guardado (7 dias). Contador diário em memória + arquivo `data/omdb_budget.json`; ao chegar no orçamento, só usa cache até meia-noite. Semáforo 4.
+- Na **página do título** (meta filme e série): primeira linha da `description` vira `⭐ IMDb 9,3 · 🍅 89% · Ⓜ️ 82` (só o que existir; vírgula decimal) e, se ganhou Oscar, `🏆 Venceu 3 Oscars` (ou `🏆 Indicado a 7 Oscars`). Também `imdbRating` no meta.
+- Não consulte o OMDb para listar catálogo inteiro: só no meta (quando o usuário abre o título) e na madrugada (item 3).
+
+## 2. Selo do Oscar na capa
+- Novo selo `oscar` (dourado, texto `🏆 OSCAR`, mesmo tamanho proporcional dos outros, canto **inferior esquerdo** para não brigar com o selo de texto e o logo do streaming).
+- Aplicado nas capas montadas (`/art/...`) quando o título **ganhou** pelo menos um Oscar segundo o cache do OMDb (`Won N Oscar`). Sem dado em cache = sem selo (não consulta na hora de montar fileira).
+- Versão do cache de capa sobe (ex.: `v3:`).
+
+## 3. Fileiras de prestígio (link pessoal; no Kids só onde indicado)
+Bloco logo depois das fileiras de mood, nesta ordem, capa deitada, dublados prontos primeiro:
+| id | nome | tipo | fonte |
 |---|---|---|---|
-| `comet_mood_cry` | 😭 Para chorar no domingo | movie | drama (18) + keywords que existam no TMDB entre `tearjerker`, `grief`, `terminal illness`, `loss of loved one`, `based on true story` (OU); `vote_average ≥ 7.2`, `vote_count ≥ 800` |
-| `comet_mood_twist` | 🤯 Plot twist de explodir a cabeça | movie | keywords `plot twist`, `twist ending`, `unreliable narrator`, `mind bending` (OU); `vote_average ≥ 7`, `vote_count ≥ 1000` |
-| `comet_mood_binge` | ⚡ Séries curtas pra maratonar num dia | series | `with_type=2` (minissérie) ou `number_of_seasons=1` com ≤ 8 episódios (confira em `tv/<id>`; cache 7 dias); `vote_average ≥ 7.5`, `vote_count ≥ 300` |
-| `comet_mood_light` | 😌 Comédia leve pra desligar | movie | comédia (35), **sem** terror (27), thriller (53), crime (80), guerra (10752); `with_runtime.lte=115`; `vote_average ≥ 6.8`, `vote_count ≥ 800` |
-| `comet_mood_family` | 👨‍👩‍👧 Sessão em família (**também no Kids**) | movie | família (10751) ou animação (16) sem terror; `vote_average ≥ 7`, `vote_count ≥ 1000` |
-| `comet_mood_night` | 🌙 Suspense pra ver à noite | movie | thriller (53) ou mistério (9648); `vote_average ≥ 7`, `vote_count ≥ 1000` |
-Keywords: resolva os ids pelo `search/keyword` uma vez e guarde (reuse o cache da `smart_search`). Cache do catálogo 6 h.
-
-## 2. 🎌 Animes dublados (pessoal e Kids, `type: series`, id `comet_anime_dub`)
-- Logo depois de `🔥 Animes da temporada` (ou a fileira de anime que já existe) no manifest.
-- Itens: animes (gênero animação + origem/idioma `ja`) que têm **🇧🇷 com ⚡** no banco (mesmo critério do `⚡ Pronto dublado`), mais recentes primeiro, até 40.
-- Se tiver < 15, complete com os animes mais populares do TMDB que têm PT no banco (mesmo que não ⚡), marcando-os depois.
-- Madrugada: acrescente à lista de trabalho o S1E1 dos 20 animes mais populares (discover animação `ja`, `vote_count ≥ 200`) que ainda não estão no banco, para a fileira crescer sozinha (respeite `NIGHTLY_MAX_ITEMS` aumentando-o para 60).
-- Kids: só os de classificação livre/infantil (os do discover com `certification` BR ≤ 12 ou sem violência; use o mesmo filtro que o Kids já usa).
-
-## 3. 📅 Estreias da semana (link pessoal, `type: series`, id `comet_week`)
-- Logo depois de `🔔 Chegou dublado`.
-- Episódios com estreia de **segunda a domingo da semana atual** (fuso -03): (a) das séries do histórico (últimos 90 dias; via `videos` do meta), e (b) das 30 mais populares do `tv/on_the_air` (região BR).
-- Um item por série (o episódio desta semana mais recente), ordenado por data (hoje primeiro, depois os próximos, depois os que já saíram). `description`: `📅 <Dia da semana> DD/MM · T<S>E<E> · <🇧🇷 dublado pronto | legendado | ainda não saiu>` (o status vem de `dub_watch`/banco; sem dado = `legendado` se já saiu). Selo `new_ep` só nos que já saíram.
-- Cache 1 h.
+| `comet_oscar` | 🏆 Vencedores do Oscar de Melhor Filme | movie | lista fixa no código (tt ids) dos vencedores de 1990 até o mais recente, ordem do mais novo para o mais antigo |
+| `comet_imdbtop` | ⭐ Os mais bem avaliados de todos os tempos | movie | TMDB `movie/top_rated` (pt-BR, várias páginas) filtrado por `vote_count ≥ 5000`, até 60 |
+| `comet_classic_dub` | 📼 Clássicos dublados | movie | filmes lançados **antes de 2000** com `🇧🇷` no banco (mesmo critério do `⚡ Pronto dublado`, mas sem exigir ⚡), ordenados por popularidade TMDB; complete com `discover` (`primary_release_date.lte=1999-12-31`, `vote_count ≥ 2000`) se tiver < 20. **Também no Kids** filtrando família/animação. |
+- Madrugada: aqueça o OMDb dos itens dessas 3 fileiras e das 8 primeiras de cada fileira principal (respeitando o orçamento), para os selos de Oscar aparecerem.
 
 ## Fora de escopo
-Tudo o resto. Não mude a ordem das fileiras existentes (só insira as novas nas posições acima).
+Tudo o resto.
 
 ## Aplicar
-`py_compile`; reinicie (`.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`, polling `curl` no `manifest`); regenere o patch (`git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp`, `chmod 644`, `adb pull` para `comet-patches/ptbr-first.patch`; zero `\r`; apague temporários).
+`py_compile`; reinicie (`.\scripts\a71.ps1 'pkill -f "python -m comet.main"'`, polling `curl` no `manifest`); `git -C /opt/comet add -N` dos novos; regenere o patch (`git -C /opt/comet diff -- . ':!comet/templates/index.html' > /var/tmp/x.patch`; copie para `/data/local/tmp`, `chmod 644`, `adb pull` para `comet-patches/ptbr-first.patch`; zero `\r`; apague temporários).
 
-## Verificação (link pessoal e Kids, sem imprimir URL/token)
-1. Manifest pessoal: posições das 8 fileiras novas e a ordem relativa das antigas inalterada. Kids: `comet_mood_family` e `comet_anime_dub`.
-2. Cada fileira: nº de itens e os 6 primeiros nomes; 2 pedidos no mesmo dia = mesma ordem.
-3. `comet_mood_light` sem nenhum item de terror/thriller (confira os gêneros no meta de 10).
-4. `comet_anime_dub`: quantos ⚡ dublados; Kids sem anime adulto (mostre os nomes).
-5. `comet_week`: 8 itens com a descrição completa.
-6. Tempo da 1ª carga de cada fileira (≤ 6 s) e da 2ª (cache).
-7. `scripts/regress.py`: teste `fileiras_novas` (cada uma ≥ 10 itens, menos `comet_week` ≥ 3). `.\scripts\smoke.ps1` → `SMOKE OK`; `.\scripts\regress.ps1` → `REGRESS OK`.
+## Verificação (sem imprimir chave/token)
+1. `meta/movie/tt0111161`, `tt0068646` (O Poderoso Chefão), `tt15398776` (Oppenheimer) e `meta/series/tt0903747`: 1ª linha da descrição (notas + Oscar).
+2. Contador do OMDb depois dos testes (quantas consultas usadas hoje).
+3. As 3 fileiras: nº de itens e 6 primeiros; `comet_oscar` começa pelo vencedor mais recente.
+4. Capa de um vencedor do Oscar (após cache): copie para `downloads/capas-teste/oscar.jpg` no PC.
+5. `scripts/regress.py`: teste `notas` (meta de `tt0111161` tem `IMDb` e `🏆`) e as 3 fileiras ≥ 15 itens. `.\scripts\smoke.ps1` → `SMOKE OK`; `.\scripts\regress.ps1` → `REGRESS OK` (em primeiro plano).
 
-Responda em no máximo 10 linhas.
+Responda em no máximo 8 linhas.

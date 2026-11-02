@@ -1333,6 +1333,9 @@ def t_fileiras_novas(token: str) -> tuple[str, str]:
         ("movie", "comet_mood_night", 10),
         ("series", "comet_anime_dub", 10),
         ("series", "comet_week", 3),
+        ("movie", "comet_mood_oscar", 15),
+        ("movie", "comet_mood_top", 15),
+        ("movie", "comet_mood_classicdub", 15),
     ]
     with get_client(timeout=35.0) as client:
         counts = {}
@@ -1344,7 +1347,21 @@ def t_fileiras_novas(token: str) -> tuple[str, str]:
             counts[cid] = len(metas)
             if len(metas) < min_items:
                 return "FAIL", f"{cid} retornou apenas {len(metas)} itens (< {min_items})"
-    return "PASS", f"8 fileiras novas OK ({', '.join(f'{k}={v}' for k, v in counts.items())})"
+    return "PASS", f"{len(counts)} fileiras novas OK ({', '.join(f'{k}={v}' for k, v in counts.items())})"
+
+
+def t_notas(token: str) -> tuple[str, str]:
+    """Página do título com notas do OMDb (IMDb/Rotten) e Oscar; usa o cache, não gasta cota."""
+    with get_client(timeout=35.0) as client:
+        r = client.get(f"/{token}/meta/movie/tt0068646.json")
+        if r.status_code != 200:
+            return "FAIL", f"meta status {r.status_code}"
+        first = ((r.json().get("meta") or {}).get("description") or "").split("\n")[0]
+    if "IMDb" not in first:
+        return "WARN", "sem linha de notas (OMDb sem cota ou fora do ar?)"
+    if "Oscar" not in first:
+        return "FAIL", f"O Poderoso Chefão sem Oscar na linha de notas: {first[:80]}"
+    return "PASS", first[:90]
 
 
 
@@ -1462,6 +1479,7 @@ def main():
         ("sorteio", lambda: t_sorteio(token)),
         ("saga", lambda: t_saga(token, public_base)),
         ("fileiras_novas", lambda: t_fileiras_novas(token)),
+        ("notas", lambda: t_notas(token)),
     ]
 
     selected_parallel = [
