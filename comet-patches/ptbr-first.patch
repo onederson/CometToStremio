@@ -4049,7 +4049,7 @@ index 88b8606..796cafe 100644
 +        "swaps_451": swaps_451,
 +    }
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..e24ff44 100644
+index 835a975..726db03 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4117,7 +4117,7 @@ index 835a975..e24ff44 100644
 +    CATALOG_LANGUAGE: str = "pt-BR"
 +    CATALOG_ORIGINALS: bool = True
 +    CATALOG_LANDSCAPE: bool = True
-+    PREVIEW_TEST_ROW: bool = True
++    PREVIEW_TEST_ROW: bool = False
 +    CATALOG_PROVIDERS: str | list[str] = [
 +        "netflix",
 +        "prime",
