@@ -315,10 +315,9 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 **Estado (02/11/2026, noite):** tudo da Seção 4 (itens 1–29) está rodando no A71, testado (`SMOKE OK`, `REGRESS OK` com 40 testes; o WARN de `comet_mylist` vazio é normal) e no GitHub (`onederson/CometToStremio`, branch `main`). A restauração automática do smoke está **ligada** (sem `data/smoke.disable`).
 
-**Último passo feito:** acesso fora de casa (item 29). O link agora é `https://a71comet.duckdns.org:7443/<PERSONAL_LINK_TOKEN>/manifest.json` e foi testado de fora (5 países, HTTP 200). Falta o **usuário reinstalar o addon com o link :7443 em todos os aparelhos e testar no 4G** (abrir um filme, um episódio e um canal de TV).
+**Último passo feito:** acesso fora de casa (item 29). O link agora é `https://a71comet.duckdns.org:7443/<PERSONAL_LINK_TOKEN>/manifest.json` e foi testado de fora (5 países, HTTP 200). **O usuário reinstalou com o link :7443 e confirmou que funciona no 4G (02/11/2026).**
 
 **Pendente do lado do usuário:**
-1. Reinstalar o addon com o link `:7443` (PC, TV, celular) e testar no 4G.
 2. (Opcional) AdGuard: reescrita `a71comet.duckdns.org` → `192.168.3.44` (o roteador já faz NAT loopback, então não é obrigatória).
 3. (Opcional) Vigia externo: conta no healthchecks.io para avisar no Telegram se o A71 inteiro cair (sem energia/internet); o A71 não consegue avisar de si mesmo.
 4. Assinar o TorBox Essential (a conta grátis tem limite).
