@@ -84,14 +84,15 @@ index f7832d1..11064ca 100644
  for stremio_router in stremio_routers:
 diff --git a/comet/api/endpoints/artwork.py b/comet/api/endpoints/artwork.py
 new file mode 100644
-index 0000000..360a93c
+index 0000000..4a6893d
 --- /dev/null
 +++ b/comet/api/endpoints/artwork.py
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,131 @@
 +from fastapi import APIRouter, HTTPException, Response
 +
 +from comet.services.artwork import (
 +    ArtworkNotFound,
++    render_animation,
 +    render_landscape,
 +    render_poster,
 +    render_top10,
@@ -180,6 +181,38 @@ index 0000000..360a93c
 +        return Response(
 +            content=data,
 +            media_type="image/jpeg",
++            headers={"Cache-Control": "public, max-age=2592000, immutable"},
++        )
++    except (ArtworkNotFound, ValueError):
++        raise HTTPException(status_code=404, detail="Artwork not found")
++    except Exception as e:
++        raise HTTPException(status_code=404, detail="Artwork not found")
++
++
++@router.get(
++    "/art/anim/{media_type}/{filename:path}",
++    summary="Animated Artwork",
++    description="Returns animated backdrop or poster in WebP or GIF format.",
++)
++async def get_art_anim(media_type: str, filename: str, kind: str | None = None):
++    try:
++        parts = filename.strip("/").split("/")
++        if len(parts) == 2 and media_type in ("poster", "backdrop"):
++            actual_kind = media_type
++            actual_type = parts[0]
++            actual_file = parts[1]
++        else:
++            actual_kind = kind or "backdrop"
++            actual_type = media_type
++            actual_file = parts[-1]
++
++        if "." not in actual_file:
++            raise HTTPException(status_code=404, detail="Invalid filename")
++        tmdb_id, ext = actual_file.rsplit(".", 1)
++        data, mime = await render_animation(actual_type, tmdb_id, ext, kind=actual_kind)
++        return Response(
++            content=data,
++            media_type=mime,
 +            headers={"Cache-Control": "public, max-age=2592000, immutable"},
 +        )
 +    except (ArtworkNotFound, ValueError):
@@ -4016,7 +4049,7 @@ index 88b8606..796cafe 100644
 +        "swaps_451": swaps_451,
 +    }
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..4f11e57 100644
+index 835a975..e24ff44 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4054,7 +4087,7 @@ index 835a975..4f11e57 100644
      REMOVE_ADULT_CONTENT: bool | None = False
      BACKGROUND_SCRAPER_ENABLED: bool | None = False
      BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
-@@ -317,6 +331,50 @@ class AppSettings(ServerSettings):
+@@ -317,6 +331,51 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -4084,6 +4117,7 @@ index 835a975..4f11e57 100644
 +    CATALOG_LANGUAGE: str = "pt-BR"
 +    CATALOG_ORIGINALS: bool = True
 +    CATALOG_LANDSCAPE: bool = True
++    PREVIEW_TEST_ROW: bool = True
 +    CATALOG_PROVIDERS: str | list[str] = [
 +        "netflix",
 +        "prime",
@@ -4105,7 +4139,7 @@ index 835a975..4f11e57 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +711,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +712,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -6129,10 +6163,10 @@ index 0000000..fd74bc2
 +    return {}
 diff --git a/comet/services/artwork.py b/comet/services/artwork.py
 new file mode 100644
-index 0000000..4e0304a
+index 0000000..48273bd
 --- /dev/null
 +++ b/comet/services/artwork.py
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,951 @@
 +import asyncio
 +import hashlib
 +import io
@@ -6866,6 +6900,224 @@ index 0000000..4e0304a
 +        _save_atomic(cache_path, jpeg_bytes)
 +        _cleanup_cache_if_needed()
 +        return jpeg_bytes
++
++
++_ANIM_SEMAPHORE = asyncio.Semaphore(1)
++
++
++def _build_animation_frames(
++    scenes: list[Image.Image],
++    W: int,
++    H: int,
++    fps: int,
++    still_sec: float,
++    trans_sec: float,
++) -> list[Image.Image]:
++    W_max, H_max = round(W * 1.03), round(H * 1.03)
++    still_count = max(1, round(still_sec * fps))
++    trans_count = max(1, round(trans_sec * fps))
++
++    cropped_scenes = []
++    for im in scenes:
++        scale = max(W_max / im.width, H_max / im.height)
++        nw, nh = round(im.width * scale), round(im.height * scale)
++        res = im.resize((nw, nh), Image.Resampling.BILINEAR)
++        x0 = (nw - W_max) // 2
++        y0 = (nh - H_max) // 2
++        cropped_scenes.append(res.crop((x0, y0, x0 + W_max, y0 + H_max)))
++
++    scene_frames = []
++    for idx, sc in enumerate(cropped_scenes):
++        frs = []
++        zoom_in = (idx % 2 == 0)
++        for f in range(still_count):
++            p = f / (still_count - 1) if still_count > 1 else 0.0
++            if not zoom_in:
++                p = 1.0 - p
++            cw = round(W_max - p * (W_max - W))
++            ch = round(H_max - p * (H_max - H))
++            x0 = (W_max - cw) // 2
++            y0 = (H_max - ch) // 2
++            fr = sc.crop((x0, y0, x0 + cw, y0 + ch)).resize((W, H), Image.Resampling.BILINEAR)
++            frs.append(fr)
++        scene_frames.append(frs)
++
++    all_frames = []
++    n = len(scene_frames)
++    for i in range(n):
++        all_frames.extend(scene_frames[i])
++        next_i = (i + 1) % n
++        last_cur = scene_frames[i][-1]
++        first_next = scene_frames[next_i][0]
++        for t in range(1, trans_count + 1):
++            alpha = t / (trans_count + 1)
++            all_frames.append(Image.blend(last_cur, first_next, alpha))
++
++    return all_frames
++
++
++def _encode_webp(all_frames: list[Image.Image], duration_ms: int, quality: int = 70) -> bytes:
++    buf = io.BytesIO()
++    all_frames[0].save(
++        buf,
++        format="WEBP",
++        save_all=True,
++        append_images=all_frames[1:],
++        duration=duration_ms,
++        loop=0,
++        quality=quality,
++        method=4,
++    )
++    return buf.getvalue()
++
++
++def _encode_gif(all_frames: list[Image.Image], duration_ms: int, colors: int = 64) -> bytes:
++    palette_img = all_frames[0].quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
++    p_frames = [f.quantize(palette=palette_img) for f in all_frames]
++    buf = io.BytesIO()
++    p_frames[0].save(
++        buf,
++        format="GIF",
++        save_all=True,
++        append_images=p_frames[1:],
++        duration=duration_ms,
++        loop=0,
++        optimize=True,
++    )
++    return buf.getvalue()
++
++
++async def render_animation(
++    media_type: str,
++    tmdb_id: str | int,
++    ext: str,
++    kind: str = "backdrop",
++) -> tuple[bytes, str]:
++    ext = ext.lower().strip()
++    if ext not in ("webp", "gif"):
++        raise ArtworkNotFound(f"Unsupported format: {ext}")
++    clean_type = "tv" if media_type in ("tv", "series") else "movie"
++    try:
++        clean_id = int(str(tmdb_id).strip())
++    except (ValueError, TypeError):
++        raise ArtworkNotFound(f"Invalid tmdb_id: {tmdb_id}")
++
++    is_poster = (kind == "poster")
++    if is_poster:
++        cache_filename = f"anim-poster-{clean_type}-{clean_id}.{ext}"
++    else:
++        cache_filename = f"anim-{clean_type}-{clean_id}.{ext}"
++    cache_path = os.path.join(CACHE_DIR, cache_filename)
++
++    if os.path.isfile(cache_path):
++        try:
++            with open(cache_path, "rb") as f:
++                return f.read(), f"image/{ext}"
++        except Exception:
++            pass
++
++    async with _ANIM_SEMAPHORE:
++        if os.path.isfile(cache_path):
++            try:
++                with open(cache_path, "rb") as f:
++                    return f.read(), f"image/{ext}"
++            except Exception:
++                pass
++
++        t0 = time.time()
++        timeout = aiohttp.ClientTimeout(total=20.0)
++        async with aiohttp.ClientSession(timeout=timeout) as session:
++            from comet.metadata.tmdb import TMDBApi
++            tmdb = TMDBApi(session)
++            data = await tmdb._get_json(
++                f"{clean_type}/{clean_id}/images?include_image_language=null,pt,en",
++                f"anim {clean_id}",
++            )
++            if not isinstance(data, dict):
++                raise ArtworkNotFound(f"Failed to fetch TMDB images for {clean_type}/{clean_id}")
++
++            if is_poster:
++                W, H = 342, 513
++                target_size = 1572864
++                candidates = data.get("posters") or []
++                if len(candidates) < 4:
++                    bds = [b for b in data.get("backdrops", []) if b.get("iso_639_1") in (None, "null", "")]
++                    candidates.extend(bds or data.get("backdrops", []))
++                candidates = sorted(
++                    candidates,
++                    key=lambda x: (x.get("vote_average") or 0.0, x.get("vote_count") or 0),
++                    reverse=True,
++                )
++                selected_meta = candidates[:4]
++                img_size_pref = "w500"
++            else:
++                W, H = 780, 439
++                target_size = 1572864 if ext == "webp" else 3145728
++                all_bds = data.get("backdrops") or []
++                no_text = [b for b in all_bds if b.get("iso_639_1") in (None, "null", "")]
++                candidates = no_text if no_text else all_bds
++                candidates = sorted(
++                    candidates,
++                    key=lambda x: (x.get("vote_average") or 0.0, x.get("vote_count") or 0),
++                    reverse=True,
++                )
++                max_scenes = 6 if ext == "webp" else 3
++                selected_meta = candidates[:max_scenes]
++                img_size_pref = "w780"
++
++            if not selected_meta:
++                raise ArtworkNotFound(f"No suitable images for {clean_type}/{clean_id}")
++
++            raw_scenes = []
++            for item in selected_meta:
++                fpath = (item.get("file_path") or "").lstrip("/")
++                if not fpath:
++                    continue
++                try:
++                    url = f"{TMDB_IMAGE_BASE}/{img_size_pref}/{fpath}"
++                    async with session.get(url) as resp:
++                        if resp.status == 200:
++                            raw = await resp.read()
++                            raw_scenes.append(Image.open(io.BytesIO(raw)).convert("RGB"))
++                except Exception as e:
++                    logger.warning(f"Failed to download image {fpath}: {e}")
++
++            if not raw_scenes:
++                raise ArtworkNotFound(f"Could not download images for {clean_type}/{clean_id}")
++
++        def generate_and_encode() -> bytes:
++            scenes = list(raw_scenes)
++            if ext == "webp":
++                fps = 10
++                duration_ms = 100
++                frames = _build_animation_frames(scenes, W, H, fps, 1.2, 0.3)
++                data = _encode_webp(frames, duration_ms, quality=70)
++                if len(data) > target_size and len(scenes) > 3:
++                    fps = 8
++                    duration_ms = 125
++                    frames = _build_animation_frames(scenes[:4], W, H, fps, 1.2, 0.3)
++                    data = _encode_webp(frames, duration_ms, quality=65)
++                return data
++            else:
++                fps = 5
++                duration_ms = 200
++                gif_scenes = scenes[:3]
++                frames = _build_animation_frames(gif_scenes, W, H, fps, 1.2, 0.2)
++                data = _encode_gif(frames, duration_ms, colors=64)
++                if len(data) > target_size:
++                    frames = _build_animation_frames(gif_scenes[:2], W, H, 4, 1.2, 0.25)
++                    data = _encode_gif(frames, 250, colors=32)
++                return data
++
++        encoded_data = await asyncio.to_thread(generate_and_encode)
++
++        _save_atomic(cache_path, encoded_data)
++        _cleanup_cache_if_needed()
++        elapsed = time.time() - t0
++        kb = len(encoded_data) // 1024
++        n_cenas = len(raw_scenes) if ext == "webp" else min(len(raw_scenes), 3)
++        logger.info(f"🎞️ fundo animado {clean_id}: {n_cenas} cenas, {kb} KB em {elapsed:.1f}s")
++        return encoded_data, f"image/{ext}"
 diff --git a/comet/services/audio_probe.py b/comet/services/audio_probe.py
 new file mode 100644
 index 0000000..be67dda
@@ -7547,10 +7799,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..3b4254f
+index 0000000..0ae9b4c
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,3657 @@
+@@ -0,0 +1,3735 @@
 +import asyncio
 +import datetime
 +import json
@@ -8224,14 +8476,13 @@ index 0000000..3b4254f
 +        }
 +    )
 +
-+    # 🎬 Sagas (filme)
++    # 🎬 Sagas (séries - tela inicial)
 +    catalogs.append(
 +        {
-+            "type": "movie",
-+            "id": "comet_saga",
++            "type": "series",
++            "id": "comet_sagas",
 +            "name": "🎬 Sagas",
 +            "extra": [
-+                {"name": "genre", "options": SAGA_OPTIONS, "isRequired": False},
 +                {"name": "skip", "isRequired": False},
 +            ],
 +        }
@@ -8304,6 +8555,19 @@ index 0000000..3b4254f
 +        }
 +    )
 +
++    # 🎬 Sagas (filme - apenas Descobrir, com gênero obrigatório)
++    catalogs.append(
++        {
++            "type": "movie",
++            "id": "comet_saga",
++            "name": "🎬 Sagas",
++            "extra": [
++                {"name": "genre", "options": SAGA_OPTIONS, "isRequired": True},
++                {"name": "skip", "isRequired": False},
++            ],
++        }
++    )
++
 +    if is_personal and getattr(settings, "LIVE_TV", True):
 +        idx = next((i for i, c in enumerate(catalogs) if c.get("id") == "comet_new" and c.get("type") == "series"), -1)
 +        livehome_cat = {
@@ -8330,6 +8594,19 @@ index 0000000..3b4254f
 +                    {"name": "search", "isRequired": False},
 +                ],
 +            }
++        )
++
++    if is_personal and not kids and getattr(settings, "PREVIEW_TEST_ROW", True):
++        catalogs.insert(
++            0,
++            {
++                "type": "movie",
++                "id": "comet_previewtest",
++                "name": "🧪 Teste: fundo animado",
++                "extra": [
++                    {"name": "skip", "isRequired": False},
++                ],
++            },
 +        )
 +
 +    return catalogs
@@ -8870,6 +9147,8 @@ index 0000000..3b4254f
 +            and not catalog_id.startswith("comet_orig_")
 +            and catalog_id not in (
 +                "comet_saga",
++                "comet_sagas",
++                "comet_previewtest",
 +                "comet_search",
 +                "comet_person",
 +                "comet_kids_tv",
@@ -11030,6 +11309,52 @@ index 0000000..3b4254f
 +    if not base_url:
 +        # chamadas internas (warmup) nao tem request: sem isso o cache guarda posters relativos
 +        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
++
++    if catalog_id == "comet_previewtest":
++        if media_type != "movie" or kids or not getattr(settings, "PREVIEW_TEST_ROW", True):
++            return []
++        return [
++            {
++                "id": "tt15239678",
++                "type": "movie",
++                "name": "Duna: Parte 2 (A · WebP)",
++                "poster": "https://image.tmdb.org/t/p/w500/VMy4UGsI2u3f4fALGeCqCdsQBb.jpg",
++                "background": f"{base_url}/art/anim/movie/693134.webp",
++                "description": "Paul Atreides se une a Chani e aos Fremen enquanto busca vingança contra os conspiradores que destruíram sua família.",
++                "releaseInfo": "2024",
++                "imdbRating": "8.5",
++            },
++            {
++                "id": "tt6263850",
++                "type": "movie",
++                "name": "Deadpool & Wolverine (B · GIF)",
++                "poster": "https://image.tmdb.org/t/p/w500/cJFqqiDYprqExaXatu4AaoMzDG2.jpg",
++                "background": f"{base_url}/art/anim/movie/533535.gif",
++                "description": "Um apático Wade Wilson labuta na vida civil até que uma ameaça ao seu planeta natal o faz vestir o traje novamente ao lado de Wolverine.",
++                "releaseInfo": "2024",
++                "imdbRating": "7.7",
++            },
++            {
++                "id": "tt0816692",
++                "type": "movie",
++                "name": "Interestelar (C · WebP)",
++                "poster": f"{base_url}/art/anim/poster/movie/157336.webp",
++                "background": "https://image.tmdb.org/t/p/w1280/8sNiAPPYU14PUepFNeSNGUTiHW.jpg",
++                "description": "Um grupo de exploradores faz uso de um buraco de minhoca recém-descoberto para superar as limitações das viagens espaciais humanas.",
++                "releaseInfo": "2014",
++                "imdbRating": "8.7",
++            },
++            {
++                "id": "tt15398776",
++                "type": "movie",
++                "name": "Oppenheimer (D · Controle)",
++                "poster": "https://image.tmdb.org/t/p/w500/dUPQszWoRSE9FucJTbVp2bwEi9G.jpg",
++                "background": "https://image.tmdb.org/t/p/w1280/neeNHeXjMF5fXoCJRsOmkNGC7q.jpg",
++                "description": "A história do cientista americano J. Robert Oppenheimer e seu papel no desenvolvimento da bomba atômica.",
++                "releaseInfo": "2023",
++                "imdbRating": "8.9",
++            },
++        ]
 +    if catalog_id in ("comet_mylist", "comet_newep", "comet_foryou", "comet_dubready"):
 +        if kids or not getattr(settings, "STREMIO_AUTH_KEY", None):
 +            return []
@@ -11150,17 +11475,22 @@ index 0000000..3b4254f
 +            )
 +            return []
 +
-+    if catalog_id == "comet_saga":
-+        if media_type != "movie":
-+            return []
++    if catalog_id in ("comet_saga", "comet_sagas"):
 +        extra = extra or {}
 +        genre = extra.get("genre")
++        if catalog_id == "comet_sagas":
++            if media_type != "series":
++                return []
++            genre = None
++        else:
++            if media_type != "movie" or not genre:
++                return []
 +        skip_raw = extra.get("skip", 0)
 +        try:
 +            skip = int(skip_raw)
 +        except (ValueError, TypeError):
 +            skip = 0
-+        cache_key = (media_type, "comet_saga", genre, skip)
++        cache_key = (media_type, catalog_id, genre, skip)
 +        cached = _get_cached_catalog(cache_key)
 +        if cached is not None:
 +            return cached
@@ -11171,11 +11501,11 @@ index 0000000..3b4254f
 +                    _set_cached_catalog(cache_key, metas)
 +                return metas
 +        except TimeoutError:
-+            logger.warning("Saga catalog timeout")
++            logger.warning(f"Saga catalog timeout for {catalog_id}")
 +            return []
 +        except Exception as e:
 +            logger.warning(
-+                f"Saga catalog error: {type(e).__name__}"
++                f"Saga catalog error for {catalog_id}: {type(e).__name__}"
 +            )
 +            return []
 +
@@ -11193,7 +11523,7 @@ index 0000000..3b4254f
 +        return cached
 +
 +    try:
-+        async with asyncio.timeout(10.0):
++        async with asyncio.timeout(15.0):
 +            metas = await _fetch_catalog_items(
 +                media_type, catalog_id, genre, skip, base_url=base_url, kids=kids
 +            )
@@ -12177,10 +12507,10 @@ index 81fb382..f1528ef 100644
  
 diff --git a/comet/services/live_tv.py b/comet/services/live_tv.py
 new file mode 100644
-index 0000000..ca3a565
+index 0000000..2e678c2
 --- /dev/null
 +++ b/comet/services/live_tv.py
-@@ -0,0 +1,676 @@
+@@ -0,0 +1,881 @@
 +import asyncio
 +import datetime
 +import hashlib
@@ -12198,6 +12528,7 @@ index 0000000..ca3a565
 +from comet.services.direct_addons import _is_host_blocked_by_house_dns
 +
 +PLUTO_DEVICE_ID_FILE = "/opt/comet/data/pluto_device_id"
++PLUTO_ALIVE_FILE = "/opt/comet/data/pluto_alive.json"
 +IPTV_ALIVE_FILE = "/opt/comet/data/iptv_alive.json"
 +PLUTO_API_URL = "https://api.pluto.tv/v2/channels"
 +IPTV_ORG_BR_URL = "https://iptv-org.github.io/iptv/countries/br.m3u"
@@ -12217,12 +12548,71 @@ index 0000000..ca3a565
 +_pluto_categories: list[str] = []
 +_pluto_cache_time: float = 0.0
 +_pluto_lock = asyncio.Lock()
++_pluto_alive_ids: set[str] | None = None
++
++_pluto_v4_cache: dict | None = None
++_pluto_v4_cache_expiry: float = 0.0
++_pluto_v4_lock = asyncio.Lock()
 +
 +_iptv_channels: list[dict] = []
 +_iptv_channels_by_id: dict[str, dict] = {}
 +_iptv_last_validated: str = "N/A"
 +_iptv_validation_running: bool = False
 +_background_iptv_task = None
++
++
++def check_channel_chain(url: str, timeout: float = 8.0) -> tuple[bool, str]:
++    headers = {"User-Agent": "ExoPlayerLib/2.19.1"}
++    try:
++        if any(ord(c) < 32 or ord(c) == 127 for c in url):
++            return False, "control characters in url"
++        with httpx.Client(headers=headers, follow_redirects=True, timeout=timeout) as client:
++            r = client.get(url)
++            if r.status_code != 200:
++                return False, f"master status {r.status_code}"
++            txt = r.text
++            if not txt.startswith("#EXTM3U") and "#EXTM3U" not in txt[:100]:
++                return False, "master sem EXTM3U"
++
++            lines = [l.strip() for l in txt.splitlines() if l.strip() and not l.strip().startswith("#")]
++            if not lines:
++                return False, "master sem variantes"
++
++            var_url = urllib.parse.urljoin(str(r.url), lines[0])
++            r_var = client.get(var_url)
++            if r_var.status_code != 200:
++                return False, f"variante status {r_var.status_code}"
++            var_txt = r_var.text
++            if not var_txt.startswith("#EXTM3U") and "#EXTM3U" not in var_txt[:100]:
++                return False, "variante sem EXTM3U"
++
++            segs = [l.strip() for l in var_txt.splitlines() if l.strip() and not l.strip().startswith("#")]
++            if not segs:
++                return False, "variante sem segmentos"
++
++            for s in segs:
++                s_lower = s.lower()
++                if "takedownslate" in s_lower or "slate" in s_lower:
++                    return False, "slate"
++
++            seg_idx = min(2, len(segs) - 1)
++            seg_target = segs[seg_idx]
++            if any(ord(c) < 32 or ord(c) == 127 for c in seg_target):
++                return False, "control characters in segment"
++
++            seg_url = urllib.parse.urljoin(str(r_var.url), seg_target)
++            if "takedownslate" in seg_url.lower() or "slate" in seg_url.lower():
++                return False, "slate"
++
++            with client.stream("GET", seg_url) as s_resp:
++                if s_resp.status_code != 200:
++                    return False, f"segmento status {s_resp.status_code}"
++                chunk = next(s_resp.iter_bytes(4096), b"")
++                if len(chunk) < 100:
++                    return False, f"segmento vazio ({len(chunk)}B)"
++                return True, "ok"
++    except Exception as e:
++        return False, f"erro {type(e).__name__}: {str(e)[:60]}"
 +
 +
 +def _get_pluto_device_id() -> str:
@@ -12259,6 +12649,41 @@ index 0000000..ca3a565
 +    return 1024
 +
 +
++def load_pluto_alive_from_file():
++    global _pluto_alive_ids
++    if not os.path.exists(PLUTO_ALIVE_FILE):
++        _pluto_alive_ids = None
++        return
++    try:
++        with open(PLUTO_ALIVE_FILE, "r", encoding="utf-8") as f:
++            data = json.load(f)
++            if isinstance(data, dict):
++                ids = data.get("alive_ids")
++                if isinstance(ids, list):
++                    _pluto_alive_ids = set(ids)
++            elif isinstance(data, list):
++                _pluto_alive_ids = set(data)
++    except Exception as e:
++        logger.warning(f"Error loading pluto_alive.json: {e}")
++
++
++def save_pluto_alive_to_file(alive_ids: list[str] | set[str]):
++    global _pluto_alive_ids
++    _pluto_alive_ids = set(alive_ids)
++    try:
++        os.makedirs(os.path.dirname(PLUTO_ALIVE_FILE), exist_ok=True)
++        tmp_path = f"{PLUTO_ALIVE_FILE}.tmp.{os.getpid()}"
++        payload = {
++            "last_validated": datetime.datetime.now().astimezone(BR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
++            "alive_ids": sorted(list(_pluto_alive_ids)),
++        }
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(payload, f, indent=2)
++        os.replace(tmp_path, PLUTO_ALIVE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving pluto_alive.json: {e}")
++
++
 +def load_iptv_alive_from_file():
 +    global _iptv_channels, _iptv_channels_by_id, _iptv_last_validated
 +    if not os.path.exists(IPTV_ALIVE_FILE):
@@ -12293,6 +12718,56 @@ index 0000000..ca3a565
 +        os.replace(tmp_path, IPTV_ALIVE_FILE)
 +    except Exception as e:
 +        logger.warning(f"Error saving iptv_alive.json: {e}")
++
++
++async def get_pluto_v4_session(force_refresh: bool = False) -> dict | None:
++    global _pluto_v4_cache, _pluto_v4_cache_expiry
++    now = time.time()
++    if not force_refresh and _pluto_v4_cache and now < _pluto_v4_cache_expiry:
++        return _pluto_v4_cache
++
++    async with _pluto_v4_lock:
++        now = time.time()
++        if not force_refresh and _pluto_v4_cache and now < _pluto_v4_cache_expiry:
++            return _pluto_v4_cache
++
++        client_id = _get_pluto_device_id()
++        params = {
++            "appName": "web",
++            "appVersion": "9.0.0",
++            "deviceVersion": "122.0.0",
++            "deviceModel": "web",
++            "deviceMake": "chrome",
++            "deviceType": "web",
++            "clientID": client_id,
++            "clientModelNumber": "1.0.0",
++            "serverSideAds": "false",
++        }
++        url = "https://boot.pluto.tv/v4/start?" + urllib.parse.urlencode(params)
++        try:
++            async with httpx.AsyncClient(timeout=15.0) as client:
++                resp = await client.get(url)
++                if resp.status_code == 200:
++                    data = resp.json()
++                    session_token = data.get("sessionToken")
++                    stitcher_params = (data.get("stitcherParams") or "").lstrip("?&")
++                    servers = data.get("servers") or {}
++                    stitcher = (servers.get("stitcher") or "").rstrip("/")
++                    refresh_in_sec = int(data.get("refreshInSec") or 28800)
++                    if session_token and stitcher:
++                        _pluto_v4_cache = {
++                            "sessionToken": session_token,
++                            "stitcherParams": stitcher_params,
++                            "stitcher": stitcher,
++                        }
++                        _pluto_v4_cache_expiry = now + max(60, refresh_in_sec - 300)
++                        return _pluto_v4_cache
++        except Exception as e:
++            logger.warning(f"Error fetching Pluto v4 session: {e}")
++
++        if _pluto_v4_cache:
++            return _pluto_v4_cache
++        return None
 +
 +
 +async def get_pluto_channels(force_refresh: bool = False) -> list[dict]:
@@ -12351,6 +12826,41 @@ index 0000000..ca3a565
 +    return _iptv_channels_by_id.get(iptv_id)
 +
 +
++async def validate_pluto_channels():
++    try:
++        channels = await get_pluto_channels()
++        session = await get_pluto_v4_session()
++        stitcher = (session.get("stitcher") or "").rstrip("/") if session else ""
++        sp = (session.get("stitcherParams") or "").lstrip("?&") if session else ""
++        jwt = session.get("sessionToken") if session else ""
++
++        alive = []
++        for ch in channels:
++            cid = ch.get("_id")
++            if not cid:
++                continue
++
++            v4_ok = False
++            if stitcher and jwt:
++                u_v4 = f"{stitcher}/v2/stitch/hls/channel/{cid}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true"
++                v4_ok, _ = await asyncio.to_thread(check_channel_chain, u_v4, 6.0)
++
++            jmp2_ok = False
++            if not v4_ok:
++                u_jmp2 = f"https://jmp2.uk/plu-{cid}.m3u8"
++                jmp2_ok, _ = await asyncio.to_thread(check_channel_chain, u_jmp2, 6.0)
++
++            if v4_ok or jmp2_ok:
++                alive.append(cid)
++
++            await asyncio.sleep(1.0)
++
++        save_pluto_alive_to_file(alive)
++        logger.info(f"📺 Pluto TV: {len(alive)}/{len(channels)} canais vivos validados")
++    except Exception as e:
++        logger.warning(f"Erro validando canais Pluto: {e}")
++
++
 +async def validate_iptv_channels():
 +    global _iptv_validation_running
 +    if _iptv_validation_running:
@@ -12372,17 +12882,21 @@ index 0000000..ca3a565
 +        logo_pat = re.compile(r'tvg-logo="([^"]+)"')
 +        cur_info = None
 +        entries = []
-+        for line in content.splitlines():
-+            line = line.strip()
++        for raw_line in content.splitlines():
++            line = raw_line.strip()
 +            if line.startswith("#EXTINF:"):
 +                cur_info = line
 +            elif line and not line.startswith("#") and cur_info:
-+                m = pattern.match(cur_info)
-+                attrs = m.group(1) if m else ""
-+                name = m.group(2).strip() if m else cur_info
-+                lm = logo_pat.search(attrs)
-+                logo = lm.group(1) if lm else ""
-+                entries.append({"name": name, "logo": logo, "url": line})
++                has_ctrl = any(ord(c) < 32 or ord(c) == 127 for c in line)
++                is_http = line.startswith("http://") or line.startswith("https://")
++                parsed_u = urllib.parse.urlparse(line)
++                if not has_ctrl and is_http and bool(parsed_u.netloc):
++                    m = pattern.match(cur_info)
++                    attrs = m.group(1) if m else ""
++                    name = m.group(2).strip() if m else cur_info
++                    lm = logo_pat.search(attrs)
++                    logo = lm.group(1) if lm else ""
++                    entries.append({"name": name, "logo": logo, "url": line})
 +                cur_info = None
 +
 +        if not entries:
@@ -12390,46 +12904,39 @@ index 0000000..ca3a565
 +            return
 +
 +        alive = []
-+        sem = asyncio.Semaphore(10)
-+        async with httpx.AsyncClient(
-+            timeout=5.0,
-+            follow_redirects=True,
-+            headers={"User-Agent": "ExoPlayerLib/2.19.1"},
-+        ) as val_client:
-+            async def _check(item):
-+                if _get_mem_available_mb() < 600:
-+                    return None
-+                u = item["url"]
-+                parsed = urllib.parse.urlparse(u)
-+                host = parsed.hostname
-+                if not host:
-+                    return None
-+                try:
-+                    if await _is_host_blocked_by_house_dns(host, "iptv"):
-+                        return None
-+                except Exception:
-+                    pass
-+                async with sem:
-+                    try:
-+                        r = await val_client.get(u)
-+                        if r.status_code == 200 and r.text.startswith("#EXTM3U"):
-+                            h = hashlib.sha1(u.encode()).hexdigest()[:10]
-+                            return {
-+                                "id": f"cometlive:iptv:{h}",
-+                                "name": item["name"],
-+                                "url": u,
-+                                "logo": item["logo"],
-+                                "category": "Canais abertos",
-+                            }
-+                    except Exception:
-+                        return None
-+                return None
++        sem = asyncio.Semaphore(15)
 +
-+            tasks = [_check(e) for e in entries]
-+            results = await asyncio.gather(*tasks, return_exceptions=True)
-+            for res in results:
-+                if isinstance(res, dict) and res:
-+                    alive.append(res)
++        async def _check(item):
++            if _get_mem_available_mb() < 600:
++                return None
++            u = item["url"]
++            parsed = urllib.parse.urlparse(u)
++            host = parsed.hostname
++            if not host:
++                return None
++            try:
++                if await _is_host_blocked_by_house_dns(host, "iptv"):
++                    return None
++            except Exception:
++                pass
++            async with sem:
++                ok, motivo = await asyncio.to_thread(check_channel_chain, u, 5.0)
++                if ok:
++                    h = hashlib.sha1(u.encode()).hexdigest()[:10]
++                    return {
++                        "id": f"cometlive:iptv:{h}",
++                        "name": item["name"],
++                        "url": u,
++                        "logo": item["logo"],
++                        "category": "Canais abertos",
++                    }
++            return None
++
++        tasks = [_check(e) for e in entries]
++        results = await asyncio.gather(*tasks, return_exceptions=True)
++        for res in results:
++            if isinstance(res, dict) and res:
++                alive.append(res)
 +
 +        alive.sort(key=lambda x: x["name"].lower())
 +        now_str = datetime.datetime.now().astimezone(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -12444,6 +12951,7 @@ index 0000000..ca3a565
 +async def start_live_tv_service():
 +    global _background_iptv_task
 +    load_iptv_alive_from_file()
++    load_pluto_alive_from_file()
 +    _get_pluto_device_id()
 +
 +    try:
@@ -12465,6 +12973,10 @@ index 0000000..ca3a565
 +                    await validate_iptv_channels()
 +                except Exception as exc:
 +                    logger.warning(f"Erro na validação periódica do iptv-org: {exc}")
++            try:
++                await validate_pluto_channels()
++            except Exception as exc:
++                logger.warning(f"Erro na validação periódica do Pluto: {exc}")
 +
 +    _background_iptv_task = asyncio.create_task(_loop())
 +
@@ -12556,8 +13068,11 @@ index 0000000..ca3a565
 +def get_live_tv_status() -> dict:
 +    if not _iptv_channels:
 +        load_iptv_alive_from_file()
++    if _pluto_alive_ids is None and os.path.exists(PLUTO_ALIVE_FILE):
++        load_pluto_alive_from_file()
 +    return {
 +        "pluto_count": len(_pluto_channels),
++        "pluto_alive_count": len(_pluto_alive_ids) if _pluto_alive_ids is not None else len(_pluto_channels),
 +        "iptv_count": len(_iptv_channels),
 +        "iptv_last_validated": _iptv_last_validated,
 +    }
@@ -12584,6 +13099,10 @@ index 0000000..ca3a565
 +
 +        sorted_pluto = sorted(pluto_channels, key=_get_num)
 +        for ch in sorted_pluto:
++            cid_raw = ch.get("_id")
++            if _pluto_alive_ids is not None and cid_raw not in _pluto_alive_ids:
++                continue
++
 +            cat = ch.get("category") or ""
 +            if kids:
 +                if cat.lower() not in KIDS_CATEGORIES:
@@ -12666,6 +13185,9 @@ index 0000000..ca3a565
 +            return 999999
 +
 +    sorted_pluto = sorted(pluto_channels, key=_get_num)
++    if _pluto_alive_ids is not None:
++        sorted_pluto = [c for c in sorted_pluto if c.get("_id") in _pluto_alive_ids]
++
 +    selected_channels = []
 +    seen_ids = set()
 +
@@ -12821,24 +13343,37 @@ index 0000000..ca3a565
 +        ch = await get_pluto_channel_by_id(pluto_id)
 +        if not ch:
 +            return []
-+        urls = (ch.get("stitched") or {}).get("urls") or []
-+        if not urls:
-+            return []
-+        stitched_url = urls[0].get("url")
-+        if not stitched_url:
-+            return []
-+        stream_url = generate_pluto_stream_url(stitched_url)
 +        channel_name = ch.get("name") or "Canal"
-+        return [
-+            {
++        streams = []
++
++        # 1. Opção 1: v4
++        session = await get_pluto_v4_session()
++        if session:
++            stitcher = session["stitcher"].rstrip("/")
++            sp = session["stitcherParams"].lstrip("?&")
++            jwt = session["sessionToken"]
++            v4_url = f"{stitcher}/v2/stitch/hls/channel/{pluto_id}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true"
++            streams.append({
 +                "name": "📺 Ao vivo",
-+                "description": f"{channel_name} · Pluto TV",
-+                "url": stream_url,
++                "description": f"{channel_name} · Pluto TV\nSe não abrir, tente a próxima opção",
++                "url": v4_url,
 +                "behaviorHints": {
-+                    "notWebReady": True,
++                    "notWebReady": False,
 +                },
-+            }
-+        ]
++            })
++
++        # 2. Opção 2: jmp2
++        jmp2_url = f"https://jmp2.uk/plu-{pluto_id}.m3u8"
++        streams.append({
++            "name": "📺 Ao vivo · opção 2",
++            "description": f"{channel_name} · Pluto TV\nSe não abrir, tente a próxima opção",
++            "url": jmp2_url,
++            "behaviorHints": {
++                "notWebReady": False,
++            },
++        })
++
++        return streams
 +
 +    if media_id.startswith("cometlive:iptv:"):
 +        ch = get_iptv_channel_by_id(media_id)
@@ -13063,10 +13598,10 @@ index a111c8c..631dd5b 100644
          cached_count = sum(
 diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
 new file mode 100644
-index 0000000..c8d443b
+index 0000000..3ed664d
 --- /dev/null
 +++ b/comet/services/meta_ptbr.py
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,606 @@
 +import asyncio
 +import copy
 +import re
@@ -13150,27 +13685,47 @@ index 0000000..c8d443b
 +                and v.get("site") == "YouTube"
 +                and v.get("key")
 +            ]
-+            chosen_vid = None
-+            for req_type, req_lang in (
-+                ("Trailer", "pt"),
-+                ("Teaser", "pt"),
-+                ("Trailer", "en"),
-+                ("Teaser", "en"),
-+            ):
++            chosen_pt = None
++            for req_type in ("Trailer", "Teaser"):
 +                matches = [
 +                    v
 +                    for v in yt_videos
-+                    if v.get("type") == req_type and v.get("iso_639_1") == req_lang
++                    if v.get("type") == req_type
++                    and (v.get("iso_639_1") == "pt" or str(v.get("iso_639_1", "")).startswith("pt"))
 +                ]
 +                if matches:
-+                    chosen_vid = matches[0]
++                    chosen_pt = matches[0]
 +                    break
 +
-+            if chosen_vid:
-+                vid_name = chosen_vid.get("name") or "Trailer"
-+                vid_key = chosen_vid["key"]
-+                base_meta["trailerStreams"] = [{"title": vid_name, "ytId": vid_key}]
-+                base_meta["trailers"] = [{"source": vid_key, "type": "Trailer"}]
++            chosen_en = None
++            for req_type in ("Trailer", "Teaser"):
++                matches = [
++                    v
++                    for v in yt_videos
++                    if v.get("type") == req_type
++                    and (v.get("iso_639_1") == "en" or str(v.get("iso_639_1", "")).startswith("en"))
++                ]
++                if matches:
++                    chosen_en = matches[0]
++                    break
++
++            trailer_streams = []
++            trailers = []
++            if chosen_pt and chosen_en:
++                trailer_streams.append({"title": "Trailer dublado", "ytId": chosen_pt["key"]})
++                trailer_streams.append({"title": "Trailer legendado", "ytId": chosen_en["key"]})
++                trailers.append({"source": chosen_pt["key"], "type": "Trailer"})
++                trailers.append({"source": chosen_en["key"], "type": "Trailer"})
++            elif chosen_pt:
++                trailer_streams.append({"title": "Trailer", "ytId": chosen_pt["key"]})
++                trailers.append({"source": chosen_pt["key"], "type": "Trailer"})
++            elif chosen_en:
++                trailer_streams.append({"title": "Trailer", "ytId": chosen_en["key"]})
++                trailers.append({"source": chosen_en["key"], "type": "Trailer"})
++
++            if trailer_streams:
++                base_meta["trailerStreams"] = trailer_streams
++                base_meta["trailers"] = trailers
 +
 +
 +def _extract_movie_rating(tmdb_movie: dict) -> str | None:

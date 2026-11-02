@@ -418,8 +418,11 @@ def t_catalogos(token: str, baseline_data: dict, current_baseline: dict, save_ba
             if rels:
                 relative_urls.extend(rels)
 
-            is_personal = any(p in cat_id for p in ("mylist", "newep", "foryou", "dubready"))
-            if not is_personal and count < 5:
+            is_personal = any(p in cat_id for p in ("mylist", "newep", "foryou", "dubready", "previewtest"))
+            if cat_id == "comet_previewtest":
+                if count != 4:
+                    failed.append(f"{cat_id} ({count} itens != 4)")
+            elif not is_personal and count < 5:
                 failed.append(f"{cat_id} ({count} itens)")
             elif is_personal and count == 0:
                 warns.append(f"{cat_id} vazio")
@@ -1038,24 +1041,40 @@ def t_livetv(token: str) -> tuple[str, str]:
         if len(home_metas) < 15:
             return "FAIL", f"comet_livehome retornou {len(home_metas)} canais (< 15)"
 
-        r_stream = client.get(f"/{token}/stream/tv/{first_id}.json")
-        if r_stream.status_code != 200:
-            return "FAIL", f"stream status {r_stream.status_code}"
-        streams = r_stream.json().get("streams", [])
-        if not streams:
-            return "FAIL", "nenhum stream retornado para o canal Pluto"
-        hls_url = streams[0].get("url")
-        if not hls_url:
-            return "FAIL", "stream sem URL"
+        # 5 canais Pluto aleatórios testando a cadeia completa da opção 1
+        from comet.services.live_tv import check_channel_chain
+        import random
+        sample_count = min(5, len(pluto_items))
+        sample_pluto = random.sample(pluto_items, sample_count)
 
-        h = {"User-Agent": "ExoPlayerLib/2.19.1"}
-        r_hls = client.get(hls_url, headers=h, follow_redirects=True, timeout=10.0)
-        if r_hls.status_code != 200:
-            return "FAIL", f"HLS status {r_hls.status_code}"
-        if not r_hls.text.startswith("#EXTM3U"):
-            return "FAIL", f"corpo não começa com #EXTM3U: {r_hls.text[:40]}"
+        passed = 0
+        details = []
+        for ch in sample_pluto:
+            ch_id = ch["id"]
+            ch_name = ch.get("name", ch_id)
+            r_stream = client.get(f"/{token}/stream/tv/{ch_id}.json")
+            if r_stream.status_code != 200:
+                details.append(f"{ch_name}: stream status {r_stream.status_code}")
+                continue
+            streams = r_stream.json().get("streams", [])
+            if not streams:
+                details.append(f"{ch_name}: sem streams")
+                continue
+            # Opção 1: v4
+            v4_url = streams[0].get("url", "")
+            if not v4_url:
+                details.append(f"{ch_name}: sem URL na opção 1")
+                continue
+            ok, motivo = check_channel_chain(v4_url)
+            if ok:
+                passed += 1
+            else:
+                details.append(f"{ch_name}: {motivo}")
 
-    return "PASS", f"{len(metas)} canais, livehome {len(home_metas)} canais, stream Pluto HLS OK"
+        if passed < 4:
+            return "FAIL", f"apenas {passed}/{sample_count} canais Pluto passaram na cadeia ({', '.join(details)})"
+
+    return "PASS", f"{len(metas)} canais, livehome {len(home_metas)} canais, 5 Pluto ({passed}/{sample_count} cadeia OK)"
 
 
 def t_play(token: str, public_base: str, shared_state: dict) -> tuple[str, str]:
@@ -1185,16 +1204,58 @@ def t_sorteio(token: str) -> tuple[str, str]:
 
 def t_saga(token: str, public_base: str) -> tuple[str, str]:
     with get_client(timeout=30.0) as client:
-        # 1. Meta Harry Potter
+        # 0. Verificações no manifest
+        r_mani = client.get(f"/{token}/manifest.json")
+        if r_mani.status_code != 200:
+            return "FAIL", f"manifest status {r_mani.status_code}"
+        catalogs = r_mani.json().get("catalogs", [])
+        cat_sagas = next((c for c in catalogs if c.get("id") == "comet_sagas" and c.get("type") == "series"), None)
+        if not cat_sagas:
+            return "FAIL", "catálogo series/comet_sagas não encontrado no manifest"
+        cat_saga_m = next((c for c in catalogs if c.get("id") == "comet_saga" and c.get("type") == "movie"), None)
+        if not cat_saga_m:
+            return "FAIL", "catálogo movie/comet_saga não encontrado no manifest"
+        genre_extra = next((e for e in cat_saga_m.get("extra", []) if e.get("name") == "genre"), None)
+        if not genre_extra or not genre_extra.get("isRequired"):
+            return "FAIL", "movie/comet_saga extra genre não tem isRequired: True"
+
+        # 0.1 Catálogo series/comet_sagas (20 sagas)
+        r_cats = client.get(f"/{token}/catalog/series/comet_sagas.json")
+        if r_cats.status_code != 200:
+            return "FAIL", f"catalog series/comet_sagas status {r_cats.status_code}"
+        metas_sagas = r_cats.json().get("metas") or []
+        if len(metas_sagas) != 20:
+            return "FAIL", f"series/comet_sagas items: {len(metas_sagas)} != 20"
+        if not all(m.get("type") == "series" for m in metas_sagas):
+            return "FAIL", "itens de series/comet_sagas não são do tipo series"
+
+        # 0.2 Catálogo movie/comet_saga com gênero (8 filmes do HP)
+        r_catm = client.get(f"/{token}/catalog/movie/comet_saga/genre=Harry%20Potter.json")
+        if r_catm.status_code != 200:
+            return "FAIL", f"catalog movie/comet_saga HP status {r_catm.status_code}"
+        metas_hp = r_catm.json().get("metas") or []
+        if len(metas_hp) != 8:
+            return "FAIL", f"movie/comet_saga HP items: {len(metas_hp)} != 8"
+        if not all(m.get("type") == "movie" for m in metas_hp):
+            return "FAIL", "itens de movie/comet_saga não são do tipo movie"
+
+        # 1. Meta Harry Potter (tanto series quanto movie respondem com 8 vídeos)
         r_hp = client.get(f"/{token}/meta/series/cometsaga:1241.json")
         if r_hp.status_code != 200:
-            return "FAIL", f"meta HP status {r_hp.status_code}"
+            return "FAIL", f"meta HP series status {r_hp.status_code}"
         meta_hp = r_hp.json().get("meta") or {}
         v_hp = meta_hp.get("videos") or []
         if len(v_hp) != 8:
             return "FAIL", f"HP videos: {len(v_hp)} != 8"
         if v_hp[0].get("id") != "tt0241527":
             return "FAIL", f"HP 1º vídeo id '{v_hp[0].get('id')}' != tt0241527"
+
+        r_hp_m = client.get(f"/{token}/meta/movie/cometsaga:1241.json")
+        if r_hp_m.status_code != 200:
+            return "FAIL", f"meta HP movie status {r_hp_m.status_code}"
+        meta_hp_m = r_hp_m.json().get("meta") or {}
+        if len(meta_hp_m.get("videos") or []) != 8:
+            return "FAIL", f"HP movie videos: {len(meta_hp_m.get('videos') or [])} != 8"
 
         # 2. Meta Star Wars e Velozes
         r_sw = client.get(f"/{token}/meta/series/cometsaga:10.json")
