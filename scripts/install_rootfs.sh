@@ -15,7 +15,8 @@ fi
 
 # DNS: AdGuard local + Quad9 de reserva
 rm -f "$ROOT/etc/resolv.conf"
-printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > "$ROOT/etc/resolv.conf"
+# Quad9 primeiro: em 03/11/2026 o 1.1.1.1 ficou lento/sem resposta nesta rede e derrubou os catálogos do TMDB
+printf 'nameserver 9.9.9.9\nnameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:2\n' > "$ROOT/etc/resolv.conf"
 printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 a71 a71.lan\n' > "$ROOT/etc/hosts"
 echo a71 > "$ROOT/etc/hostname"
 

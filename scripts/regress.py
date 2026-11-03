@@ -1035,6 +1035,15 @@ def t_livetv(token: str) -> tuple[str, str]:
         pluto_items = [m for m in metas if str(m.get("id", "")).startswith("cometlive:pluto:")]
         if not pluto_items:
             return "FAIL", "nenhum canal Pluto encontrado no catálogo"
+        # sem duplicatas (mesmo canal em duas categorias / cópia do iptv-org)
+        import re as _re
+        _names = [_re.sub(r"[^a-z0-9]+", "", _re.sub(r"\([^)]*\)", "", str(m.get("name", "")).lower().replace("pluto tv", ""))) for m in metas]
+        _dups = sorted({n for n in _names if n and _names.count(n) > 1})
+        if _dups:
+            return "FAIL", f"canais duplicados no catálogo: {_dups[:8]}"
+        _nulls = [m.get("id") for m in metas if any(v is None for v in m.values())]
+        if _nulls:
+            return "FAIL", f"metas com campo nulo: {_nulls[:5]}"
         first_id = pluto_items[0]["id"]
 
         bh = pluto_items[0].get("behaviorHints") or {}
@@ -1083,6 +1092,8 @@ def t_livetv(token: str) -> tuple[str, str]:
             if not v4_url:
                 details.append(f"{ch_name}: sem URL na opção 1")
                 continue
+            if "/live/pluto/" in v4_url:  # opção 1 testada no clique: chama o A71 local
+                v4_url = "http://127.0.0.1:8000/live/pluto/" + v4_url.split("/live/pluto/", 1)[1]
             ok, motivo = check_channel_chain(v4_url)
             if ok:
                 passed += 1

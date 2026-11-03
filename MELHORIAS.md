@@ -13,6 +13,49 @@ O documento tem duas partes:
 
 ---
 
+## ★★★ Salto evolutivo (03/11/2026): 10 melhorias + 10 coisas novas
+
+O raciocínio por trás da lista: o Comet tem três peças que nenhum outro addon tem.
+- **Um servidor de verdade em casa (o A71).** Ele pode ler, testar, desenhar e até reescrever o que entrega.
+- **A interface feita de imagens.** Capas, fundos e miniaturas são desenhados na hora.
+- **Um canal de conversa.** O bot do Telegram.
+
+Cada ideia abaixo junta duas dessas peças. Por isso elas não existem em nenhum outro lugar.
+
+### 10 melhorias no que já existe
+
+| # | Melhoria | O que muda para você | Esforço |
+|---|---|---|---|
+| M1 | **Play instantâneo de verdade** | O Comet já pede o link ao TorBox no momento em que você abre a página do título, antes de você chegar na lista de fontes. Também "aquece" os primeiros MB. O ▶ Assistir começa em menos de 1 s | médio |
+| M2 | **Fonte que falhou é rebaixada sozinha** | Quando o player desiste e você escolhe outra fonte em até 1 minuto, aquele grupo/arquivo perde pontos para todo mundo daquele título. Lista que se conserta sozinha | médio |
+| M3 | **Modo 4G automático** | Fora de casa, o Comet mede a sua linha e o ▶ Assistir já escolhe um arquivo que cabe nela: 1080p leve em vez do 4K de 60 GB. Nada de travar no 4G | baixo |
+| M4 | **Temporada inteira pronta de madrugada** | De madrugada, os próximos 2 episódios de tudo que você está vendo ficam ⚡ no TorBox, sempre no mesmo grupo de release (mesma dublagem e mesmo tamanho) | baixo |
+| M5 | **Legenda PT sincronizada de verdade** | Legenda escolhida pelo "hash" do arquivo (encaixe exato). Se não houver, o Comet corrige a velocidade (23,976 ↔ 25 fps) sozinho | médio |
+| M6 | **Capa de canal com a imagem real ao vivo** 🎨 | A capa do canal mostra uma **foto do que está passando agora**, tirada da transmissão a cada 15 min, e não só o logo. A fileira de TV vira um mosaico vivo | médio (ffmpeg no A71) |
+| M7 | **Rádio com "tocando agora"** ✅ *feito em 03/11 (na página da rádio)* | Nome da música/programa lido do sinal da rádio (ICY), na descrição e na capa | baixo |
+| M8 | **Lembrete de programa ao vivo** (Telegram) | "/lembrar Chaves" → aviso 5 min antes de começar em qualquer canal do Pluto | baixo |
+| M9 | **Faixa padrão PT também no 4G e no 4K** | Hoje o ajuste da faixa PT só vale em casa e até 30 Mbps. Com cache dos primeiros MB no A71, o Comet só passa o começo do arquivo e devolve o resto direto do TorBox | alto |
+| M10 | **Busca por descrição** | "aquele do cara que acorda sempre no mesmo dia" → Feitiço do Tempo. Palavras-chave do TMDB + sinopses em PT + apelidos que já existem | médio |
+
+### 10 coisas novas
+
+| # | Novidade | Como fica | Esforço |
+|---|---|---|---|
+| N1 | **⚽ Futebol de Pernambuco** | Fileira "Hoje no futebol": Sport, Náutico, Santa Cruz e Brasileirão, com placar ao vivo **desenhado na capa**. Clicou, abre a rádio que está transmitindo o jogo (Jornal, CBN Recife...) | médio |
+| N2 | **"Onde você parou"** 🎨 | Voltou para uma série depois de meses? A página mostra um **resumo em PT dos últimos episódios que você viu** e um cartão "Você parou em T3E7: ..." | baixo |
+| N3 | **Retrospectiva Comet** 🎨 | Todo mês (e no fim do ano), um cartão estilo "Wrapped": horas vistas, série mais maratonada, gênero do mês, o dia em que você mais assistiu. Aparece numa fileira e chega no Telegram | baixo |
+| N4 | **Rádio com tela** 🎨 | Rádio no Stremio hoje é tela preta. O A71 transforma o áudio em "vídeo" leve (1 quadro por segundo) com logo, cidade, "tocando agora" e relógio. A TV vira um rádio bonito | médio |
+| N5 | **🎙 Podcasts e jornal em áudio** | Fileira com os episódios novos dos podcasts que você escolher pelo Telegram (/podcast nome). Também "Jornal das 7 em 5 min" | baixo |
+| N6 | **Fileiras de data especial** | Halloween → terror; Natal → filmes de Natal dublados; Dia das Crianças; São João → forró nas rádios. Aparecem e somem sozinhas no calendário | baixo |
+| N7 | **Sessão de hoje à noite** (Telegram) | Às 19h o bot manda 3 sugestões: dubladas, ⚡ prontas, que terminam antes das 23h e que combinam com o que você anda vendo. Um toque e o item vai para o topo do Stremio | médio |
+| N8 | **Bom dia, Recife** 🎨 | Um cartão de manhã: tempo em Recife, manchetes e o trânsito. Clicou, abre a rádio de notícias ao vivo | baixo |
+| N9 | **Pedido por foto** (Telegram) | Manda a foto de um pôster ou de um print e o bot acha o título, mostra se tem dublado e adiciona aos desejos | médio |
+| N10 | **Canal "Minha TV"** 🎨 | Um canal ao vivo só seu, montado com o seu acervo: episódios de séries que você ama, em sequência e com horário ("às 21h: The Office T2E3"). Liga e já está passando alguma coisa | alto |
+
+**Ordem que eu proponho:** M3 → M4 → M7 → N2 → N1 → N6 → M1 → M2 → N3 → N4 → N8 → M8 → N5 → N7 → M6 → M5 → M10 → N9 → M9 → N10.
+
+---
+
 ## ★★ O salto geracional (12 ideias que nenhum addon tem)
 
 A grande sacada: **no Stremio, a interface do addon são as imagens.** Capas, fundo da página do título, miniatura de episódio e logo de canal são desenhados pelo próprio Comet no A71. Ou seja, dá para pôr **informação viva** dentro deles: progresso, dublagem, notas, horário. As ideias marcadas com 🎨 mudam o visual.
@@ -32,7 +75,12 @@ A grande sacada: **no Stremio, a interface do addon são as imagens.** Capas, fu
 | 11 | **Lista de desejos + radar** (Telegram) | "Me avisa quando sair Duna 3 dublado" → baixa e avisa sozinho. Filme saiu do cinema e chegou dublado (sem CAM) → aviso |
 | 12 | **O Comet que aprende** | O que você assiste até o fim fortalece aquele tipo de release; o que abandona enfraquece. As fileiras se reordenam pelo seu uso. "Para hoje à noite" escolhe pelo dia e pela hora |
 
-**Feito em 02/11/2026 (noite):** 1, 2, 3, 4, 5, 7, 8, 9, 10, 11 e a base (TorBox principal, compressão, uvloop, teto de fontes). **Falta:** 6 (corrigir o arquivo no caminho) e 12 (o Comet que aprende).
+**Feito em 02/11/2026 (noite):** 1, 2, 3, 4, 5, 7, 8, 9, 10, 11 e a base (TorBox principal, compressão, uvloop, teto de fontes). **Feito em 03/11/2026:**
+- **6:** o PT vira a faixa padrão sem reencodar. O A71 troca poucos bytes no cabeçalho do MKV e recalcula o CRC.
+  - Testado em 3 arquivos reais de GoT, com avanço rápido funcionando.
+  - Vale em casa, até 30 Mbps.
+  - Converter o som DTS/TrueHD ficou de fora: pesado demais para o A71.
+- **12:** o Comet aprende o seu gosto (`/gosto` no Telegram).
 
 **Como foi dividido:**
 - **5 (qualidade de verdade):** leitor completo de MKV/MP4, feito por um subagente.

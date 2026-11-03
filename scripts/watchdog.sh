@@ -192,6 +192,19 @@ ping_healthcheck() {
     else
       curl -fsS -m 15 --retry 3 -o /dev/null "$URL/fail"
     fi' > /dev/null 2>&1 || log "healthchecks: falha ao enviar o sinal"
+  # Processo vivo mas sem responder (ex.: reinício preso esperando um stream fechar): 3 sinais seguidos = mata
+  if pgrep -f "python -m comet.main" > /dev/null 2>&1; then
+    if /system/bin/sh "$BASE/chroot.sh" -c 'curl -sf -m 15 -o /dev/null http://127.0.0.1:8000/manifest.json' > /dev/null 2>&1; then
+      DEAD_PINGS=0
+    else
+      DEAD_PINGS=$(( ${DEAD_PINGS:-0} + 1 ))
+      if [ "$DEAD_PINGS" -ge 3 ]; then
+        log "Comet vivo mas sem responder ha 3 checagens: kill -9"
+        pkill -9 -f "python -m comet.main"
+        DEAD_PINGS=0
+      fi
+    fi
+  fi
 }
 
 log "watchdog iniciado (pid $$)"

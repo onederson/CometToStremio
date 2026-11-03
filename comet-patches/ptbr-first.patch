@@ -1,5 +1,5 @@
 diff --git a/comet/api/app.py b/comet/api/app.py
-index f7832d1..bcdb2e6 100644
+index f7832d1..5182d37 100644
 --- a/comet/api/app.py
 +++ b/comet/api/app.py
 @@ -10,7 +10,9 @@ from starlette.requests import Request
@@ -33,7 +33,7 @@ index f7832d1..bcdb2e6 100644
          cleanup.push_async_callback(teardown_database)
          cleanup.push_async_callback(shutdown_cache_writes)
          cleanup.push_async_callback(anime_mapper.stop)
-@@ -196,6 +203,46 @@ async def lifespan(app: FastAPI):
+@@ -196,6 +203,59 @@ async def lifespan(app: FastAPI):
              await cometnet_service.start()
              cleanup.push_async_callback(cometnet_service.stop)
  
@@ -58,6 +58,13 @@ index f7832d1..bcdb2e6 100644
 +            live_tv_task = asyncio.create_task(start_live_tv_service())
 +            cleanup.push_async_callback(_cancel_task, live_tv_task)
 +
++            # Rádios ao vivo (Radio Browser): lista validada a cada 24 h
++            from urllib.parse import quote as _q
++            from comet.services.radio import start_radio_service
++
++            _rb = (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
++            await start_radio_service(fallback_poster=(lambda n: f"{_rb}/art/radio.png?n={_q(n)}") if _rb else None)
++
 +        # Bot do Telegram (pedidos e avisos), se houver token e chat no .env
 +        from comet.services.telegram_bot import start_telegram_bot
 +
@@ -70,6 +77,12 @@ index f7832d1..bcdb2e6 100644
 +        wishlist_task = asyncio.create_task(start_wishlist_service())
 +        cleanup.push_async_callback(_cancel_task, wishlist_task)
 +
++        # Motor de gosto: avalia os plays com o histórico do Stremio a cada 6 h
++        from comet.services.taste import start_taste_service
++
++        taste_task = asyncio.create_task(start_taste_service())
++        cleanup.push_async_callback(_cancel_task, taste_task)
++
 +        # Start row warm service if enabled
 +        if getattr(settings, "ROW_WARM", True):
 +            from comet.services.row_warm import start_row_warm_service
@@ -80,7 +93,7 @@ index f7832d1..bcdb2e6 100644
          # Start indexer manager
          indexer_manager_task = asyncio.create_task(indexer_manager.run())
          cleanup.push_async_callback(indexer_manager.close)
-@@ -253,6 +300,11 @@ app.add_middleware(
+@@ -253,6 +313,13 @@ app.add_middleware(
  
  app.include_router(base.router)
  app.include_router(config.router)
@@ -89,10 +102,12 @@ index f7832d1..bcdb2e6 100644
 +app.include_router(nightly_router)
 +from comet.services.live_art_svc import router as live_art_router
 +app.include_router(live_art_router)
++from comet.api.endpoints.live_routes import router as live_routes_router
++app.include_router(live_routes_router)
  app.include_router(admin.router)
  app.include_router(cometnet.router)
  app.include_router(cometnet_ui.router)
-@@ -270,6 +322,10 @@ stremio_routers = (
+@@ -270,6 +337,10 @@ stremio_routers = (
      streams_router.streams,
      torznab.router,
      chilllink.router,
@@ -242,7 +257,7 @@ index 0000000..1fdce15
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..dd813b0
+index 0000000..bed4c9c
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
 @@ -0,0 +1,208 @@
@@ -401,7 +416,7 @@ index 0000000..dd813b0
 +        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or f"{request.url.scheme}://{request.url.netloc}").rstrip("/")
 +        kids = is_kids_request(b64config)
 +        is_personal = bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
-+        if id in ("comet_livetv", "comet_livehome") and b64config is not None and not is_personal and not kids:
++        if id in ("comet_livetv", "comet_livehome", "comet_radio") and b64config is not None and not is_personal and not kids:
 +            return JSONResponse(
 +                content={"metas": []},
 +                headers={"Cache-Control": "public, max-age=600"},
@@ -454,6 +469,100 @@ index 0000000..dd813b0
 +            content={"metas": []},
 +            headers={"Cache-Control": "public, max-age=600"},
 +        )
+diff --git a/comet/api/endpoints/live_routes.py b/comet/api/endpoints/live_routes.py
+new file mode 100644
+index 0000000..6808008
+--- /dev/null
++++ b/comet/api/endpoints/live_routes.py
+@@ -0,0 +1,88 @@
++"""Rotas sem config: abertura testada de canal ao vivo (e o repasse das rádios)."""
++from fastapi import APIRouter, Request
++from fastapi.responses import RedirectResponse, Response
++
++router = APIRouter()
++
++
++@router.get("/live/pluto/{pluto_id}.m3u8", tags=["Live"])
++async def live_pluto(pluto_id: str):
++    from comet.services.live_tv import resolve_pluto_url
++    url = await resolve_pluto_url(pluto_id)
++    if not url:
++        return Response(status_code=404)
++    return RedirectResponse(url, status_code=302)
++
++
++_RADIO_ART: dict[str, bytes] = {}
++
++
++@router.get("/art/radio.png", tags=["Live"])
++async def radio_art(n: str = "Rádio", c: str = ""):
++    """Capa da rádio sem logo: nome grande sobre degradê, com a cidade embaixo."""
++    key = f"{n}|{c}"[:200]
++    png = _RADIO_ART.get(key)
++    if png is None:
++        import asyncio
++        png = await asyncio.to_thread(_draw_radio, n[:60], c[:40])
++        if len(_RADIO_ART) > 500:
++            _RADIO_ART.clear()
++        _RADIO_ART[key] = png
++    return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=604800"})
++
++
++def _draw_radio(name: str, city: str) -> bytes:
++    import hashlib
++    import io
++    from PIL import Image, ImageDraw, ImageFont
++
++    W = 512
++    h = int(hashlib.md5(name.encode()).hexdigest()[:6], 16)
++    c1 = (20 + h % 60, 30 + (h >> 8) % 70, 90 + (h >> 16) % 120)
++    c2 = (c1[0] // 3, c1[1] // 3, c1[2] // 3)
++    img = Image.new("RGB", (W, W), c2)
++    d = ImageDraw.Draw(img)
++    for y in range(W):
++        t = y / W
++        d.line([(0, y), (W, y)], fill=tuple(int(c1[i] * (1 - t) + c2[i] * t) for i in range(3)))
++
++    def font(sz, bold=True):
++        for p in (("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
++                  if bold else ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")):
++            try:
++                return ImageFont.truetype(p, sz)
++            except Exception:
++                pass
++        return ImageFont.load_default()
++
++    # ondas de rádio
++    for i, r in enumerate((60, 95, 130)):
++        d.arc([W // 2 - r, 120 - r, W // 2 + r, 120 + r], 200, 340, fill=(255, 255, 255, 0), width=8 - i * 2)
++    d.ellipse([W // 2 - 14, 106, W // 2 + 14, 134], fill=(255, 255, 255))
++    words, lines, cur = name.split(), [], ""
++    f = font(58)
++    for w in words:
++        t = (cur + " " + w).strip()
++        if d.textlength(t, font=f) > W - 60 and cur:
++            lines.append(cur)
++            cur = w
++        else:
++            cur = t
++    lines.append(cur)
++    lines = lines[:3]
++    y = 270 - (len(lines) - 1) * 34
++    for ln in lines:
++        d.text((W // 2, y), ln, font=f, fill=(255, 255, 255), anchor="mm")
++        y += 68
++    if city:
++        d.text((W // 2, W - 50), city, font=font(30, False), fill=(220, 225, 235), anchor="mm")
++    d.text((W // 2, W - 95) if city else (W // 2, W - 55), "AO VIVO", font=font(26), fill=(255, 90, 90), anchor="mm")
++    b = io.BytesIO()
++    img.save(b, "PNG", optimize=True)
++    return b.getvalue()
++
++
++@router.api_route("/radio/{station_id}", methods=["GET"], tags=["Live"])
++async def radio_relay(station_id: str, request: Request):
++    from comet.services.radio import relay_radio
++    return await relay_radio(station_id, request)
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
 index bce0fec..ae04666 100644
 --- a/comet/api/endpoints/manifest.py
@@ -715,7 +824,7 @@ index 0000000..910109a
 +            headers={"Cache-Control": "public, max-age=21600"},
 +        )
 diff --git a/comet/api/endpoints/playback.py b/comet/api/endpoints/playback.py
-index 35b1121..533ebd5 100644
+index 35b1121..c8c7ac8 100644
 --- a/comet/api/endpoints/playback.py
 +++ b/comet/api/endpoints/playback.py
 @@ -1,6 +1,10 @@
@@ -778,7 +887,7 @@ index 35b1121..533ebd5 100644
  
  def _parse_optional_path_integer(value: str) -> int | None:
      if value == "n":
-@@ -181,6 +211,292 @@ async def _cache_download_link_safely(**kwargs) -> None:
+@@ -181,6 +211,345 @@ async def _cache_download_link_safely(**kwargs) -> None:
          )
  
  
@@ -1068,18 +1177,72 @@ index 35b1121..533ebd5 100644
 +    return None
 +
 +
++_FIX_SESSION = None
++
++
++async def _pt_fix_response(request, url: str, info_hash: str, index, fix: int):
++    """Se houver plano de troca (áudio PT como padrão), repassa o arquivo pelo A71; senão None (redireciona normal)."""
++    if not fix or not url:
++        return None
++    try:
++        import aiohttp as _aiohttp
++        from fastapi.responses import StreamingResponse
++        from comet.services.media_info import get_media_batch
++        from comet.services.flag_proxy import proxy_stream
++
++        mm = await get_media_batch([info_hash])
++        h = info_hash.lower()
++        s = mm.get((h, str(index))) or mm.get((h, "n"))
++        if not s and len(mm) == 1:
++            s = next(iter(mm.values()))
++        plan = [(int(o), int(v)) for o, v in ((s or {}).get("pt_fix") or [])]
++        if not plan:
++            return None
++        global _FIX_SESSION
++        if _FIX_SESSION is None or _FIX_SESSION.closed:
++            _FIX_SESSION = _aiohttp.ClientSession(
++                timeout=_aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=90))
++        status, headers, body = await proxy_stream(url, request.headers.get("range"), plan, _FIX_SESSION)
++        if status not in (200, 206):
++            await body.aclose()
++            return None
++        return StreamingResponse(body, status_code=status, headers=headers,
++                                 media_type=headers.get("Content-Type") or "video/x-matroska")
++    except Exception as e:
++        logger.debug(f"pt_fix proxy: {type(e).__name__}: {e}")
++        return None
++
++
++_TASTE_TASKS: set = set()
++
++
++def _record_play_bg(media_id, info_hash, name, torrent_name, service, resolution):
++    """Guarda o play para o motor de gosto (comet/services/taste.py), sem atrasar o player."""
++    try:
++        import asyncio as _aio
++        from comet.services.taste import record_play
++        _txt = f"{name} {torrent_name}".lower()
++        _is_pt = any(k in _txt for k in ("dublado", "dual", "pt-br", "ptbr", "nacional", "portugu"))
++        t = _aio.create_task(record_play(media_id or "", info_hash, name, torrent_name, service, resolution, None, _is_pt))
++        _TASTE_TASKS.add(t)
++        t.add_done_callback(_TASTE_TASKS.discard)
++    except Exception:
++        pass
++
++
  @router.get(
      "/{b64config}/playback/{hash}/{service_index}/{index}/{season}/{episode}",
      tags=["Stremio"],
-@@ -199,6 +515,7 @@ async def playback(
+@@ -199,6 +568,8 @@ async def playback(
      name: str = Query(),
      media_id: str | None = Query(default=None),
      media_type: str | None = Query(default=None),
 +    resolution: str | None = Query(default=None),
++    fix: int = Query(default=0),
  ):
      config = config_check(b64config, strict_b64config=True)
      if not config:
-@@ -227,11 +544,33 @@ async def playback(
+@@ -227,11 +598,37 @@ async def playback(
          debrid_service, debrid_api_key = get_debrid_credentials(
              config, parsed_service_index
          )
@@ -1108,12 +1271,16 @@ index 35b1121..533ebd5 100644
 +
 +    preresolved = get_preresolved_link(debrid_service, hash, season, episode)
 +    if preresolved:
++        _record_play_bg(media_id, hash, name, torrent_name, debrid_service, resolution)
++        _fx = await _pt_fix_response(request, preresolved, hash, index, fix)
++        if _fx is not None:
++            return _fx
 +        return RedirectResponse(preresolved, status_code=302)
 +
      account_key_hash = build_account_key_hash(debrid_api_key)
  
      session = await http_client_manager.get_session()
-@@ -331,10 +670,29 @@ async def playback(
+@@ -331,10 +728,29 @@ async def playback(
                      default_key="BAD_REQUEST",
                  )
  
@@ -1146,7 +1313,7 @@ index 35b1121..533ebd5 100644
  
          debrid = get_debrid(
              session,
-@@ -345,22 +703,133 @@ async def playback(
+@@ -345,22 +761,133 @@ async def playback(
              ip if not should_proxy else "",
          )
          try:
@@ -1189,13 +1356,13 @@ index 35b1121..533ebd5 100644
 -                default_key=status_keys[0] if status_keys else "UNKNOWN",
 +                ["SERVICE_UNAVAILABLE", "UNKNOWN"],
 +                default_key="SERVICE_UNAVAILABLE",
-+            )
+             )
 +        except DebridLinkGenerationError as error:
 +            is_451 = (
 +                error.payload.get("status_code") == 451
 +                or error.error_code == "UNAVAILABLE_FOR_LEGAL_REASONS"
 +                or error.upstream_error_code == "infringing_file"
-             )
++            )
 +            if is_451:
 +                torbox_entry = next(
 +                    (e for e in config.get("_debridEntries", []) if e.get("service") == "torbox"),
@@ -1293,6 +1460,15 @@ index 35b1121..533ebd5 100644
  
          if not download_url:
              return build_status_video_response(
+@@ -392,4 +919,8 @@ async def playback(
+             ip=ip,
+         )
+ 
++    _record_play_bg(media_id, hash, name, torrent_name, debrid_service, resolution)
++    _fx = await _pt_fix_response(request, download_url, hash, index, fix)
++    if _fx is not None:
++        return _fx
+     return RedirectResponse(download_url, status_code=302)
 diff --git a/comet/api/endpoints/status.py b/comet/api/endpoints/status.py
 new file mode 100644
 index 0000000..3aadae8
@@ -1846,7 +2022,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..daae481 100644
+index 94f56ae..f0056b5 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -1913,7 +2089,7 @@ index 94f56ae..daae481 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +102,696 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +102,702 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -2004,6 +2180,7 @@ index 94f56ae..daae481 100644
 +
 +
 +_PRERESOLVE_IN_FLIGHT: set[str] = set()
++_TASTE_NOW: dict = {}  # notas de gosto (comet/services/taste.py), atualizadas a cada lista
 +
 +
 +# --- Kids: hora de dormir ---
@@ -2469,7 +2646,12 @@ index 94f56ae..daae481 100644
 +                _risky, _pt_nd = pick_penalty(info.get("_media"))
 +            except Exception:
 +                _risky, _pt_nd = 0, 0
-+            key = (too_big or bool(_risky), _res_pref(info), _pt_nd, idx)
++            try:
++                from comet.services.taste import bonus as _taste_bonus
++                _tb = _taste_bonus(_TASTE_NOW, info.get("raw_title") or info.get("torrent_title") or "", info.get("resolution"), info.get("size"))
++            except Exception:
++                _tb = 0.0
++            key = (too_big or bool(_risky), _res_pref(info), _pt_nd, -_tb, idx)
 +            if best_key is None or key < best_key:
 +                best_key, chosen = key, cand
 +        return chosen
@@ -2610,7 +2792,7 @@ index 94f56ae..daae481 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +849,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +855,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -2648,7 +2830,7 @@ index 94f56ae..daae481 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +887,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +893,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -2657,7 +2839,7 @@ index 94f56ae..daae481 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +910,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +916,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -2748,7 +2930,7 @@ index 94f56ae..daae481 100644
      return selected_info_hashes
  
  
-@@ -198,6 +1003,56 @@ async def stream(
+@@ -198,6 +1009,56 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
@@ -2805,7 +2987,7 @@ index 94f56ae..daae481 100644
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +1095,30 @@ async def stream(
+@@ -240,12 +1101,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -2837,7 +3019,7 @@ index 94f56ae..daae481 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +1130,8 @@ async def stream(
+@@ -257,6 +1136,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -2846,7 +3028,7 @@ index 94f56ae..daae481 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +1145,94 @@ async def stream(
+@@ -270,53 +1151,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -2976,7 +3158,7 @@ index 94f56ae..daae481 100644
              is_empty=True,
          )
  
-@@ -329,7 +1245,7 @@ async def stream(
+@@ -329,7 +1251,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -2985,7 +3167,7 @@ index 94f56ae..daae481 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1253,7 @@ async def stream(
+@@ -337,6 +1259,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -2993,7 +3175,7 @@ index 94f56ae..daae481 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1265,7 @@ async def stream(
+@@ -348,7 +1271,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -3002,7 +3184,7 @@ index 94f56ae..daae481 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1295,7 @@ async def stream(
+@@ -378,7 +1301,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -3011,7 +3193,7 @@ index 94f56ae..daae481 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1310,40 @@ async def stream(
+@@ -393,8 +1316,40 @@ async def stream(
                  }
              )
  
@@ -3053,7 +3235,7 @@ index 94f56ae..daae481 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1351,31 @@ async def stream(
+@@ -402,18 +1357,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -3087,7 +3269,7 @@ index 94f56ae..daae481 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1391,164 @@ async def stream(
+@@ -429,21 +1397,164 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -3260,7 +3442,7 @@ index 94f56ae..daae481 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1568,83 @@ async def stream(
+@@ -463,38 +1574,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -3354,7 +3536,7 @@ index 94f56ae..daae481 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1665,10 @@ async def stream(
+@@ -515,6 +1671,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -3365,7 +3547,7 @@ index 94f56ae..daae481 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1676,27 @@ async def stream(
+@@ -522,6 +1682,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -3393,7 +3575,7 @@ index 94f56ae..daae481 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1708,257 @@ async def stream(
+@@ -533,12 +1714,267 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3438,6 +3620,10 @@ index 94f56ae..daae481 100644
 +                        p_res = probe_map.get((info["info_hash"].lower(), str(f_name)))
 +                    _mi = media_map.get((info["info_hash"].lower(), f_key)) or media_map.get((info["info_hash"].lower(), "n"))
 +                    if _mi:
++                        if _mi.get("pt_fix") and not _is_remote_req and float(_mi.get("bitrate_mbps") or 0) <= 30 \
++                                and "url" in s_dict and "&fix=1" not in s_dict["url"]:
++                            s_dict["url"] = s_dict["url"] + "&fix=1"
++                            _mi = {**_mi, "pt_is_default": True, "_pt_fixed": True}
 +                        info["_media"] = _mi
 +                    if p_res:
 +                        has_pt_val = p_res.get("has_pt")
@@ -3530,6 +3716,12 @@ index 94f56ae..daae481 100644
 +
 +    chosen_assistir = None
 +    next_pt_candidates = []
++    try:
++        from comet.services.taste import taste_scores as _ts
++        global _TASTE_NOW
++        _TASTE_NOW = await _ts()
++    except Exception:
++        pass
 +    if getattr(settings, "STREAM_LAYOUT", "clean") == "clean":
 +        _xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
 +        _remote = False
@@ -3655,7 +3847,7 @@ index 94f56ae..daae481 100644
  
      has_results = len(final_streams) > 0
  
-@@ -546,3 +1966,12 @@ async def stream(
+@@ -546,3 +1982,12 @@ async def stream(
          {"streams": final_streams},
          is_empty=not has_results,
      )
@@ -5119,6 +5311,18 @@ index 90a2aa5..194b50e 100644
  
                      if season_matches and episode_matches:
                          if len(parsed.episodes) == 1:
+diff --git a/comet/main.py b/comet/main.py
+index b11ec38..f1361fe 100644
+--- a/comet/main.py
++++ b/comet/main.py
+@@ -26,6 +26,7 @@ def run_with_uvicorn():
+         forwarded_allow_ips="*",
+         workers=settings.FASTAPI_WORKERS,
+         log_config=None,
++        timeout_graceful_shutdown=8,  # stream aberto (TV tocando) nao pode travar o reinicio
+     )
+     server = uvicorn.Server(config=config)
+ 
 diff --git a/comet/metadata/episode_index.py b/comet/metadata/episode_index.py
 index 7521a09..54a81d6 100644
 --- a/comet/metadata/episode_index.py
@@ -8426,10 +8630,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..30d2da4
+index 0000000..dea7417
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,4846 @@
+@@ -0,0 +1,4884 @@
 +import asyncio
 +import datetime
 +import json
@@ -9385,6 +9589,19 @@ index 0000000..30d2da4
 +                ],
 +            }
 +        )
++        from comet.services.radio import RADIO_GENRES
++        catalogs.append(
++            {
++                "type": "tv",
++                "id": "comet_radio",
++                "name": "📻 Rádios ao vivo",
++                "extra": [
++                    {"name": "genre", "options": list(RADIO_GENRES), "isRequired": False},
++                    {"name": "search", "isRequired": False},
++                    {"name": "skip", "isRequired": False},
++                ],
++            }
++        )
 +
 +    if is_personal and not kids and getattr(settings, "PREVIEW_TEST_ROW", True):
 +        catalogs.insert(
@@ -9779,11 +9996,26 @@ index 0000000..30d2da4
 +    return False
 +
 +
++_READY_PT_MEMO: dict = {}
++_READY_LOCKS: dict = {}
++
++
 +async def _get_ready_tt_list(media_type: str) -> list[str]:
 +    now = time.time()
 +    cached_ready = _READY_CACHE.get(media_type)
 +    if cached_ready is not None and (now - cached_ready[0]) < 1800:
 +        return cached_ready[1]
++    lock = _READY_LOCKS.setdefault(media_type, asyncio.Lock())
++    if lock.locked() and cached_ready is not None:
++        return cached_ready[1]  # outro pedido já está recalculando: devolve a lista antiga
++    async with lock:
++        cached_ready = _READY_CACHE.get(media_type)
++        if cached_ready is not None and (time.time() - cached_ready[0]) < 1800:
++            return cached_ready[1]
++        return await _get_ready_tt_list_calc(media_type, now)
++
++
++async def _get_ready_tt_list_calc(media_type: str, now: float) -> list[str]:
 +
 +    cutoff = now - 30 * 86400
 +    if media_type == "movie":
@@ -9839,9 +10071,16 @@ index 0000000..30d2da4
 +                title = r["title"]
 +                tracker = r["tracker"]
 +                up_at = r["max_updated_at"]
-+                parsed = RTN.parse(title)
-+                apply_ptbr_detection(parsed, title, tracker)
-+                if "pt" in (getattr(parsed, "languages", None) or ()) and not is_cam_release(parsed):
++                _k = (title, tracker)
++                _ok = _READY_PT_MEMO.get(_k)
++                if _ok is None:
++                    parsed = RTN.parse(title)
++                    apply_ptbr_detection(parsed, title, tracker)
++                    _ok = "pt" in (getattr(parsed, "languages", None) or ()) and not is_cam_release(parsed)
++                    if len(_READY_PT_MEMO) > 300000:
++                        _READY_PT_MEMO.clear()
++                    _READY_PT_MEMO[_k] = _ok
++                if _ok:
 +                    base_tt = media_id.split(":")[0]
 +                    if base_tt not in seen:
 +                        seen[base_tt] = up_at
@@ -12091,6 +12330,9 @@ index 0000000..30d2da4
 +            return []
 +        from comet.services.live_tv import get_live_tv_catalog
 +        return await get_live_tv_catalog(extra=extra, kids=kids)
++    if catalog_id == "comet_radio":
++        from comet.services.radio import get_radio_catalog
++        return await get_radio_catalog(extra=extra, base=(getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/"))
 +    if catalog_id == "comet_livehome":
 +        if not getattr(settings, "LIVE_TV", True):
 +            return []
@@ -14206,6 +14448,257 @@ index b844e5e..55d1183 100644
          ensure_multi_language(parsed)
  
          if remove_adult_content and parsed.adult:
+diff --git a/comet/services/flag_plan.py b/comet/services/flag_plan.py
+new file mode 100644
+index 0000000..cc54b21
+--- /dev/null
++++ b/comet/services/flag_plan.py
+@@ -0,0 +1,180 @@
++"""Plano de troca de bytes para o áudio PT virar a faixa padrão, sem mudar tamanhos.
++
++    make_plan(summary, head=None, extra=None) -> [(offset_absoluto, novo_byte), ...] | None
++
++- summary: media_probe.summarize(...) (precisa dos offsets/children/crc do leitor).
++- head: os bytes lidos do início do arquivo (offset 0), ex.: os 4 MB.
++- extra: (offset, bytes) do trecho buscado via need_range quando as Tracks vieram
++  do SeekHead (o mesmo `extra` passado a parse_header, mais o offset pedido).
++head/extra só são necessários quando há CRC-32 a recalcular; sem eles, nesse
++caso, o plano é None.
++
++Regra do player: toca a primeira faixa de áudio com default efetivo 1 (FlagDefault
++ausente = 1). Objetivo: a 1ª faixa PT com default 1 e todas as de áudio antes dela
++com default 0.
++
++Faixa anterior com FlagDefault presente: escreve 0 no valor. Com default implícito:
++reaproveita um filho da PRÓPRIA TrackEntry, sobrescrevendo o elemento inteiro (mesmo
++tamanho total) por um FlagDefault=0 — ver REUSE_ORDER. Sem candidato: None.
++"""
++from __future__ import annotations
++
++import zlib
++
++ID_FLAGDEFAULT = 0x88
++ID_VOID = 0xEC
++ID_CRC32 = 0xBF
++
++# Elementos que podem virar FlagDefault=0, na ordem de preferência, e a condição
++# sobre o valor. Por que cada um é seguro de remover:
++# - 0x55AA FlagForced=0: igual ao padrão (0). FlagForced=1 NÃO (mudaria a semântica).
++# - 0x9C FlagLacing: só uma dica ("pode haver lacing"); ausente = 1; demuxers aceitam
++#   blocos com ou sem lacing de qualquer forma.
++# - 0xAA CodecDecodeAll: ausente = 1; os players ignoram.
++# - 0xEC Void: é só enchimento.
++# - 0x6DE7 MinCache / 0x6DF8 MaxCache: obsoletos, ignorados pelos players.
++# - 0x55EE MaxBlockAdditionID=0: igual ao padrão (0).
++# - 0x55AB..0x55AF (HearingImpaired, VisualImpaired, TextDescriptions, Original,
++#   Commentary) = 0: iguais ao padrão (0); com valor 1 mudariam rótulos, então não.
++# Nunca: TrackNumber, TrackUID, TrackType, CodecID, CodecPrivate, Language(BCP47),
++# FlagEnabled, Name, DefaultDuration, CodecDelay, SeekPreRoll, mestres (Audio,
++# ContentEncodings...) — afetam identificação, decodificação ou tempo.
++REUSE_ORDER: list[tuple[int, int | None]] = [  # (id, valor exigido ou None = qualquer)
++    (0x55AA, 0),
++    (0x9C, None),
++    (0xAA, None),
++    (ID_VOID, None),
++    (0x6DE7, None), (0x6DF8, None), (0x55EE, 0),
++    (0x55AB, 0), (0x55AC, 0), (0x55AD, 0), (0x55AE, 0), (0x55AF, 0),
++    # Último recurso: FlagForced=1 numa faixa de ÁUDIO antes do PT (ex.: WEB-DL do grupo PiA
++    # marca o EN como default+forced). Para áudio, "forced" só serve para o player insistir
++    # nessa faixa — exatamente o que queremos desfazer; tirar o forced junto é o desejado.
++    (0x55AA, 1),
++]
++
++
++def _write(offset: int, size: int, value: int) -> list[tuple[int, int]]:
++    """Bytes big-endian de `value` em `size` bytes (valor no último, zeros antes)."""
++    return [(offset + i, value if i == size - 1 else 0) for i in range(size)]
++
++
++def _vint(value: int, length: int) -> bytes:
++    return ((1 << (7 * length)) | value).to_bytes(length, "big")
++
++
++def _void(total: int) -> bytes | None:
++    """Void (EC) com exatamente `total` bytes (>= 2)."""
++    for length in range(1, 9):
++        payload = total - 1 - length
++        if payload < 0:
++            return None
++        if payload < (1 << (7 * length)) - 1:
++            return bytes([ID_VOID]) + _vint(payload, length) + bytes(payload)
++    return None
++
++
++def flagdefault0_bytes(total: int) -> bytes | None:
++    """`total` bytes que formam FlagDefault=0 (+ Void com a sobra, se precisar).
++
++    3..10 bytes: um FlagDefault só, com valor de total-2 bytes zerados
++    (3 -> 88 81 00; 4 -> 88 82 00 00). Maior: 88 81 00 + Void do resto (>= 8).
++    """
++    if 3 <= total <= 10:
++        return bytes([ID_FLAGDEFAULT, 0x80 | (total - 2)]) + bytes(total - 2)
++    if total > 10:
++        rest = _void(total - 3)
++        return b"\x88\x81\x00" + rest if rest else None
++    return None
++
++
++def _reuse(track: dict) -> list[tuple[int, int]] | None:
++    """Troca um filho da TrackEntry desta faixa por FlagDefault=0, ou None."""
++    children = track.get("children") or []
++    for want_id, want_value in REUSE_ORDER:
++        for c in children:
++            if c["id"] != want_id:
++                continue
++            if want_value is not None and c.get("value") != want_value:
++                continue
++            new = flagdefault0_bytes(c["total"])
++            if new is not None:
++                return list(enumerate(new, c["offset"]))
++    return None
++
++
++class _Bytes:
++    """Bytes conhecidos do arquivo: cabeçalho (offset 0) e trecho extra opcional."""
++
++    def __init__(self, head: bytes | None, extra: tuple[int, bytes] | None):
++        self.parts = [(0, head)] if head else []
++        if extra and extra[1]:
++            self.parts.append(extra)
++
++    def get(self, start: int, end: int) -> bytearray | None:
++        for off, buf in self.parts:
++            if off <= start and end <= off + len(buf):
++                return bytearray(buf[start - off:end - off])
++        return None
++
++
++def _crc_writes(crc: dict, writes: dict[int, int], src: _Bytes) -> list[tuple[int, int]] | None:
++    """Recalcula o CRC-32 do pai com as trocas aplicadas (CRC IEEE, little-endian)."""
++    start, end = crc["covered"]
++    data = src.get(start, end)
++    if data is None or crc.get("size") != 4:
++        return None
++    for o, v in writes.items():
++        if start <= o < end:
++            data[o - start] = v
++    value = zlib.crc32(bytes(data)).to_bytes(4, "little")
++    return list(enumerate(value, crc["offset"]))
++
++
++def make_plan(summary: dict, head: bytes | None = None,
++              extra: tuple[int, bytes] | None = None) -> list[tuple[int, int]] | None:
++    audio = (summary or {}).get("audio") or []
++    pt_idx = next((i for i, a in enumerate(audio) if a.get("lang") == "pt"), None)
++    if pt_idx is None:
++        return None
++    playing = next((a for a in audio if a.get("default")), None)
++    if playing is not None and playing.get("lang") == "pt":
++        return None  # o player já começa num áudio PT
++    plan: list[tuple[int, int]] = []
++    touched: list[dict] = []
++    for a in audio[:pt_idx]:
++        if not a.get("default"):
++            continue  # já é 0 efetivo
++        off, size = a.get("flag_default_offset"), a.get("flag_default_size")
++        if off is not None and size:
++            plan += _write(off, size, 0)
++        else:
++            reused = _reuse(a)  # implícito 1: reaproveita um elemento do mesmo tamanho
++            if reused is None:
++                return None
++            plan += reused
++        touched.append(a)
++    pt = audio[pt_idx]
++    if not pt.get("default"):
++        off, size = pt.get("flag_default_offset"), pt.get("flag_default_size")
++        if off is None or not size:
++            return None  # não deveria acontecer (sem elemento = 1 implícito)
++        plan += _write(off, size, 1)
++        touched.append(pt)
++    if not plan:
++        return None
++    # CRC-32: primeiro das TrackEntries tocadas, depois do Tracks (que cobre as entries)
++    crcs = [a["crc"] for a in touched if a.get("crc")]
++    if (summary or {}).get("tracks_crc"):
++        crcs.append(summary["tracks_crc"])
++    if crcs:
++        src, writes = _Bytes(head, extra), dict(plan)
++        for crc in crcs:
++            start, end = crc["covered"]
++            if not any(start <= o < end for o in writes):
++                continue
++            fix = _crc_writes(crc, writes, src)
++            if fix is None:
++                return None  # sem os bytes não dá para manter o CRC válido
++            writes.update(fix)
++            plan += fix
++    return plan
+diff --git a/comet/services/flag_proxy.py b/comet/services/flag_proxy.py
+new file mode 100644
+index 0000000..6861649
+--- /dev/null
++++ b/comet/services/flag_proxy.py
+@@ -0,0 +1,59 @@
++"""Proxy HTTP que repassa um arquivo (com Range) trocando bytes de um plano.
++
++proxy_stream(upstream_url, range_header, plan, session) -> (status, headers, iterador)
++Independente de framework; `session` é um aiohttp.ClientSession.
++"""
++from __future__ import annotations
++
++import re
++from typing import AsyncIterator, Iterable
++
++USER_AGENT = "ExoPlayerLib/2.19.1"
++CHUNK = 64 * 1024
++_PASS_HEADERS = ("Content-Type", "Content-Length", "Content-Range")
++_CR_RE = re.compile(r"bytes\s+(\d+)-\d+/(?:\d+|\*)", re.I)
++
++
++def range_start(content_range: str | None) -> int:
++    """Posição inicial do trecho servido pelo Content-Range (sem ele: 0)."""
++    m = _CR_RE.match((content_range or "").strip())
++    return int(m.group(1)) if m else 0
++
++
++def patch_chunk(chunk: bytes, pos: int, plan: Iterable[tuple[int, int]]) -> bytes:
++    """Aplica no pedaço que começa em `pos` as trocas do plano que caem nele."""
++    end = pos + len(chunk)
++    hits = [(o, v) for o, v in plan if pos <= o < end]
++    if not hits:
++        return chunk
++    buf = bytearray(chunk)
++    for o, v in hits:
++        buf[o - pos] = v
++    return bytes(buf)
++
++
++async def proxy_stream(upstream_url: str, range_header: str | None,
++                       plan: list[tuple[int, int]], session,
++                       chunk_size: int = CHUNK) -> tuple[int, dict, AsyncIterator[bytes]]:
++    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
++    if range_header:
++        headers["Range"] = range_header
++    resp = await session.get(upstream_url, headers=headers)
++    out = {k: resp.headers[k] for k in _PASS_HEADERS if k in resp.headers}
++    out["Accept-Ranges"] = "bytes"
++    patching = resp.status in (200, 206) and bool(plan)
++    start = range_start(resp.headers.get("Content-Range")) if resp.status == 206 else 0
++    plan = sorted(plan or [])
++
++    async def body() -> AsyncIterator[bytes]:
++        pos = start
++        try:
++            async for chunk in resp.content.iter_chunked(chunk_size):
++                if patching:
++                    chunk = patch_chunk(chunk, pos, plan)
++                pos += len(chunk)
++                yield chunk
++        finally:
++            resp.release()
++
++    return resp.status, out, body()
 diff --git a/comet/services/indexer_manager.py b/comet/services/indexer_manager.py
 index 81fb382..f1528ef 100644
 --- a/comet/services/indexer_manager.py
@@ -15836,10 +16329,10 @@ index 0000000..8e75154
 +    return Response(jpg, media_type="image/jpeg", headers=_IMG_HEADERS)
 diff --git a/comet/services/live_tv.py b/comet/services/live_tv.py
 new file mode 100644
-index 0000000..2e678c2
+index 0000000..7cdd505
 --- /dev/null
 +++ b/comet/services/live_tv.py
-@@ -0,0 +1,881 @@
+@@ -0,0 +1,1122 @@
 +import asyncio
 +import datetime
 +import hashlib
@@ -15861,6 +16354,7 @@ index 0000000..2e678c2
 +IPTV_ALIVE_FILE = "/opt/comet/data/iptv_alive.json"
 +PLUTO_API_URL = "https://api.pluto.tv/v2/channels"
 +IPTV_ORG_BR_URL = "https://iptv-org.github.io/iptv/countries/br.m3u"
++IPTV_ORG_POR_URL = "https://iptv-org.github.io/iptv/languages/por.m3u"  # Portugal, Angola, Moçambique... (o index.m3u mundial é pesado demais)
 +
 +BR_TZ = datetime.timezone(datetime.timedelta(hours=-3))
 +KIDS_CATEGORIES = {"infantil", "nickelodeon", "kids", "animação", "animacao"}
@@ -15878,6 +16372,194 @@ index 0000000..2e678c2
 +_pluto_cache_time: float = 0.0
 +_pluto_lock = asyncio.Lock()
 +_pluto_alive_ids: set[str] | None = None
++_pluto_lang: dict[str, str] = {}
++_pluto_info_when: float = 0.0
++_LAST_LANG: dict[str, str] = {}
++_RESOLVE_CACHE: dict[str, tuple[str, float]] = {}
++PLUTO_INFO_FILE = "/opt/comet/data/pluto_info.json"
++LANG_PT = "🇧🇷 Em português"
++LANG_OTHER = "🌎 Outros idiomas"
++# Canais nacionais que o Pluto marca com áudio "en" por engano
++_FORCE_PT_WORDS = ("porta", "trapalh", "turma da m", "mundo do bita", "galinha pintadinha", "luccas", "chaves", "chapolin",
++                   "brasil", "portugu", "record", "jovem pan", "bm&c", "cnbc", "popeye", "salon line", "tiktok", "pegadinhas",
++                   "bob esponja", "nick", "avatar", "tartarugas")
++_FORCE_PT_CATS = ("tv brasileira", "novelas", "infantil", "nickelodeon", "south park br")
++_LANG_NAMES = {"en": "inglês", "es": "espanhol", "fr": "francês", "it": "italiano", "de": "alemão", "ja": "japonês", "ko": "coreano"}
++
++
++_LANG3 = {"por": "pt", "eng": "en", "spa": "es", "fra": "fr", "fre": "fr", "ita": "it", "deu": "de", "ger": "de", "jpn": "ja", "kor": "ko"}
++
++
++def _lang2(code: str) -> str:
++    c = (code or "").lower().split("-")[0]
++    return _LANG3.get(c, c[:2]) if len(c) == 3 else c[:2]
++
++
++def _audio_lang(master_txt: str) -> str:
++    """Idioma da faixa de áudio padrão anunciada no master HLS ('' se não houver)."""
++    first = ""
++    for line in master_txt.splitlines():
++        if line.startswith("#EXT-X-MEDIA:") and "TYPE=AUDIO" in line:
++            m = re.search(r'LANGUAGE="([A-Za-z-]+)"', line)
++            lang = _lang2((m.group(1) if m else ""))
++            if lang and not first:
++                first = lang
++            if lang and "DEFAULT=YES" in line:
++                return lang
++    return first
++
++
++def _norm_name(name: str) -> str:
++    n = (name or "").lower()
++    n = re.sub(r"\((?:\d{3,4}p|[^)]*)\)", " ", n)
++    n = n.replace("pluto tv", " ").replace("clássico", "classico").replace("’", "'")
++    return re.sub(r"[^a-z0-9]+", "", n)
++
++
++def _pluto_ch_lang(ch: dict) -> str:
++    name = (ch.get("name") or "").lower()
++    cat = (ch.get("category") or "").lower()
++    if cat in _FORCE_PT_CATS or any(w in name for w in _FORCE_PT_WORDS):
++        return "pt"
++    return _pluto_lang.get(ch.get("_id") or "", "") or "pt"
++
++
++def _iptv_lang(ch: dict) -> str:
++    """Lista do Brasil: o rótulo de áudio do HLS erra muito. Nome com BR/Brazil/termo nacional = PT."""
++    n = " " + (ch.get("name") or "").lower().replace("(", " ").replace(")", " ") + " "
++    if " br " in n or "brazil" in n or "brasil" in n or any(w in n for w in _FORCE_PT_WORDS):
++        return "pt"
++    return ch.get("lang") or "pt"
++
++
++def _lang_label(lang: str) -> str:
++    if not lang or lang == "pt":
++        return "🇧🇷 Em português"
++    return f"🌎 Áudio original em {_LANG_NAMES.get(lang, lang)} (legenda PT)"
++
++
++def _dedupe_pluto(chs: list[dict]) -> list[dict]:
++    """Mesmo canal em duas categorias (ou cópia antiga morta): fica um só, o com mais programação."""
++    best: dict[str, dict] = {}
++    order: list[str] = []
++    for ch in chs:
++        k = _norm_name(ch.get("name") or "") or ch.get("_id")
++        if k not in best:
++            best[k] = ch
++            order.append(k)
++        elif len(ch.get("timelines") or []) > len(best[k].get("timelines") or []):
++            best[k] = ch
++    return [best[k] for k in order]
++
++
++def _iptv_is_dup(ch: dict, pluto_names: set[str]) -> bool:
++    u = (ch.get("url") or "").lower()
++    n = (ch.get("name") or "").lower()
++    if "pluto.tv" in u or "jmp2.uk" in u or "pluto" in n:
++        return True
++    return _norm_name(ch.get("name") or "") in pluto_names
++
++
++def load_pluto_info():
++    global _pluto_lang, _pluto_info_when
++    try:
++        with open(PLUTO_INFO_FILE, "r", encoding="utf-8") as f:
++            d = json.load(f)
++        _pluto_lang = dict(d.get("lang") or {})
++        _pluto_info_when = float(d.get("when") or 0)
++    except Exception:
++        pass
++
++
++def _save_pluto_info(lang: dict[str, str]):
++    global _pluto_lang, _pluto_info_when
++    _pluto_lang = dict(lang)
++    _pluto_info_when = time.time()
++    try:
++        tmp = f"{PLUTO_INFO_FILE}.tmp.{os.getpid()}"
++        with open(tmp, "w", encoding="utf-8") as f:
++            json.dump({"when": _pluto_info_when, "lang": _pluto_lang}, f)
++        os.replace(tmp, PLUTO_INFO_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving pluto_info.json: {e}")
++
++
++def _quick_ok(url: str, timeout: float = 5.0) -> bool:
++    """Teste rápido na hora do clique: master + variante com segmentos + 1º segmento responde."""
++    try:
++        with httpx.Client(headers={"User-Agent": "ExoPlayerLib/2.19.1"}, follow_redirects=True, timeout=timeout) as c:
++            r = c.get(url)
++            if r.status_code != 200 or "#EXTM3U" not in r.text[:200]:
++                return False
++            var = [l.strip() for l in r.text.splitlines() if l.strip() and not l.startswith("#")]
++            if not var:
++                return False
++            v = c.get(urllib.parse.urljoin(str(r.url), var[0]))
++            segs = [l.strip() for l in v.text.splitlines() if l.strip() and not l.startswith("#")]
++            if v.status_code != 200 or len(segs) < 2 or any("slate" in x.lower() for x in segs):
++                return False
++            with c.stream("GET", urllib.parse.urljoin(str(v.url), segs[-1])) as sr:
++                return sr.status_code == 200 and len(next(sr.iter_bytes(2048), b"")) >= 100
++    except Exception:
++        return False
++
++
++async def _fresh_pluto_session() -> dict | None:
++    """Sessão v4 exclusiva para uma abertura (não entra no cache compartilhado)."""
++    params = {
++        "appName": "web", "appVersion": "9.0.0", "deviceVersion": "122.0.0", "deviceModel": "web",
++        "deviceMake": "chrome", "deviceType": "web", "clientID": str(uuid.uuid4()),
++        "clientModelNumber": "1.0.0", "serverSideAds": "false",
++    }
++    try:
++        async with httpx.AsyncClient(timeout=8.0) as client:
++            resp = await client.get("https://boot.pluto.tv/v4/start?" + urllib.parse.urlencode(params))
++            if resp.status_code != 200:
++                return None
++            data = resp.json()
++            tok = data.get("sessionToken")
++            st = ((data.get("servers") or {}).get("stitcher") or "").rstrip("/")
++            if tok and st:
++                return {"sessionToken": tok, "stitcherParams": (data.get("stitcherParams") or "").lstrip("?&"), "stitcher": st}
++    except Exception as e:
++        logger.debug(f"Pluto: sessão nova falhou: {e}")
++    return None
++
++
++def _master_ok(url: str, timeout: float = 5.0) -> bool:
++    """Confere só o master e UMA variante (com segmentos) — sem baixar vídeo, para não gastar a sessão."""
++    try:
++        with httpx.Client(headers={"User-Agent": "ExoPlayerLib/2.19.1"}, follow_redirects=True, timeout=timeout) as c:
++            r = c.get(url)
++            if r.status_code != 200 or "#EXTM3U" not in r.text[:200]:
++                return False
++            var = [l.strip() for l in r.text.splitlines() if l.strip() and not l.startswith("#")]
++            if not var:
++                return False
++            v = c.get(urllib.parse.urljoin(str(r.url), var[0]))
++            segs = [l for l in v.text.splitlines() if l.strip() and not l.startswith("#")]
++            return v.status_code == 200 and len(segs) >= 2 and not any("slate" in x.lower() for x in segs)
++    except Exception:
++        return False
++
++
++async def resolve_pluto_url(pluto_id: str) -> str | None:
++    """No clique: sessão v4 nova e exclusiva (cada aparelho/abertura com a sua); falhou 2x → jmp2."""
++    if not re.fullmatch(r"[0-9a-f]{24}", pluto_id or ""):
++        return None
++    for _ in range(2):
++        sess = await _fresh_pluto_session()
++        if not sess:
++            break
++        u = (f"{sess['stitcher']}/v2/stitch/hls/channel/{pluto_id}/master.m3u8?"
++             f"{sess['stitcherParams']}&jwt={sess['sessionToken']}&masterJWTPassthrough=true")
++        if await asyncio.to_thread(_master_ok, u):
++            return u
++    return f"https://jmp2.uk/plu-{pluto_id}.m3u8"
++
++
++def _public_base() -> str:
++    return (getattr(settings, "PUBLIC_BASE_URL", None) or "").rstrip("/")
 +
 +_pluto_v4_cache: dict | None = None
 +_pluto_v4_cache_expiry: float = 0.0
@@ -15902,6 +16584,7 @@ index 0000000..2e678c2
 +            txt = r.text
 +            if not txt.startswith("#EXTM3U") and "#EXTM3U" not in txt[:100]:
 +                return False, "master sem EXTM3U"
++            _LAST_LANG[url] = _audio_lang(txt)
 +
 +            lines = [l.strip() for l in txt.splitlines() if l.strip() and not l.strip().startswith("#")]
 +            if not lines:
@@ -16157,35 +16840,49 @@ index 0000000..2e678c2
 +
 +async def validate_pluto_channels():
 +    try:
-+        channels = await get_pluto_channels()
-+        session = await get_pluto_v4_session()
++        channels = await get_pluto_channels(force_refresh=True)
++        session = await get_pluto_v4_session(force_refresh=True)
 +        stitcher = (session.get("stitcher") or "").rstrip("/") if session else ""
 +        sp = (session.get("stitcherParams") or "").lstrip("?&") if session else ""
 +        jwt = session.get("sessionToken") if session else ""
++        if not channels:
++            return
 +
-+        alive = []
++        alive, lang = [], {}
 +        for ch in channels:
 +            cid = ch.get("_id")
 +            if not cid:
 +                continue
-+
-+            v4_ok = False
-+            if stitcher and jwt:
-+                u_v4 = f"{stitcher}/v2/stitch/hls/channel/{cid}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true"
-+                v4_ok, _ = await asyncio.to_thread(check_channel_chain, u_v4, 6.0)
-+
-+            jmp2_ok = False
-+            if not v4_ok:
-+                u_jmp2 = f"https://jmp2.uk/plu-{cid}.m3u8"
-+                jmp2_ok, _ = await asyncio.to_thread(check_channel_chain, u_jmp2, 6.0)
-+
-+            if v4_ok or jmp2_ok:
++            u_v4 = f"{stitcher}/v2/stitch/hls/channel/{cid}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true" if stitcher and jwt else ""
++            u_j2 = f"https://jmp2.uk/plu-{cid}.m3u8"
++            ok = False
++            for _try in range(2):
++                for u in (u_v4, u_j2):
++                    if u and (await asyncio.to_thread(check_channel_chain, u, 6.0))[0]:
++                        ok = True
++                        break
++                if ok:
++                    break
++                await asyncio.sleep(2.0)
++            l = _LAST_LANG.pop(u_j2, "") or _LAST_LANG.pop(u_v4, "")
++            if not l:
++                try:
++                    async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as cl:
++                        rr = await cl.get(u_j2)
++                        if rr.status_code == 200:
++                            l = _audio_lang(rr.text)
++                except Exception:
++                    pass
++            if l:
++                lang[cid] = l
++            if ok:
 +                alive.append(cid)
++            await asyncio.sleep(0.5)
 +
-+            await asyncio.sleep(1.0)
-+
-+        save_pluto_alive_to_file(alive)
-+        logger.info(f"📺 Pluto TV: {len(alive)}/{len(channels)} canais vivos validados")
++        if len(alive) >= max(10, len(channels) // 3):  # proteção: queda geral do Pluto não apaga a lista
++            save_pluto_alive_to_file(alive)
++        _save_pluto_info(lang)
++        logger.info(f"📺 Pluto TV: {len(alive)}/{len(channels)} canais vivos; {sum(1 for v in lang.values() if v != 'pt')} em outros idiomas")
 +    except Exception as e:
 +        logger.warning(f"Erro validando canais Pluto: {e}")
 +
@@ -16200,12 +16897,20 @@ index 0000000..2e678c2
 +            logger.warning("MemAvailable < 600 MB: pulando validacao do iptv-org")
 +            return
 +
-+        async with httpx.AsyncClient(timeout=15.0) as client:
-+            resp = await client.get(IPTV_ORG_BR_URL)
-+            if resp.status_code != 200:
-+                logger.warning(f"iptv-org M3U retornou {resp.status_code}")
-+                return
-+            content = resp.text
++        parts = []
++        async with httpx.AsyncClient(timeout=20.0) as client:
++            for _src in (IPTV_ORG_BR_URL, IPTV_ORG_POR_URL):
++                try:
++                    resp = await client.get(_src)
++                    if resp.status_code == 200:
++                        parts.append(resp.text)
++                    else:
++                        logger.warning(f"iptv-org M3U {_src} retornou {resp.status_code}")
++                except Exception as _e:
++                    logger.warning(f"iptv-org M3U {_src}: {_e}")
++        if not parts:
++            return
++        content = "\n".join(parts)
 +
 +        pattern = re.compile(r'#EXTINF:-1\s*(.*?),(.*)')
 +        logo_pat = re.compile(r'tvg-logo="([^"]+)"')
@@ -16232,8 +16937,10 @@ index 0000000..2e678c2
 +            logger.warning("Nenhum canal encontrado no M3U do iptv-org")
 +            return
 +
++        _seen_u = set()
++        entries = [e for e in entries if not (e["url"] in _seen_u or _seen_u.add(e["url"]))]
 +        alive = []
-+        sem = asyncio.Semaphore(15)
++        sem = asyncio.Semaphore(8)
 +
 +        async def _check(item):
 +            if _get_mem_available_mb() < 600:
@@ -16258,6 +16965,7 @@ index 0000000..2e678c2
 +                        "url": u,
 +                        "logo": item["logo"],
 +                        "category": "Canais abertos",
++                        "lang": _LAST_LANG.pop(u, "") or "pt",
 +                    }
 +            return None
 +
@@ -16281,6 +16989,7 @@ index 0000000..2e678c2
 +    global _background_iptv_task
 +    load_iptv_alive_from_file()
 +    load_pluto_alive_from_file()
++    load_pluto_info()
 +    _get_pluto_device_id()
 +
 +    try:
@@ -16295,17 +17004,26 @@ index 0000000..2e678c2
 +            logger.warning(f"Erro na validação inicial do iptv-org: {e}")
 +
 +    async def _loop():
++        # lista do Pluto velha (ou inexistente): valida 2 min depois de subir
++        if _pluto_alive_ids is None or time.time() - _pluto_info_when > 20 * 3600:
++            await asyncio.sleep(120)
++            try:
++                await validate_pluto_channels()
++            except Exception as exc:
++                logger.warning(f"Erro na validação inicial do Pluto: {exc}")
++        n = 0
 +        while True:
-+            await asyncio.sleep(86400)
-+            if getattr(settings, "LIVE_TV_IPTV_ORG", True):
-+                try:
-+                    await validate_iptv_channels()
-+                except Exception as exc:
-+                    logger.warning(f"Erro na validação periódica do iptv-org: {exc}")
++            await asyncio.sleep(12 * 3600)
++            n += 1
 +            try:
 +                await validate_pluto_channels()
 +            except Exception as exc:
 +                logger.warning(f"Erro na validação periódica do Pluto: {exc}")
++            if n % 2 == 0 and getattr(settings, "LIVE_TV_IPTV_ORG", True):
++                try:
++                    await validate_iptv_channels()
++                except Exception as exc:
++                    logger.warning(f"Erro na validação periódica do iptv-org: {exc}")
 +
 +    _background_iptv_task = asyncio.create_task(_loop())
 +
@@ -16391,7 +17109,7 @@ index 0000000..2e678c2
 +    cats = list(_pluto_categories) if _pluto_categories else list(DEFAULT_PLUTO_CATEGORIES)
 +    if "Canais abertos" not in cats:
 +        cats.append("Canais abertos")
-+    return cats
++    return [LANG_PT, LANG_OTHER] + cats
 +
 +
 +def get_live_tv_status() -> dict:
@@ -16412,86 +17130,88 @@ index 0000000..2e678c2
 +    genre = extra.get("genre")
 +    search = extra.get("search")
 +    search_q = str(search).strip().lower() if search else None
++    want_lang = "pt" if genre == LANG_PT else ("other" if genre == LANG_OTHER else None)
++    if want_lang:
++        genre = None
++    try:
++        skip = int(extra.get("skip") or 0)
++    except Exception:
++        skip = 0
 +
 +    now_utc = datetime.datetime.now(datetime.timezone.utc)
 +    pluto_channels = await get_pluto_channels()
 +
-+    metas = []
-+    # 1. Pluto TV
++    def _get_num(c):
++        try:
++            return int(c.get("number"))
++        except Exception:
++            return 999999
++
++    alive = [c for c in sorted(pluto_channels, key=_get_num)
++             if c.get("_id") and (_pluto_alive_ids is None or c.get("_id") in _pluto_alive_ids)]
++    alive = _dedupe_pluto(alive)
++    pluto_names = {_norm_name(c.get("name") or "") for c in alive}
++
++    def _lang_ok(lang: str) -> bool:
++        if want_lang == "pt":
++            return lang == "pt"
++        if want_lang == "other":
++            return lang != "pt"
++        return True
++
++    pt_metas, other_metas = [], []
 +    if genre != "Canais abertos":
-+        def _get_num(c):
-+            n = c.get("number")
-+            try:
-+                return int(n)
-+            except Exception:
-+                return 999999
-+
-+        sorted_pluto = sorted(pluto_channels, key=_get_num)
-+        for ch in sorted_pluto:
-+            cid_raw = ch.get("_id")
-+            if _pluto_alive_ids is not None and cid_raw not in _pluto_alive_ids:
-+                continue
-+
++        for ch in alive:
 +            cat = ch.get("category") or ""
 +            if kids:
 +                if cat.lower() not in KIDS_CATEGORIES:
 +                    continue
 +            elif genre and cat != genre:
 +                continue
-+
 +            name = ch.get("name") or "Canal"
 +            if search_q and search_q not in name.lower():
 +                continue
-+
++            lang = _pluto_ch_lang(ch)
++            if not _lang_ok(lang):
++                continue
 +            logo = (ch.get("colorLogoPNG") or {}).get("path") or (ch.get("logo") or {}).get("path") or ""
 +            background = (ch.get("featuredImage") or {}).get("path") or logo
-+            desc = _format_agora_depois(ch.get("timelines", []), now_utc)
-+
++            desc = _lang_label(lang) + "\n" + _format_agora_depois(ch.get("timelines", []), now_utc)
 +            cid = f"cometlive:pluto:{ch['_id']}"
-+            metas.append({
-+                "id": cid,
-+                "type": "tv",
-+                "name": name,
-+                "poster": logo,
-+                "posterShape": "square",
-+                "background": background,
-+                "description": desc,
-+                "genres": [cat] if cat else [],
++            (pt_metas if lang == "pt" else other_metas).append({
++                "id": cid, "type": "tv", "name": name, "poster": logo, "posterShape": "square",
++                "background": background, "description": desc,
++                "genres": [cat, _lang_label(lang)] if cat else [_lang_label(lang)],
 +                "releaseInfo": "Ao vivo",
-+                "behaviorHints": {
-+                    "defaultVideoId": cid,
-+                    "hasScheduledVideos": False,
-+                },
++                "behaviorHints": {"defaultVideoId": cid, "hasScheduledVideos": False},
 +            })
 +
-+    # 2. IPTV-org open channels
-+    if not kids and getattr(settings, "LIVE_TV_IPTV_ORG", True):
-+        if not genre or genre == "Canais abertos":
-+            iptv_channels = get_iptv_channels()
-+            sorted_iptv = sorted(iptv_channels, key=lambda c: str(c.get("name", "")).lower())
-+            for ch in sorted_iptv:
-+                name = ch.get("name") or "Canal"
-+                if search_q and search_q not in name.lower():
-+                    continue
-+                logo = ch.get("logo") or ""
-+                cid = ch["id"]
-+                metas.append({
-+                    "id": cid,
-+                    "type": "tv",
-+                    "name": name,
-+                    "poster": logo,
-+                    "posterShape": "square",
-+                    "background": logo,
-+                    "description": "▶ Transmissão ao vivo 24h",
-+                    "genres": ["Canais abertos"],
-+                    "releaseInfo": "Ao vivo",
-+                    "behaviorHints": {
-+                        "defaultVideoId": cid,
-+                        "hasScheduledVideos": False,
-+                    },
-+                })
++    if not kids and getattr(settings, "LIVE_TV_IPTV_ORG", True) and (not genre or genre == "Canais abertos"):
++        seen = set()
++        for ch in sorted(get_iptv_channels(), key=lambda c: str(c.get("name", "")).lower()):
++            if _iptv_is_dup(ch, pluto_names):
++                continue
++            k = _norm_name(ch.get("name") or "")
++            if k in seen:
++                continue
++            seen.add(k)
++            name = ch.get("name") or "Canal"
++            if search_q and search_q not in name.lower():
++                continue
++            lang = _iptv_lang(ch)
++            if not _lang_ok(lang):
++                continue
++            logo = ch.get("logo") or ""
++            cid = ch["id"]
++            (pt_metas if lang == "pt" else other_metas).append({
++                "id": cid, "type": "tv", "name": name, "poster": logo, "posterShape": "square",
++                "background": logo, "description": _lang_label(lang) + "\n▶ Transmissão ao vivo 24h",
++                "genres": ["Canais abertos", _lang_label(lang)], "releaseInfo": "Ao vivo",
++                "behaviorHints": {"defaultVideoId": cid, "hasScheduledVideos": False},
++            })
 +
-+    return metas
++    metas = pt_metas + other_metas  # português primeiro, sempre
++    return metas[skip:skip + 100] if skip else metas
 +
 +
 +async def get_live_tv_home_catalog(extra: dict | None = None, kids: bool = False) -> list[dict]:
@@ -16516,6 +17236,8 @@ index 0000000..2e678c2
 +    sorted_pluto = sorted(pluto_channels, key=_get_num)
 +    if _pluto_alive_ids is not None:
 +        sorted_pluto = [c for c in sorted_pluto if c.get("_id") in _pluto_alive_ids]
++    sorted_pluto = _dedupe_pluto(sorted_pluto)
++    sorted_pluto = [c for c in sorted_pluto if _pluto_ch_lang(c) == "pt"] or sorted_pluto
 +
 +    selected_channels = []
 +    seen_ids = set()
@@ -16594,6 +17316,9 @@ index 0000000..2e678c2
 +
 +
 +async def get_live_tv_meta(media_id: str) -> dict | None:
++    if media_id.startswith("cometlive:radio:"):
++        from comet.services.radio import get_radio_meta
++        return await get_radio_meta(media_id)
 +    now_utc = datetime.datetime.now(datetime.timezone.utc)
 +    iso_now = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 +    if media_id.startswith("cometlive:pluto:"):
@@ -16604,7 +17329,7 @@ index 0000000..2e678c2
 +        logo = (ch.get("colorLogoPNG") or {}).get("path") or (ch.get("logo") or {}).get("path") or ""
 +        background = (ch.get("featuredImage") or {}).get("path") or logo
 +        cat = ch.get("category") or ""
-+        desc = _format_meta_programming(ch.get("timelines", []), now_utc, ch.get("summary", ""))
++        desc = _lang_label(_pluto_ch_lang(ch)) + "\n" + _format_meta_programming(ch.get("timelines", []), now_utc, ch.get("summary", ""))
 +        overview = _format_agora_depois(ch.get("timelines", []), now_utc)
 +        return {
 +            "id": media_id,
@@ -16667,6 +17392,9 @@ index 0000000..2e678c2
 +
 +
 +async def get_live_tv_stream(media_id: str) -> list[dict]:
++    if media_id.startswith("cometlive:radio:"):
++        from comet.services.radio import get_radio_stream
++        return await get_radio_stream(media_id, _public_base())
 +    if media_id.startswith("cometlive:pluto:"):
 +        pluto_id = media_id.split(":", 2)[2]
 +        ch = await get_pluto_channel_by_id(pluto_id)
@@ -16675,21 +17403,27 @@ index 0000000..2e678c2
 +        channel_name = ch.get("name") or "Canal"
 +        streams = []
 +
-+        # 1. Opção 1: v4
-+        session = await get_pluto_v4_session()
-+        if session:
-+            stitcher = session["stitcher"].rstrip("/")
-+            sp = session["stitcherParams"].lstrip("?&")
-+            jwt = session["sessionToken"]
-+            v4_url = f"{stitcher}/v2/stitch/hls/channel/{pluto_id}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true"
++        # 1. Opção 1: o A71 testa as fontes na hora e redireciona para a que está abrindo
++        base = _public_base()
++        if base:
 +            streams.append({
 +                "name": "📺 Ao vivo",
-+                "description": f"{channel_name} · Pluto TV\nSe não abrir, tente a próxima opção",
-+                "url": v4_url,
-+                "behaviorHints": {
-+                    "notWebReady": False,
-+                },
++                "description": f"{channel_name} · Pluto TV · {_lang_label(_pluto_ch_lang(ch))}\nO Comet testa a transmissão na hora e abre a que está funcionando",
++                "url": f"{base}/live/pluto/{pluto_id}.m3u8",
++                "behaviorHints": {"notWebReady": False},
 +            })
++        else:
++            session = await get_pluto_v4_session()
++            if session:
++                stitcher = session["stitcher"].rstrip("/")
++                sp = session["stitcherParams"].lstrip("?&")
++                jwt = session["sessionToken"]
++                streams.append({
++                    "name": "📺 Ao vivo",
++                    "description": f"{channel_name} · Pluto TV\nSe não abrir, tente a próxima opção",
++                    "url": f"{stitcher}/v2/stitch/hls/channel/{pluto_id}/master.m3u8?{sp}&jwt={jwt}&masterJWTPassthrough=true",
++                    "behaviorHints": {"notWebReady": False},
++                })
 +
 +        # 2. Opção 2: jmp2
 +        jmp2_url = f"https://jmp2.uk/plu-{pluto_id}.m3u8"
@@ -16723,10 +17457,10 @@ index 0000000..2e678c2
 +    return []
 diff --git a/comet/services/marathon.py b/comet/services/marathon.py
 new file mode 100644
-index 0000000..6e5f7b1
+index 0000000..017e3f2
 --- /dev/null
 +++ b/comet/services/marathon.py
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,194 @@
 +"""Maratonas na ordem certa + anime só a história (sem filler).
 +
 +IDs (reaproveitam o prefixo `cometsaga:`, que o app do usuário já conhece, então não exige reinstalar):
@@ -16768,7 +17502,6 @@ index 0000000..6e5f7b1
 +    ("tt6342474", "Boruto: Naruto Next Generations"),
 +    ("tt1528406", "Fairy Tail"),
 +    ("tt7441658", "Black Clover"),
-+    ("tt0131179", "Detetive Conan"),
 +    ("tt0214341", "Dragon Ball Z"),
 +]
 +
@@ -16894,7 +17627,21 @@ index 0000000..6e5f7b1
 +    return meta
 +
 +
++def _clean(obj):
++    """Tira campos vazios (None): o app do Stremio descarta a página inteira se achar logo/releaseInfo nulos."""
++    if isinstance(obj, dict):
++        return {k: _clean(v) for k, v in obj.items() if v is not None}
++    if isinstance(obj, list):
++        return [_clean(v) for v in obj if v is not None]
++    return obj
++
++
 +async def get_marathon_meta(meta_id: str) -> dict | None:
++    meta = await _get_marathon_meta(meta_id)
++    return _clean(meta) if meta else None
++
++
++async def _get_marathon_meta(meta_id: str) -> dict | None:
 +    rest = meta_id.split("cometsaga:", 1)[1]
 +    if rest.startswith("o-"):
 +        return order_meta(rest[2:])
@@ -16910,10 +17657,10 @@ index 0000000..6e5f7b1
 +    return meta_id.startswith(("cometsaga:o-", "cometsaga:c-", "cometsaga:w-"))
 diff --git a/comet/services/media_info.py b/comet/services/media_info.py
 new file mode 100644
-index 0000000..80d2408
+index 0000000..fb0d977
 --- /dev/null
 +++ b/comet/services/media_info.py
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,176 @@
 +"""Qualidade de verdade: lê o cabeçalho do arquivo (MKV/MP4) e guarda o resumo (vídeo, HDR/DV, bitrate,
 +faixas de áudio e qual é a padrão). Usa comet/services/media_probe.py (Python puro).
 +
@@ -16999,6 +17746,7 @@ index 0000000..80d2408
 +            if not data or len(data) < 8:
 +                return None, None
 +            probe = media_probe.parse_header(data)
++            extra_info = None
 +            for _ in range(2):  # no máx. 2 trechos extras (SeekHead / moov no fim)
 +                if not probe or "need_range" not in probe:
 +                    break
@@ -17009,12 +17757,25 @@ index 0000000..80d2408
 +                if not extra:
 +                    break
 +                probe = media_probe.parse_header(data, extra)
++                extra_info = (off, extra)
 +            if not probe or probe.get("need_range") or probe.get("moov_at_end") and not probe.get("tracks"):
 +                return None, None
 +            summary = media_probe.summarize(probe, total)
 +            if not summary or not (summary.get("audio") or summary.get("video")):
 +                return None, None
 +            summary["file_size"] = total
++            try:
++                if summary.get("pt_audio") and not summary.get("pt_is_default"):
++                    from comet.services.flag_plan import make_plan
++                    _plan = make_plan(summary, data, extra_info)
++                    if _plan:
++                        summary["pt_fix"] = [[int(o), int(v)] for o, v in _plan]
++            except Exception as _pe:
++                logger.debug(f"pt_fix plan: {_pe}")
++            for _a in summary.get("audio") or []:
++                _a.pop("children", None)
++                _a.pop("crc", None)
++            summary.pop("tracks_crc", None)
 +            return _legacy_tracks(summary), summary
 +    except Exception as e:
 +        logger.debug(f"probe_full: {type(e).__name__}: {e}")
@@ -17062,7 +17823,10 @@ index 0000000..80d2408
 +        lb = media_probe.labels(summary)
 +    except Exception:
 +        return {}
-+    return {"video": lb.get("video"), "audio": lb.get("audio"), "warnings": lb.get("warnings") or []}
++    _aud = lb.get("audio")
++    if summary.get("_pt_fixed") and _aud:
++        _aud = f"{_aud} · PT padrão (ajustado pelo Comet)"
++    return {"video": lb.get("video"), "audio": _aud, "warnings": lb.get("warnings") or []}
 +
 +
 +def pick_penalty(summary: dict | None) -> tuple[int, int]:
@@ -17075,10 +17839,10 @@ index 0000000..80d2408
 +    return risky, pt_not_default
 diff --git a/comet/services/media_probe.py b/comet/services/media_probe.py
 new file mode 100644
-index 0000000..8f8672f
+index 0000000..2dab2d7
 --- /dev/null
 +++ b/comet/services/media_probe.py
-@@ -0,0 +1,988 @@
+@@ -0,0 +1,1036 @@
 +"""Leitor de cabeçalho de vídeo (MKV/WebM e MP4) em Python puro.
 +
 +Lê os primeiros bytes de um arquivo (ex.: 4 MB via Range) e descobre o que ele
@@ -17116,6 +17880,7 @@ index 0000000..8f8672f
 +ID_TRACKS = 0x1654AE6B
 +ID_TRACKENTRY = 0xAE
 +ID_CLUSTER = 0x1F43B675
++ID_CRC32 = 0xBF
 +
 +ID_TRACKNUMBER = 0xD7
 +ID_TRACKTYPE = 0x83
@@ -17307,7 +18072,7 @@ index 0000000..8f8672f
 +            if not complete:  # Tracks começa aqui mas não coube nos bytes lidos
 +                size, _ = _read_size(data, _read_id(data, es)[1])
 +                return es, TRACKS_WINDOW if size is None else (ds - es) + size
-+            probe["tracks"] = _parse_tracks(data, ds, de)
++            probe["tracks"] = _parse_tracks(data, ds, de, 0, probe)
 +        elif not complete:
 +            break  # elemento grande (ex.: anexos) passa do fim dos bytes lidos
 +        elif eid == ID_INFO:
@@ -17328,7 +18093,7 @@ index 0000000..8f8672f
 +        if not complete:
 +            size, _ = _read_size(extra, _read_id(extra, 0)[1])
 +            return None if size is None else (offset, (ds - es) + size)
-+        probe["tracks"] = _parse_tracks(extra, ds, de)
++        probe["tracks"] = _parse_tracks(extra, ds, de, offset, probe)
 +        return None
 +    return None
 +
@@ -17361,17 +18126,54 @@ index 0000000..8f8672f
 +    return out
 +
 +
-+def _parse_tracks(buf: bytes, start: int, end: int) -> list[dict]:
-+    return [_parse_track_entry(buf, ds, de)
-+            for eid, _, ds, de, _ in _elements(buf, start, end) if eid == ID_TRACKENTRY]
++def _parse_tracks(buf: bytes, start: int, end: int, base: int = 0,
++                  probe: dict | None = None) -> list[dict]:
++    """TrackEntries do Tracks. `base` = offset absoluto de buf[0] no arquivo.
 +
-+
-+def _parse_track_entry(buf: bytes, start: int, end: int) -> dict:
-+    t = {"number": None, "type": "other", "codec_id": "", "lang": "eng",
-+         "lang_bcp47": None, "name": "", "default": True, "forced": False}
-+    private = b""
++    Marca probe["tracks_has_crc"] se o Tracks ou algum TrackEntry tem CRC-32.
++    """
++    tracks, crc = [], None
 +    for eid, _, ds, de, _ in _elements(buf, start, end):
++        if eid == ID_TRACKENTRY:
++            tracks.append(_parse_track_entry(buf, ds, de, base))
++        elif eid == ID_CRC32 and crc is None:
++            crc = _crc_info(ID_TRACKS, start, end, ds, de, base)
++    if probe is not None:
++        probe["tracks_crc"] = crc
++        probe["tracks_has_crc"] = crc is not None or any(t.get("crc") for t in tracks)
++    return tracks
++
++
++# Filhos de TrackEntry que são uint (para registrar o valor em "children")
++_TRACK_UINT_IDS = {0xD7, 0x73C5, 0x83, 0xB9, 0x88, 0x55AA, 0x55AB, 0x55AC, 0x55AD,
++                   0x55AE, 0x55AF, 0x9C, 0x6DE7, 0x6DF8, 0x23E383, 0x234E7A, 0x55EE,
++                   0xAA, 0x6FAB, 0x56AA, 0x56BB, 0x7446}
++
++
++def _crc_info(parent_id: int, pstart: int, pend: int, cds: int, cde: int, base: int) -> dict:
++    """CRC-32 (0xBF) de um pai: onde estão os 4 bytes e quais bytes ele cobre.
++
++    Pela especificação, o CRC cobre todos os bytes do pai depois do elemento CRC.
++    """
++    return {"parent_id": parent_id, "parent_data": (base + pstart, base + pend),
++            "offset": base + cds, "size": cde - cds, "covered": (base + cde, base + pend)}
++
++
++def _parse_track_entry(buf: bytes, start: int, end: int, base: int = 0) -> dict:
++    t = {"number": None, "type": "other", "codec_id": "", "lang": "eng",
++         "lang_bcp47": None, "name": "", "default": True, "forced": False,
++         "flag_default_value_offset": None, "flag_default_value_size": None,
++         "flag_forced_value_offset": None, "flag_forced_value_size": None,
++         "entry_data": (base + start, base + end), "children": [], "crc": None}
++    private = b""
++    for eid, es, ds, de, _ in _elements(buf, start, end):
 +        raw = buf[ds:de]
++        t["children"].append({
++            "id": eid, "offset": base + es, "total": de - es, "data_offset": base + ds,
++            "data_size": de - ds,
++            "value": _uint(raw) if eid in _TRACK_UINT_IDS and de - ds <= 8 else None})
++        if eid == ID_CRC32 and t["crc"] is None:
++            t["crc"] = _crc_info(ID_TRACKENTRY, start, end, ds, de, base)
 +        if eid == ID_TRACKNUMBER:
 +            t["number"] = _uint(raw)
 +        elif eid == ID_TRACKTYPE:
@@ -17386,8 +18188,10 @@ index 0000000..8f8672f
 +            t["name"] = _text(raw)
 +        elif eid == ID_FLAGDEFAULT:
 +            t["default"] = bool(_uint(raw))
++            t["flag_default_value_offset"], t["flag_default_value_size"] = base + ds, de - ds
 +        elif eid == ID_FLAGFORCED:
 +            t["forced"] = bool(_uint(raw))
++            t["flag_forced_value_offset"], t["flag_forced_value_size"] = base + ds, de - ds
 +        elif eid == ID_CODECPRIVATE:
 +            private = raw
 +        elif eid == ID_VIDEO:
@@ -17922,7 +18726,13 @@ index 0000000..8f8672f
 +    codec, name = _audio_codec(t), t.get("name", "")
 +    return {"codec": codec, "channels": t.get("channels"), "lang": _track_lang(t),
 +            "default": bool(t.get("default")), "name": name,
-+            "atmos": codec in ("truehd", "eac3") and "atmos" in name.lower()}
++            "atmos": codec in ("truehd", "eac3") and "atmos" in name.lower(),
++            "number": t.get("number"), "forced": bool(t.get("forced")),
++            "flag_default_offset": t.get("flag_default_value_offset"),
++            "flag_default_size": t.get("flag_default_value_size"),
++            "flag_forced_offset": t.get("flag_forced_value_offset"),
++            "flag_forced_size": t.get("flag_forced_value_size"),
++            "children": t.get("children") or [], "crc": t.get("crc")}
 +
 +
 +def _summarize_sub(t: dict) -> dict:
@@ -17951,6 +18761,8 @@ index 0000000..8f8672f
 +        "pt_audio": any(a["lang"] == "pt" for a in audio),
 +        "pt_is_default": bool(playing and playing["lang"] == "pt"),
 +        "first_audio_lang": audio[0]["lang"] if audio else None,
++        "tracks_has_crc": bool((probe or {}).get("tracks_has_crc")),
++        "tracks_crc": (probe or {}).get("tracks_crc"),
 +    }
 +
 +
@@ -20427,6 +21239,1538 @@ index 0000000..0578131
 +    task = asyncio.create_task(_later())
 +    _TASKS.add(task)
 +    task.add_done_callback(_TASKS.discard)
+diff --git a/comet/services/radio.py b/comet/services/radio.py
+new file mode 100644
+index 0000000..b7467e2
+--- /dev/null
++++ b/comet/services/radio.py
+@@ -0,0 +1,1526 @@
++"""Rádios brasileiras ao vivo para o Comet (Stremio), com Recife/Pernambuco primeiro.
++
++Fonte: Radio Browser (https://www.radio-browser.info/).
++Ids: ``cometlive:radio:<stationuuid>`` com type "tv" (o manifesto já reivindica ``cometlive:``).
++
++Fluxo:
++  * ``start_radio_service(path)`` carrega a lista validada (JSON) e agenda a revalidação a cada 24 h.
++  * A validação abre cada stream (segue redirects, .pls/.m3u, HLS), lê até ~48 KB em poucos
++    segundos e confirma áudio de verdade pelos bytes (quadros MP3/ADTS encadeados, páginas Ogg,
++    pacotes MPEG-TS, fMP4, FLAC). Nada de ffmpeg; leituras em streaming e semáforo de 12.
++  * ``relay_radio`` repassa o áudio de estações só-HTTP pelo próprio servidor (HTTPS no 4G).
++
++Cliente HTTP próprio (asyncio puro) para os streams: aceita respostas ``ICY 200 OK`` do Shoutcast
++v1, que o httpx/h11 rejeita. O httpx só é usado para a API e para conferir os favicons.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++import os
++import random
++import re
++import socket
++import ssl
++import time
++import unicodedata
++from datetime import datetime, timezone
++from typing import Any, AsyncIterator, Callable, Optional
++from urllib.parse import quote, unquote, urljoin, urlsplit
++
++try:
++    from loguru import logger
++except Exception:  # pragma: no cover
++    import logging
++
++    logger = logging.getLogger("comet.radio")
++
++# ---------------------------------------------------------------------------
++# Constantes públicas
++# ---------------------------------------------------------------------------
++ID_PREFIX = "cometlive:radio:"
++DEFAULT_PATH = "/opt/comet/data/radio_alive.json"
++DEFAULT_RADIO_POSTER = "https://placehold.co/512x512/0f172a/f8fafc.png?text=R%C3%A1dio"
++USER_AGENT = "CometRadio/1.0 (Stremio addon; +https://www.radio-browser.info/)"
++PAGE_SIZE = 100
++REVALIDATE_SECONDS = 24 * 3600
++CONCURRENCY = 12
++
++GENRE_PE = "📍 Recife e Pernambuco"
++REGIONS = ["Nordeste", "Sudeste", "Sul", "Centro-Oeste", "Norte"]
++GENRE_WEB = "Web e nacionais"  # estação sem estado identificável
++KINDS = [
++    "Notícias",
++    "Esporte",
++    "Música",
++    "Pop/Rock",
++    "Sertanejo",
++    "Forró/Brega/Nordestino",
++    "Samba/Pagode/Axé",
++    "MPB",
++    "Gospel e Religiosa",
++    "Eletrônica",
++    "Rap/Funk",
++    "Clássica/Jazz",
++    "Flashback",
++]
++RADIO_GENRES = [GENRE_PE] + REGIONS + [GENRE_WEB] + KINDS
++
++# Seleção de candidatos
++MAX_CANDIDATES = 380
++PER_STATE = 10
++WEB_CAP = 40
++
++API_SERVERS = [
++    "de1.api.radio-browser.info",
++    "de2.api.radio-browser.info",
++    "fi1.api.radio-browser.info",
++    "nl1.api.radio-browser.info",
++    "at1.api.radio-browser.info",
++    "fr1.api.radio-browser.info",
++]
++
++# ---------------------------------------------------------------------------
++# Geografia
++# ---------------------------------------------------------------------------
++UFS: dict[str, tuple[str, str]] = {
++    "AC": ("Acre", "Norte"), "AL": ("Alagoas", "Nordeste"), "AP": ("Amapá", "Norte"),
++    "AM": ("Amazonas", "Norte"), "BA": ("Bahia", "Nordeste"), "CE": ("Ceará", "Nordeste"),
++    "DF": ("Distrito Federal", "Centro-Oeste"), "ES": ("Espírito Santo", "Sudeste"),
++    "GO": ("Goiás", "Centro-Oeste"), "MA": ("Maranhão", "Nordeste"),
++    "MT": ("Mato Grosso", "Centro-Oeste"), "MS": ("Mato Grosso do Sul", "Centro-Oeste"),
++    "MG": ("Minas Gerais", "Sudeste"), "PA": ("Pará", "Norte"), "PB": ("Paraíba", "Nordeste"),
++    "PR": ("Paraná", "Sul"), "PE": ("Pernambuco", "Nordeste"), "PI": ("Piauí", "Nordeste"),
++    "RJ": ("Rio de Janeiro", "Sudeste"), "RN": ("Rio Grande do Norte", "Nordeste"),
++    "RS": ("Rio Grande do Sul", "Sul"), "RO": ("Rondônia", "Norte"), "RR": ("Roraima", "Norte"),
++    "SC": ("Santa Catarina", "Sul"), "SP": ("São Paulo", "Sudeste"), "SE": ("Sergipe", "Nordeste"),
++    "TO": ("Tocantins", "Norte"),
++}
++
++# (cidade, UF, segura_no_nome). Cidades com nome ambíguo só valem no campo "state".
++CITIES: list[tuple[str, str, bool]] = [
++    # Pernambuco (lista generosa: o estado vem completo)
++    ("Recife", "PE", True), ("Olinda", "PE", True), ("Jaboatão dos Guararapes", "PE", True),
++    ("Jaboatão", "PE", True), ("Caruaru", "PE", True), ("Petrolina", "PE", True),
++    ("Petronila", "PE", True), ("Garanhuns", "PE", True), ("Vitória de Santo Antão", "PE", True),
++    ("Cabo de Santo Agostinho", "PE", True), ("Camaragibe", "PE", True), ("Igarassu", "PE", True),
++    ("Gravatá", "PE", True), ("Serra Talhada", "PE", True), ("Arcoverde", "PE", True),
++    ("Santa Cruz do Capibaribe", "PE", True), ("Goiana", "PE", False), ("Carpina", "PE", True),
++    ("Limoeiro", "PE", False), ("Salgueiro", "PE", False), ("Ipojuca", "PE", True),
++    ("Bezerros", "PE", True), ("Surubim", "PE", True), ("Belo Jardim", "PE", True),
++    ("Pesqueira", "PE", True), ("Afogados da Ingazeira", "PE", True), ("Araripina", "PE", True),
++    ("Ouricuri", "PE", True), ("Palmares", "PE", False), ("Escada", "PE", False),
++    ("Toritama", "PE", True), ("Paudalho", "PE", True), ("Abreu e Lima", "PE", True),
++    # Outras regiões (capitais e cidades grandes)
++    ("Vitória da Conquista", "BA", True), ("Feira de Santana", "BA", True), ("Salvador", "BA", True),
++    ("Fortaleza", "CE", True), ("Juazeiro do Norte", "CE", True), ("Sobral", "CE", True),
++    ("Quixadá", "CE", True), ("Natal", "RN", False), ("Mossoró", "RN", True),
++    ("João Pessoa", "PB", True), ("Campina Grande", "PB", True), ("Maceió", "AL", True),
++    ("Arapiraca", "AL", True), ("Aracaju", "SE", True), ("Teresina", "PI", True),
++    ("São Luís", "MA", True), ("Imperatriz", "MA", True), ("Belém", "PA", True),
++    ("Santarém", "PA", True), ("Manaus", "AM", True), ("Macapá", "AP", True),
++    ("Boa Vista", "RR", False), ("Porto Velho", "RO", True), ("Rio Branco", "AC", True),
++    ("Palmas", "TO", False), ("Goiânia", "GO", True), ("Anápolis", "GO", True),
++    ("Cuiabá", "MT", True), ("Campo Grande", "MS", True), ("Dourados", "MS", True),
++    ("Brasília", "DF", True), ("Belo Horizonte", "MG", True), ("Juiz de Fora", "MG", True),
++    ("Uberlândia", "MG", True), ("Patos de Minas", "MG", True), ("Montes Claros", "MG", True),
++    ("Vitória", "ES", False), ("Vila Velha", "ES", True), ("Niterói", "RJ", True),
++    ("Rio de Janeiro", "RJ", True), ("São Paulo", "SP", True), ("Campinas", "SP", True),
++    ("Santos", "SP", False), ("Ribeirão Preto", "SP", True), ("Sorocaba", "SP", True),
++    ("São José dos Campos", "SP", True), ("Curitiba", "PR", True), ("Londrina", "PR", True),
++    ("Maringá", "PR", True), ("Florianópolis", "SC", True), ("Joinville", "SC", True),
++    ("Blumenau", "SC", True), ("Porto Alegre", "RS", True), ("Caxias do Sul", "RS", True),
++    ("Pelotas", "RS", True),
++]
++
++# ---------------------------------------------------------------------------
++# Tipos (gêneros por estilo) a partir de tags e nome
++# ---------------------------------------------------------------------------
++KIND_RULES: list[tuple[str, tuple[str, ...]]] = [
++    ("Notícias", ("news", "noticia", "jornalismo", "jornal", "talk", "informacao", "cbn",
++                  "bandnews", "band news", "entrevista", "politica", "all news", "full service")),
++    ("Esporte", ("sport", "esporte", "futebol", "football", "soccer")),
++    ("Gospel e Religiosa", ("gospel", "christian", "crista", "cristao", "evangel", "catolic",
++                            "catholic", "religio", "igreja", "worship", "louvor", "cancao nova",
++                            "aparecida", "adventist", "novo tempo", "biblia", "jesus", "deus")),
++    ("Sertanejo", ("sertanej", "country", "modao", "caipira", "universitario")),
++    ("Forró/Brega/Nordestino", ("forro", "brega", "piseiro", "pisadinha", "arrocha", "frevo", "xote",
++                                "baiao", "nordest", "vaquejada", "matuto")),
++    ("Samba/Pagode/Axé", ("samba", "pagode", "axe", "bossa")),
++    ("MPB", ("mpb", "musica brasileira", "brazilian music", "brazilian popular", "nova brasil")),
++    ("Pop/Rock", ("pop", "rock", "top 40", "top40", "chr", "hits", "indie", "alternative", "metal",
++                  "jovem pan", "adult contemporary", "contemporaneo", "adulto", "adulta")),
++    ("Eletrônica", ("electro", "eletron", "dance", "house", "techno", "trance", "edm", "lounge")),
++    ("Rap/Funk", ("rap", "hip hop", "hip-hop", "hiphop", "funk", "trap", "r&b", "rnb")),
++    ("Clássica/Jazz", ("classical", "classica", "musica classica", "jazz", "blues", "instrumental", "erudit", "orquestra",
++                       "opera", "smooth")),
++    ("Flashback", ("flashback", "flash back", "anos 80", "anos 90", "80s", "90s", "70s", "oldies",
++                   "saudade", "lembranca", "retro", "nostalgia", "antigas")),
++]
++MUSIC_KINDS = set(KINDS) - {"Notícias", "Esporte", "Gospel e Religiosa", "Música"}
++
++# ---------------------------------------------------------------------------
++# Estado do serviço
++# ---------------------------------------------------------------------------
++_stations: list[dict] = []          # ordem padrão: PE por popularidade, depois o resto
++_by_id: dict[str, dict] = {}
++_state: dict[str, Any] = {
++    "path": DEFAULT_PATH,
++    "updated": "",
++    "updated_ts": 0.0,
++    "running": False,
++    "last_error": "",
++    "candidates": 0,
++    "checked": 0,
++    "passed": 0,
++    "duration_s": 0.0,
++    "api_server": "",
++}
++_task: Optional[asyncio.Task] = None
++_fallback_poster: Optional[Callable[[str], str]] = None
++_hls_hosts: dict[str, set[str]] = {}  # hosts liberados no relay de HLS, por estação
++
++UUID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
++
++
++# ---------------------------------------------------------------------------
++# Utilidades de texto
++# ---------------------------------------------------------------------------
++def norm(s: str) -> str:
++    s = unicodedata.normalize("NFKD", s or "")
++    s = "".join(c for c in s if not unicodedata.combining(c))
++    return s.lower().strip()
++
++
++def norm_name(name: str) -> str:
++    s = norm(name)
++    s = re.sub(r"\[[^\]]*\]", " ", s)                                   # [aac], [MP3 192Kbps]
++    s = re.sub(r"\b(radio|web ?radio|fm|am|oficial|official|hd)\b", " ", s)
++    s = re.sub(r"\b(aac\+?|mp3|ogg|opus|\d+ ?kbps)\b", " ", s)
++    return re.sub(r"[^a-z0-9]+", "", s)
++
++
++def clean_name(name: str) -> str:
++    s = re.sub(r"\s*\[[^\]]*\]\s*", " ", name or "")
++    s = re.sub(r"\s*\((?:ZY[A-Z]?\s?\d+|[^)]*\bMHz\b)[^)]*\)", " ", s)  # (ZYD241, 94,3 MHz FM)
++    s = re.sub(r"\s+", " ", s).strip(" -|·")
++    if s.isupper() and len(s) > 4:
++        s = s.title()
++    return s or "Rádio"
++
++
++def _uf_pattern() -> re.Pattern:
++    names = sorted(((norm(n), uf) for uf, (n, _) in UFS.items()), key=lambda x: -len(x[0]))
++    return re.compile(r"\b(" + "|".join(re.escape(n) for n, _ in names) + r")\b")
++
++
++_UF_NAME_RE = _uf_pattern()
++_UF_BY_NORMNAME = {norm(n): uf for uf, (n, _) in UFS.items()}
++_CITIES_SORTED = sorted(((norm(c), c, uf, safe) for c, uf, safe in CITIES), key=lambda x: -len(x[0]))
++_UF_CODE_RE = re.compile(r"\b(" + "|".join(UFS) + r")\b")
++_UF_IN_NAME_RE = re.compile(r"(?:[,\-/(|]|\s-\s)\s*(" + "|".join(UFS) + r")\s*\)?(?=$|[\s,)\]/|-])")
++
++
++def _find_city(text_norm: str, name_mode: bool) -> Optional[tuple[str, str]]:
++    for cn, c, uf, safe in _CITIES_SORTED:
++        if name_mode and not safe:
++            continue
++        if re.search(r"\b" + re.escape(cn) + r"\b", text_norm):
++            return c, uf
++    return None
++
++
++def detect_location(st: dict) -> tuple[str, str]:
++    """Devolve (UF, cidade) — strings vazias quando não dá para saber."""
++    iso = (st.get("iso_3166_2") or "").upper()
++    state = st.get("state") or ""
++    name = st.get("name") or ""
++    tags = st.get("tags") or ""
++    sn = norm(state)
++    uf = ""
++    city = ""
++    if iso.startswith("BR-") and iso[3:] in UFS:
++        uf = iso[3:]
++    c = _find_city(sn, name_mode=False) if sn else None
++    if c:
++        city, cuf = c
++        uf = uf or cuf
++    if not uf and sn:
++        m = _UF_NAME_RE.search(sn)
++        if m:
++            uf = _UF_BY_NORMNAME[m.group(1)]
++    if not uf and state:
++        m = _UF_CODE_RE.search(state.upper() if len(state.strip()) <= 3 else state)
++        if m:
++            uf = m.group(1)
++    if not city:
++        c = _find_city(norm(name), name_mode=True) or _find_city(norm(tags), name_mode=True)
++        if c and (not uf or c[1] == uf):
++            city, uf = c[0], c[1]
++    if not uf:
++        m = _UF_IN_NAME_RE.search(name)
++        if m:
++            uf = m.group(1)
++    if not city and state and ("," in state or " - " in state):
++        first = re.split(r",| - ", state)[0].strip()
++        if first and norm(first) not in _UF_BY_NORMNAME and first.upper() not in UFS \
++                and norm(first) not in ("brasil", "brazil"):
++            city = first
++    if city and norm(city) in _UF_BY_NORMNAME and _UF_BY_NORMNAME[norm(city)] == uf \
++            and uf != "RJ" and uf != "SP":
++        city = ""
++    return uf, city
++
++
++def detect_kinds(st: dict) -> list[str]:
++    hay = " " + norm((st.get("tags") or "") + " , " + (st.get("name") or "")) + " "
++    out: list[str] = []
++    for kind, keys in KIND_RULES:
++        for k in keys:
++            if len(k) <= 3:
++                hit = re.search(r"(?<![a-z])" + re.escape(k) + r"(?![a-z])", hay)
++            else:
++                hit = k in hay
++            if hit:
++                out.append(kind)
++                break
++    if not out or any(k in MUSIC_KINDS for k in out):
++        out.append("Música")
++    return [k for k in KINDS if k in out]
++
++
++def popularity(st: dict) -> float:
++    return float(st.get("votes") or 0) + 20.0 * float(st.get("clickcount") or 0)
++
++
++def is_pe(rec: dict) -> bool:
++    return rec.get("uf") == "PE"
++
++
++# ---------------------------------------------------------------------------
++# Seleção de candidatos (offline, testável)
++# ---------------------------------------------------------------------------
++def build_candidates(raw: list[dict], max_total: int = MAX_CANDIDATES,
++                     per_state: int = PER_STATE, web_cap: int = WEB_CAP) -> list[dict]:
++    """Normaliza, deduplica e escolhe: Pernambuco inteiro + top de cada UF + completa por popularidade."""
++    recs: list[dict] = []
++    for st in raw:
++        cc = (st.get("countrycode") or "").upper()
++        if cc and cc != "BR":
++            continue
++        url = (st.get("url_resolved") or st.get("url") or "").strip()
++        uuid = (st.get("stationuuid") or "").strip()
++        if not url.lower().startswith(("http://", "https://")) or not UUID_RE.match(uuid):
++            continue
++        if st.get("lastcheckok") == 0:
++            continue
++        uf, city = detect_location(st)
++        recs.append({
++            "id": uuid,
++            "name": clean_name(st.get("name") or ""),
++            "nkey": norm_name(st.get("name") or "") or uuid,
++            "url": url,
++            "orig_url": (st.get("url") or "").strip(),
++            "uf": uf,
++            "city": city,
++            "region": UFS[uf][1] if uf else "",
++            "kinds": detect_kinds(st),
++            "tags": (st.get("tags") or "")[:200],
++            "codec": (st.get("codec") or "").upper().replace("UNKNOWN", ""),
++            "bitrate": int(st.get("bitrate") or 0),
++            "hls": bool(st.get("hls")),
++            "favicon_src": (st.get("favicon") or "").strip(),
++            "homepage": (st.get("homepage") or "").strip(),
++            "votes": int(st.get("votes") or 0),
++            "clickcount": int(st.get("clickcount") or 0),
++            "score": popularity(st),
++        })
++    recs.sort(key=lambda r: (-r["score"], r["name"]))
++    recs = dedupe(recs)
++
++    pe = [r for r in recs if is_pe(r)]
++    chosen: dict[str, dict] = {r["id"]: r for r in pe}
++    per_uf: dict[str, int] = {}
++    web = 0
++    for r in recs:
++        if r["id"] in chosen:
++            continue
++        if r["uf"]:
++            if per_uf.get(r["uf"], 0) < per_state:
++                per_uf[r["uf"]] = per_uf.get(r["uf"], 0) + 1
++                chosen[r["id"]] = r
++        elif web < min(web_cap, 15):
++            web += 1
++            chosen[r["id"]] = r
++    for r in recs:  # completa pela popularidade
++        if len(chosen) >= max_total:
++            break
++        if r["id"] in chosen:
++            continue
++        if not r["uf"]:
++            if web >= web_cap:
++                continue
++            web += 1
++        chosen[r["id"]] = r
++    out = list(chosen.values())
++    return order_default(out)
++
++
++def dedupe(recs: list[dict]) -> list[dict]:
++    """Recebe ordenado por popularidade. Mesma URL = duplicata; mesmo nome normalizado na mesma UF
++    (ou sem UF) = duplicata. Fica a mais popular; se a mantida é http e a duplicata é https, troca a URL."""
++    by_url: dict[str, dict] = {}
++    by_name: dict[tuple[str, str], dict] = {}
++    out: list[dict] = []
++    for r in recs:
++        ukey = re.sub(r"^https?://", "", r["url"].lower()).rstrip("/;")
++        nk = (r["nkey"], r["uf"])
++        keep = by_url.get(ukey) or by_name.get(nk) or (by_name.get((r["nkey"], "")) if r["uf"] else None)
++        if keep is not None:
++            if keep["url"].startswith("http://") and r["url"].startswith("https://") and nk == (keep["nkey"], keep["uf"]):
++                keep["alt_url"] = keep["url"]
++                keep["url"] = r["url"]
++            if not keep["uf"] and r["uf"]:
++                keep["uf"], keep["city"], keep["region"] = r["uf"], r["city"], r["region"]
++            if not keep["favicon_src"] and r["favicon_src"]:
++                keep["favicon_src"] = r["favicon_src"]
++            by_url.setdefault(ukey, keep)
++            continue
++        by_url[ukey] = r
++        by_name[nk] = r
++        out.append(r)
++    return out
++
++
++def order_default(recs: list[dict]) -> list[dict]:
++    return sorted(recs, key=lambda r: (0 if is_pe(r) else 1, -r["score"], r["name"]))
++
++
++def station_genres(r: dict) -> list[str]:
++    g: list[str] = []
++    if is_pe(r):
++        g.append(GENRE_PE)
++    g.append(r["region"] if r.get("region") else GENRE_WEB)
++    g.extend(r.get("kinds") or ["Música"])
++    return g
++
++
++# ---------------------------------------------------------------------------
++# Detecção de áudio pelos bytes (offline, testável)
++# ---------------------------------------------------------------------------
++_MP3_BR = {
++    (3, 3): [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],  # MPEG1 L1
++    (3, 2): [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],     # MPEG1 L2
++    (3, 1): [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],      # MPEG1 L3
++    (2, 3): [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],     # MPEG2 L1
++    (2, 2): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],          # MPEG2 L2/L3
++    (2, 1): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
++}
++_MP3_SR = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
++
++
++def _mp3_frame(b: bytes, i: int) -> Optional[tuple[int, tuple]]:
++    if i + 4 > len(b) or b[i] != 0xFF or (b[i + 1] & 0xE0) != 0xE0:
++        return None
++    ver = (b[i + 1] >> 3) & 3
++    layer = (b[i + 1] >> 1) & 3
++    bri = (b[i + 2] >> 4) & 15
++    sri = (b[i + 2] >> 2) & 3
++    pad = (b[i + 2] >> 1) & 1
++    if ver == 1 or layer == 0 or bri in (0, 15) or sri == 3:
++        return None
++    br = _MP3_BR[(3 if ver == 3 else 2, layer)][bri] * 1000
++    sr = _MP3_SR[ver][sri]
++    if layer == 3:
++        ln = (12 * br // sr + pad) * 4
++    elif layer == 1 and ver != 3:
++        ln = 72 * br // sr + pad
++    else:
++        ln = 144 * br // sr + pad
++    if ln < 24:
++        return None
++    return ln, (ver, layer, sri)
++
++
++def _adts_frame(b: bytes, i: int) -> Optional[tuple[int, tuple]]:
++    if i + 7 > len(b) or b[i] != 0xFF or (b[i + 1] & 0xF6) != 0xF0:
++        return None
++    sfi = (b[i + 2] >> 2) & 15
++    if sfi > 12:
++        return None
++    ln = ((b[i + 3] & 3) << 11) | (b[i + 4] << 3) | (b[i + 5] >> 5)
++    if ln < 7:
++        return None
++    prof = (b[i + 2] >> 6) & 3
++    chan = ((b[i + 2] & 1) << 2) | (b[i + 3] >> 6)
++    return ln, (prof, sfi, chan)
++
++
++def _chain(b: bytes, parser, start: int, need: int) -> bool:
++    i = start
++    first = parser(b, i)
++    if not first:
++        return False
++    sig = first[1]
++    n = 0
++    while n < need:
++        fr = parser(b, i)
++        if not fr or fr[1] != sig:
++            return False
++        n += 1
++        i += fr[0]
++        if i + 7 > len(b):
++            return n >= max(2, need - 1) and len(b) - start >= 1024
++    return True
++
++
++def skip_id3(b: bytes) -> int:
++    off = 0
++    while b[off:off + 3] == b"ID3" and len(b) >= off + 10:
++        size = (b[off + 6] & 0x7F) << 21 | (b[off + 7] & 0x7F) << 14 | (b[off + 8] & 0x7F) << 7 | (b[off + 9] & 0x7F)
++        off += 10 + size + (10 if b[off + 5] & 0x10 else 0)
++    return off
++
++
++def _ogg_pages(b: bytes, i: int, need: int = 2) -> bool:
++    n = 0
++    while n < need:
++        if b[i:i + 4] != b"OggS" or i + 27 > len(b) or b[i + 4] != 0:
++            return False
++        nseg = b[i + 26]
++        if i + 27 + nseg > len(b):
++            return n >= 1
++        size = 27 + nseg + sum(b[i + 27:i + 27 + nseg])
++        n += 1
++        i += size
++        if i >= len(b):
++            return n >= 1 and len(b) >= 4096
++    return True
++
++
++def _ts_packets(b: bytes, i: int, need: int = 5) -> bool:
++    return i + 188 * need <= len(b) and all(b[i + 188 * k] == 0x47 for k in range(need))
++
++
++def detect_audio(b: bytes, scan: int = 65536) -> str:
++    """Formato detectado ('mp3', 'aac', 'ogg', 'ts', 'mp4', 'flac') ou '' se não for áudio."""
++    if not b or len(b) < 512:
++        return ""
++    head = b[:512].lstrip().lower()
++    if head.startswith((b"<!doctype", b"<html", b"<?xml", b"{", b"<head", b"<body")):
++        return ""
++    if b[4:8] in (b"ftyp", b"styp", b"moof"):
++        return "mp4"
++    if b[:4] == b"fLaC":
++        return "flac"
++    if b[:4] == b"FLV" and len(b) >= 13 + 11 and b[13] in (8, 18):
++        return "flv"  # streamtheworld manda AAC em FLV; o ExoPlayer toca
++    start = skip_id3(b)
++    if start >= len(b):
++        return ""
++    limit = min(len(b) - 4, start + scan)
++    # MPEG-TS (segmentos HLS)
++    for i in range(start, min(start + 188, len(b))):
++        if b[i] == 0x47 and _ts_packets(b, i):
++            return "ts"
++    j = b.find(b"OggS", start, limit + 4)
++    if j >= 0 and _ogg_pages(b, j):
++        return "ogg"
++    i = start
++    while True:
++        i = b.find(b"\xff", i, limit)
++        if i < 0:
++            break
++        if _chain(b, _adts_frame, i, 4):
++            return "aac"
++        if _chain(b, _mp3_frame, i, 4):
++            return "mp3"
++        i += 1
++    return ""
++
++
++# ---------------------------------------------------------------------------
++# Cliente HTTP mínimo para streams (aceita ICY)
++# ---------------------------------------------------------------------------
++class StreamResp:
++    def __init__(self, status: int, reason: str, headers: dict[str, str], reader, writer, url: str, proto: str):
++        self.status = status
++        self.reason = reason
++        self.headers = headers
++        self.url = url
++        self.proto = proto
++        self._r = reader
++        self._w = writer
++        self._chunked = "chunked" in headers.get("transfer-encoding", "").lower()
++        cl = headers.get("content-length", "")
++        self._left = int(cl) if cl.isdigit() and not self._chunked else -1
++        self._chunk_left = 0
++        self._eof = False
++
++    async def read(self, n: int = 16384, timeout: float = 10.0) -> bytes:
++        if self._eof:
++            return b""
++        return await asyncio.wait_for(self._read(n), timeout)
++
++    async def _read(self, n: int) -> bytes:
++        if self._chunked:
++            if self._chunk_left == 0:
++                line = await self._r.readline()
++                if not line:
++                    self._eof = True
++                    return b""
++                try:
++                    size = int(line.split(b";")[0].strip() or b"0", 16)
++                except ValueError:
++                    self._eof = True
++                    return b""
++                if size == 0:
++                    self._eof = True
++                    return b""
++                self._chunk_left = size
++            data = await self._r.read(min(n, self._chunk_left))
++            if not data:
++                self._eof = True
++                return b""
++            self._chunk_left -= len(data)
++            if self._chunk_left == 0:
++                await self._r.readline()  # CRLF
++            return data
++        if self._left == 0:
++            self._eof = True
++            return b""
++        want = n if self._left < 0 else min(n, self._left)
++        data = await self._r.read(want)
++        if not data:
++            self._eof = True
++            return b""
++        if self._left > 0:
++            self._left -= len(data)
++        return data
++
++    async def read_upto(self, limit: int, deadline: float) -> bytes:
++        buf = bytearray()
++        while len(buf) < limit:
++            left = deadline - time.monotonic()
++            if left <= 0:
++                break
++            try:
++                data = await self.read(min(16384, limit - len(buf)), timeout=left)
++            except (asyncio.TimeoutError, OSError, ssl.SSLError):
++                break
++            if not data:
++                break
++            buf += data
++        return bytes(buf)
++
++    def close(self) -> None:
++        try:
++            self._w.close()
++        except Exception:
++            pass
++
++
++_SSL_CTX: Optional[ssl.SSLContext] = None
++
++
++def _ssl_ctx() -> ssl.SSLContext:
++    global _SSL_CTX
++    if _SSL_CTX is None:
++        _SSL_CTX = ssl.create_default_context()
++        try:
++            import certifi  # type: ignore
++
++            _SSL_CTX.load_verify_locations(certifi.where())
++        except Exception:
++            pass
++    return _SSL_CTX
++
++
++async def open_stream(url: str, extra_headers: Optional[dict[str, str]] = None,
++                      timeout: float = 6.0, max_redirects: int = 5) -> StreamResp:
++    """GET com HTTP/1.1 + Connection: close. Segue redirects. Levanta OSError/TimeoutError/ValueError."""
++    for _ in range(max_redirects + 1):
++        sp = urlsplit(url)
++        if sp.scheme not in ("http", "https") or not sp.hostname:
++            raise ValueError(f"url inválida: {url[:80]}")
++        tls = sp.scheme == "https"
++        port = sp.port or (443 if tls else 80)
++        path = (sp.path or "/") + (f"?{sp.query}" if sp.query else "")
++        host_hdr = sp.hostname if sp.port in (None, 80, 443) else f"{sp.hostname}:{sp.port}"
++        if ":" in sp.hostname and not host_hdr.startswith("["):
++            host_hdr = f"[{sp.hostname}]" + (f":{sp.port}" if sp.port else "")
++        hdrs = {
++            "Host": host_hdr,
++            "User-Agent": USER_AGENT,
++            "Accept": "*/*",
++            "Icy-MetaData": "0",
++            "Connection": "close",
++        }
++        if extra_headers:
++            hdrs.update(extra_headers)
++        req = f"GET {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items()) + "\r\n"
++
++        async def _connect():
++            kw = dict(ssl=_ssl_ctx() if tls else None, server_hostname=sp.hostname if tls else None, limit=65536)
++            try:  # IPv6 quebrado não pode travar a conexão
++                r, w = await asyncio.open_connection(sp.hostname, port, happy_eyeballs_delay=0.25, **kw)
++            except TypeError:  # uvloop (o Comet roda com ele) não aceita happy_eyeballs_delay
++                r, w = await asyncio.open_connection(sp.hostname, port, **kw)
++            w.write(req.encode("latin-1", "replace"))
++            await w.drain()
++            status_line = await r.readline()
++            headers: dict[str, str] = {}
++            total = 0
++            for _n in range(100):
++                line = await r.readline()
++                total += len(line)
++                if total > 32768:
++                    raise ValueError("cabeçalhos grandes demais")
++                if line in (b"\r\n", b"\n", b""):
++                    break
++                k, _, v = line.decode("latin-1").partition(":")
++                headers[k.strip().lower()] = v.strip()
++            return r, w, status_line, headers
++
++        r, w, status_line, headers = await asyncio.wait_for(_connect(), timeout)
++        parts = status_line.decode("latin-1", "replace").strip().split(" ", 2)
++        if len(parts) < 2 or not parts[1].isdigit():
++            w.close()
++            raise ValueError(f"resposta inválida: {status_line[:60]!r}")
++        proto, status = parts[0], int(parts[1])
++        reason = parts[2] if len(parts) > 2 else ""
++        if status in (301, 302, 303, 307, 308) and headers.get("location"):
++            w.close()
++            url = urljoin(url, headers["location"])
++            continue
++        return StreamResp(status, reason, headers, r, w, url, proto)
++    raise ValueError("redirects demais")
++
++
++async def fetch_small(url: str, limit: int = 262144, timeout: float = 8.0) -> tuple[StreamResp, bytes]:
++    resp = await open_stream(url, timeout=timeout)
++    try:
++        body = await resp.read_upto(limit, time.monotonic() + timeout)
++    finally:
++        resp.close()
++    return resp, body
++
++
++# ---------------------------------------------------------------------------
++# Playlists
++# ---------------------------------------------------------------------------
++PLAYLIST_TYPES = ("audio/x-scpls", "audio/scpls", "audio/x-mpegurl", "audio/mpegurl",
++                  "application/vnd.apple.mpegurl", "application/x-mpegurl", "application/pls+xml",
++                  "video/x-ms-asf", "audio/x-ms-wax")
++
++
++def is_playlist(url: str, ctype: str, body_head: bytes) -> bool:
++    p = urlsplit(url).path.lower()
++    h = body_head[:64].lstrip().lower()
++    return (ctype.split(";")[0].strip().lower() in PLAYLIST_TYPES
++            or p.endswith((".pls", ".m3u", ".m3u8", ".asx"))
++            or h.startswith((b"#extm3u", b"[playlist]", b"<asx")))
++
++
++def parse_pls(text: str) -> list[str]:
++    return [m.group(1).strip() for m in re.finditer(r"(?im)^\s*file\d+\s*=\s*(\S+)\s*$", text)]
++
++
++def parse_m3u(text: str, base: str) -> list[str]:
++    out = []
++    for line in text.splitlines():
++        line = line.strip()
++        if line and not line.startswith("#"):
++            out.append(urljoin(base, line))
++    return out
++
++
++def parse_asx(text: str) -> list[str]:
++    return re.findall(r'(?i)<ref\s+href\s*=\s*"([^"]+)"', text)
++
++
++def hls_info(text: str, base: str) -> dict:
++    """{'master': bool, 'variants': [url...], 'segments': [url...]}"""
++    lines = [l.strip() for l in text.splitlines()]
++    variants, segments = [], []
++    expect_variant = False
++    for l in lines:
++        if not l:
++            continue
++        if l.startswith("#EXT-X-STREAM-INF"):
++            expect_variant = True
++            continue
++        if l.startswith("#"):
++            continue
++        u = urljoin(base, l)
++        (variants if expect_variant else segments).append(u)
++        expect_variant = False
++    return {"master": bool(variants), "variants": variants, "segments": segments}
++
++
++def _is_hls_text(text: str) -> bool:
++    return "#EXT-X-" in text or "#EXTINF" in text and ".ts" in text
++
++
++# ---------------------------------------------------------------------------
++# Validação de um stream
++# ---------------------------------------------------------------------------
++async def probe_url(url: str, depth: int = 0, budget: float = 9.0, read_bytes: int = 49152,
++                    min_bytes: int = 12288) -> dict:
++    """Testa se ``url`` toca áudio de verdade. Retorna dict com ok, final_url, fmt, ctype, hls, reason."""
++    res = {"ok": False, "final_url": url, "fmt": "", "ctype": "", "hls": False, "reason": "",
++           "icy_name": "", "bitrate": 0}
++    t0 = time.monotonic()
++    deadline = t0 + budget
++    resp = None
++    try:
++        resp = await open_stream(url, timeout=min(6.0, budget))
++        res["final_url"] = resp.url
++        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
++        res["ctype"] = ctype
++        res["icy_name"] = resp.headers.get("icy-name", "")[:120]
++        br = resp.headers.get("icy-br", "").split(",")[0].strip()
++        res["bitrate"] = int(br) if br.isdigit() else 0
++        if resp.status >= 400 or resp.status < 200:
++            res["reason"] = f"status {resp.status}"
++            return res
++        if ctype.startswith("text/html") or ctype in ("application/json", "text/xml"):
++            res["reason"] = f"content-type {ctype}"
++            return res
++        first = await resp.read_upto(2048, min(deadline, time.monotonic() + 5))
++        if is_playlist(resp.url, ctype, first):
++            body = first + await resp.read_upto(262144 - len(first), min(deadline, time.monotonic() + 4))
++            resp.close()
++            text = body.decode("utf-8", "replace")
++            if _is_hls_text(text):
++                return await _probe_hls(resp.url, text, res, deadline)
++            if depth >= 3:
++                res["reason"] = "playlist aninhada demais"
++                return res
++            if "[playlist]" in text.lower():
++                entries = parse_pls(text)
++            elif "<asx" in text.lower():
++                entries = parse_asx(text)
++            else:
++                entries = parse_m3u(text, resp.url)
++            for e in entries[:3]:
++                left = deadline - time.monotonic()
++                if left < 2:
++                    break
++                sub = await probe_url(e, depth + 1, budget=left)
++                if sub["ok"]:
++                    return sub
++                res["reason"] = "playlist: " + sub["reason"]
++            res["reason"] = res["reason"] or "playlist vazia"
++            return res
++        if ctype.startswith("text/") and not first.lstrip().startswith(b"ID3"):
++            res["reason"] = f"content-type {ctype}"
++            return res
++        body = first + await resp.read_upto(read_bytes - len(first), deadline)
++        if len(body) < min_bytes:
++            res["reason"] = f"poucos bytes ({len(body)})"
++            return res
++        fmt = detect_audio(body)
++        if not fmt and deadline - time.monotonic() > 1:
++            # alguns servidores mandam um começo estranho; mais uma janela antes de reprovar
++            more = await resp.read_upto(32768, deadline)
++            fmt = detect_audio(more) if len(more) >= 4096 else ""
++        if not fmt:
++            res["reason"] = f"sem sincronia de áudio ({ctype or 'sem content-type'})"
++            return res
++        res.update(ok=True, fmt=fmt)
++        return res
++    except asyncio.TimeoutError:
++        res["reason"] = "timeout"
++    except ssl.SSLError as e:
++        res["reason"] = f"ssl: {str(e)[:60]}"
++    except (OSError, ValueError, UnicodeError) as e:
++        res["reason"] = f"{type(e).__name__}: {str(e)[:60]}"
++    except Exception as e:  # pragma: no cover
++        res["reason"] = f"{type(e).__name__}: {str(e)[:60]}"
++    finally:
++        if resp is not None:
++            resp.close()
++    return res
++
++
++async def _probe_hls(url: str, text: str, res: dict, deadline: float) -> dict:
++    res["hls"] = True
++    res["final_url"] = url
++    info = hls_info(text, url)
++    media_text, media_url = text, url
++    if info["master"]:
++        media_url = info["variants"][0]
++        try:
++            _, body = await fetch_small(media_url, timeout=max(1.0, min(5.0, deadline - time.monotonic())))
++        except Exception as e:
++            res["reason"] = f"hls variante: {type(e).__name__}"
++            return res
++        media_text = body.decode("utf-8", "replace")
++        info = hls_info(media_text, media_url)
++    segs = info["segments"]
++    if not segs:
++        res["reason"] = "hls sem segmentos"
++        return res
++    seg = segs[-1] if len(segs) < 3 else segs[-3]
++    left = deadline - time.monotonic()
++    if left < 1:
++        res["reason"] = "timeout"
++        return res
++    try:
++        resp = await open_stream(seg, timeout=min(5.0, left))
++        try:
++            if resp.status >= 400:
++                res["reason"] = f"hls segmento status {resp.status}"
++                return res
++            body = await resp.read_upto(32768, deadline)
++        finally:
++            resp.close()
++    except Exception as e:
++        res["reason"] = f"hls segmento: {type(e).__name__}"
++        return res
++    fmt = detect_audio(body) if len(body) >= 2048 else ""
++    if not fmt:
++        res["reason"] = f"hls segmento sem áudio ({len(body)} bytes)"
++        return res
++    res.update(ok=True, fmt="hls-" + fmt)
++    return res
++
++
++def _https_variant(url: str) -> str:
++    sp = urlsplit(url)
++    if sp.scheme != "http" or sp.port not in (None, 80):
++        return ""
++    return "https://" + url[len("http://"):]
++
++
++# ---------------------------------------------------------------------------
++# Favicons
++# ---------------------------------------------------------------------------
++def image_size(b: bytes) -> tuple[int, int]:
++    if b[:8] == b"\x89PNG\r\n\x1a\n" and len(b) >= 24:
++        return int.from_bytes(b[16:20], "big"), int.from_bytes(b[20:24], "big")
++    if b[:2] == b"\xff\xd8":
++        i = 2
++        while i + 9 < len(b):
++            if b[i] != 0xFF:
++                i += 1
++                continue
++            m = b[i + 1]
++            if m in (0xC0, 0xC1, 0xC2):
++                return int.from_bytes(b[i + 7:i + 9], "big"), int.from_bytes(b[i + 5:i + 7], "big")
++            i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
++    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
++        return 512, 512  # não vale o parse; webp de favicon costuma ser grande
++    if b[:6] in (b"GIF87a", b"GIF89a"):
++        return int.from_bytes(b[6:8], "little"), int.from_bytes(b[8:10], "little")
++    return 0, 0
++
++
++async def check_favicon(client, url: str) -> str:
++    """Devolve a URL https do favicon se for imagem utilizável (png/jpg/webp/gif, >= 64 px), senão ''."""
++    url = (url or "").strip()
++    if not url:
++        return ""
++    cands = [url] if url.startswith("https://") else ([_https_variant(url)] if _https_variant(url) else [])
++    for u in cands:
++        try:
++            async with client.stream("GET", u, timeout=6.0) as r:
++                if r.status_code != 200:
++                    continue
++                ct = r.headers.get("content-type", "").lower()
++                if not ct.startswith("image/") or "svg" in ct or "icon" in ct:
++                    continue
++                buf = b""
++                async for chunk in r.aiter_bytes():
++                    buf += chunk
++                    if len(buf) >= 65536:
++                        break
++                w, h = image_size(buf)
++                if w >= 64 and h >= 64 or (w == 0 and len(buf) > 4096 and "webp" in ct):
++                    return str(r.url)
++        except Exception:
++            continue
++    return ""
++
++
++# ---------------------------------------------------------------------------
++# API do Radio Browser
++# ---------------------------------------------------------------------------
++async def _api_servers() -> list[str]:
++    hosts: list[str] = []
++    try:
++        loop = asyncio.get_running_loop()
++        infos = await asyncio.wait_for(
++            loop.getaddrinfo("all.api.radio-browser.info", 443, type=socket.SOCK_STREAM), 5)
++        for info in infos:
++            ip = info[4][0]
++            try:
++                name = (await asyncio.wait_for(loop.run_in_executor(None, socket.gethostbyaddr, ip), 4))[0]
++                if name.endswith("radio-browser.info") and name not in hosts:
++                    hosts.append(name)
++            except Exception:
++                continue
++    except Exception:
++        pass
++    random.shuffle(hosts)
++    for h in API_SERVERS:
++        if h not in hosts:
++            hosts.append(h)
++    return hosts
++
++
++async def fetch_stations() -> list[dict]:
++    import httpx
++
++    params_base = {"hidebroken": "true", "order": "votes", "reverse": "true", "limit": "100000"}
++    queries = [
++        {"countrycode": "BR", **params_base},
++        {"state": "Pernambuco", **params_base},
++        {"name": "recife", **params_base},
++        {"name": "caruaru", **params_base},
++        {"name": "petrolina", **params_base},
++        {"name": "olinda", **params_base},
++    ]
++    last = None
++    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, timeout=30.0, follow_redirects=True) as c:
++        for host in await _api_servers():
++            try:
++                out: dict[str, dict] = {}
++                for i, q in enumerate(queries):
++                    try:
++                        r = await c.get(f"https://{host}/json/stations/search", params=q)
++                        r.raise_for_status()
++                        data = r.json()
++                    except Exception:
++                        if i == 0:
++                            raise
++                        continue
++                    for st in data:
++                        if i > 0 and (st.get("countrycode") or "").upper() not in ("BR", ""):
++                            continue
++                        out.setdefault(st.get("stationuuid", ""), st)
++                _state["api_server"] = host
++                logger.info(f"Rádio: {len(out)} estações do Radio Browser via {host}")
++                return list(out.values())
++            except Exception as e:
++                last = e
++                logger.warning(f"Rádio: servidor {host} falhou: {type(e).__name__}: {e}")
++    raise RuntimeError(f"nenhum servidor do Radio Browser respondeu ({last})")
++
++
++# ---------------------------------------------------------------------------
++# Validação completa
++# ---------------------------------------------------------------------------
++_TRANSIENT = ("timeout", "poucos bytes", "ConnectionResetError", "ValueError: resposta inválida: b''",
++              "sem sincronia", "IncompleteRead")
++
++
++async def validate_candidates(cands: list[dict], concurrency: int = CONCURRENCY,
++                              check_icons: bool = True, progress: Optional[Callable] = None) -> list[dict]:
++    import httpx
++
++    sem = asyncio.Semaphore(concurrency)
++    alive: list[dict] = []
++    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
++    _state["checked"] = 0
++    limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=4)
++    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True,
++                                 limits=limits) as client:
++        host_sems: dict[str, asyncio.Semaphore] = {}
++
++        async def one(r: dict):
++            # vários servidores de rádio limitam conexões por IP: no máximo 2 testes por host
++            hsem = host_sems.setdefault(urlsplit(r["url"]).hostname or "", asyncio.Semaphore(2))
++            async with hsem, sem:
++                res = await probe_url(r["url"])
++                if not res["ok"] and res["reason"].startswith(_TRANSIENT):
++                    await asyncio.sleep(1.5)  # servidor lento/ocupado: mais uma chance
++                    res = await probe_url(r["url"], budget=12.0)
++                if not res["ok"] and r.get("alt_url"):
++                    res = await probe_url(r["alt_url"])
++                if not res["ok"] and r.get("orig_url") and r["orig_url"] != r["url"]:
++                    res = await probe_url(r["orig_url"])
++                r = dict(r)
++                r["check"] = res
++                if res["ok"]:
++                    stream = res["final_url"]
++                    https_url = ""
++                    if r["url"].startswith("https://") and not res["hls"]:
++                        https_url = r["url"]  # o player segue o redirect sozinho
++                    elif stream.startswith("https://"):
++                        https_url = stream
++                    elif not res["hls"]:
++                        v = _https_variant(stream)
++                        if v:
++                            sub = await probe_url(v, budget=6.0)
++                            if sub["ok"]:
++                                https_url = sub["final_url"]
++                    r["stream_url"] = stream
++                    r["https_url"] = https_url
++                    r["hls"] = bool(res["hls"])
++                    r["fmt"] = res["fmt"]
++                    r["checked"] = now
++                    if not r["bitrate"] and res["bitrate"]:
++                        r["bitrate"] = res["bitrate"]
++                    if not r["codec"]:
++                        r["codec"] = {"mp3": "MP3", "aac": "AAC", "ogg": "OGG"}.get(res["fmt"], "")
++                    r["favicon"] = await check_favicon(client, r["favicon_src"]) if check_icons else ""
++                    alive.append(r)
++                _state["checked"] += 1
++                if progress:
++                    progress(r)
++
++        await asyncio.gather(*(one(r) for r in cands))
++    return order_default(alive)
++
++
++def _public_record(r: dict) -> dict:
++    keys = ("id", "name", "uf", "city", "region", "kinds", "tags", "codec", "bitrate", "hls", "fmt",
++            "stream_url", "https_url", "favicon", "homepage", "votes", "clickcount", "score", "checked")
++    out = {k: r.get(k) for k in keys}
++    for k, v in list(out.items()):
++        if v is None:
++            out[k] = [] if k == "kinds" else ("" if k not in ("bitrate", "votes", "clickcount", "score") else 0)
++    return out
++
++
++def save_alive(path: str, stations: list[dict]) -> None:
++    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
++    data = {
++        "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
++        "ts": time.time(),
++        "count": len(stations),
++        "stations": [_public_record(s) for s in stations],
++    }
++    tmp = path + ".tmp"
++    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
++        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
++    os.replace(tmp, path)
++
++
++def load_alive(path: str) -> bool:
++    try:
++        with open(path, encoding="utf-8") as f:
++            data = json.load(f)
++    except FileNotFoundError:
++        return False
++    except Exception as e:
++        logger.warning(f"Rádio: não li {path}: {e}")
++        return False
++    sts = [s for s in data.get("stations") or [] if s.get("id") and s.get("stream_url")]
++    _install(sts, data.get("updated") or "", float(data.get("ts") or 0))
++    return True
++
++
++def _install(stations: list[dict], updated: str, ts: float) -> None:
++    global _stations, _by_id
++    _stations = order_default(stations)
++    _by_id = {s["id"]: s for s in _stations}
++    _state["updated"] = updated
++    _state["updated_ts"] = ts
++    _state["passed"] = len(_stations)
++
++
++async def refresh(path: Optional[str] = None) -> int:
++    """Busca, valida e grava. Devolve quantas passaram."""
++    path = path or _state["path"]
++    _state["running"] = True
++    t0 = time.monotonic()
++    try:
++        raw = await fetch_stations()
++        cands = build_candidates(raw)
++        _state["candidates"] = len(cands)
++        logger.info(f"Rádio: validando {len(cands)} candidatas ({sum(is_pe(c) for c in cands)} de PE)")
++        alive = await validate_candidates(cands)
++        if len(alive) < 20:  # rede fora ou algo quebrado: não grava lista vazia (tenta de novo em 30 min)
++            raise RuntimeError(f"validação aprovou só {len(alive)} estações; mantendo a lista anterior")
++        save_alive(path, alive)
++        _install([_public_record(a) for a in alive],
++                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), time.time())
++        _state["last_error"] = ""
++        logger.info(f"Rádio: {len(alive)}/{len(cands)} no ar ({sum(is_pe(a) for a in alive)} de PE)")
++        return len(alive)
++    except Exception as e:
++        _state["last_error"] = f"{type(e).__name__}: {e}"
++        logger.warning(f"Rádio: atualização falhou: {e}")
++        return 0
++    finally:
++        _state["running"] = False
++        _state["duration_s"] = round(time.monotonic() - t0, 1)
++
++
++async def _loop(path: str, interval: float) -> None:
++    while True:
++        age = time.time() - float(_state["updated_ts"] or 0)
++        if age >= interval or not _stations:
++            await refresh(path)
++            wait = interval if _stations else 1800  # sem lista: tenta de novo em 30 min
++        else:
++            wait = interval - age
++        await asyncio.sleep(max(60.0, wait))
++
++
++async def start_radio_service(path: str = DEFAULT_PATH,
++                              fallback_poster: Optional[Callable[[str], str]] = None,
++                              interval: float = REVALIDATE_SECONDS) -> None:
++    """Carrega a lista salva e agenda a revalidação em segundo plano (idempotente)."""
++    global _task, _fallback_poster
++    _state["path"] = path
++    if fallback_poster is not None:
++        _fallback_poster = fallback_poster
++    if not _stations:
++        if load_alive(path):
++            logger.info(f"Rádio: {len(_stations)} estações carregadas de {path} ({_state['updated']})")
++    if _task is None or _task.done():
++        _task = asyncio.create_task(_loop(path, interval), name="radio-revalidate")
++
++
++def set_fallback_poster(fn: Optional[Callable[[str], str]]) -> None:
++    global _fallback_poster
++    _fallback_poster = fn
++
++
++# ---------------------------------------------------------------------------
++# Stremio: catálogo, meta, streams
++# ---------------------------------------------------------------------------
++def _poster(s: dict) -> str:
++    if s.get("favicon"):
++        return s["favicon"]
++    if _fallback_poster is not None:
++        try:
++            u = _fallback_poster(s.get("name") or "Rádio")
++            if isinstance(u, str) and u.startswith(("http://", "https://")):
++                return u
++        except Exception:
++            pass
++    return DEFAULT_RADIO_POSTER
++
++
++def _place(s: dict) -> str:
++    uf, city = s.get("uf") or "", s.get("city") or ""
++    if city and uf:
++        return f"{city}/{uf}"
++    if uf:
++        return UFS[uf][0] if uf in UFS else uf
++    return "Brasil"
++
++
++def _quality(s: dict) -> str:
++    codec = s.get("codec") or ("HLS" if s.get("hls") else "")
++    br = int(s.get("bitrate") or 0)
++    return " ".join(x for x in (codec, f"{br}kbps" if br else "") if x)
++
++
++def _description(s: dict) -> str:
++    parts = [f"📍 {_place(s)}"]
++    kinds = [k for k in (s.get("kinds") or []) if k != "Música"] or ["Música"]
++    parts.append(", ".join(kinds))
++    q = _quality(s)
++    if q:
++        parts.append(q)
++    return " · ".join(parts) + "\nRádio ao vivo."
++
++
++def _meta_preview(s: dict) -> dict:
++    mid = ID_PREFIX + s["id"]
++    poster = _poster(s)
++    return {
++        "id": mid,
++        "type": "tv",
++        "name": s.get("name") or "Rádio",
++        "poster": poster,
++        "posterShape": "square",
++        "background": poster,
++        "description": _description(s),
++        "genres": station_genres(s),
++        "releaseInfo": "Ao vivo",
++        "behaviorHints": {"defaultVideoId": mid, "hasScheduledVideos": False},
++    }
++
++
++def _strip_none(o):
++    if isinstance(o, dict):
++        return {k: _strip_none(v) for k, v in o.items() if v is not None}
++    if isinstance(o, list):
++        return [_strip_none(v) for v in o if v is not None]
++    return o
++
++
++def _station_from_id(media_id: str) -> Optional[dict]:
++    sid = (media_id or "").split(":")[-1] if media_id.startswith(ID_PREFIX) else media_id
++    return _by_id.get(sid)
++
++
++def _matches(s: dict, q: str) -> bool:
++    hay = norm(" ".join([s.get("name") or "", s.get("city") or "", _place(s), s.get("tags") or "",
++                         " ".join(s.get("kinds") or [])]))
++    return all(w in hay for w in q.split())
++
++
++async def get_radio_catalog(extra: Optional[dict] = None, base: str = "") -> list[dict]:
++    extra = extra or {}
++    genre = (extra.get("genre") or "").strip()
++    search = norm(extra.get("search") or "")
++    try:
++        skip = max(0, int(str(extra.get("skip") or 0)))
++    except ValueError:
++        skip = 0
++    items = _stations
++    if genre:
++        items = [s for s in items if genre in station_genres(s)]
++    if search:
++        items = [s for s in items if _matches(s, search)]
++    return [_strip_none(_meta_preview(s)) for s in items[skip:skip + PAGE_SIZE]]
++
++
++async def get_radio_meta(media_id: str) -> Optional[dict]:
++    s = _station_from_id(media_id)
++    if not s:
++        return None
++    m = _meta_preview(s)
++    released = s.get("checked") or _state["updated"] or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
++    m["logo"] = m["poster"]
++    now = await now_playing(s)
++    if now:
++        m["description"] = f"🎵 Tocando agora: {now}\n" + (m.get("description") or "")
++    m["videos"] = [{
++        "id": m["id"],
++        "title": "📻 Ouvir ao vivo",
++        "released": released,
++        "thumbnail": m["poster"],
++        "overview": (f"🎵 Tocando agora: {now}\n" if now else "") + _description(s),
++    }]
++    if (s.get("homepage") or "").startswith("http"):
++        m["website"] = s["homepage"]
++    return _strip_none(m)
++
++
++_NOW_CACHE: dict[str, tuple[float, str]] = {}
++
++
++async def now_playing(s: dict, timeout: float = 3.0) -> str:
++    """Música/programa do momento, lido do metadado ICY (StreamTitle) do próprio sinal. '' se não houver."""
++    if s.get("hls"):
++        return ""
++    sid = s.get("id") or ""
++    hit = _NOW_CACHE.get(sid)
++    if hit and time.time() - hit[0] < 120:
++        return hit[1]
++    title = ""
++    resp = None
++    try:
++        async def _read():
++            nonlocal resp
++            resp = await open_stream(s.get("stream_url") or s.get("https_url") or "", {"Icy-MetaData": "1"}, timeout=timeout)
++            metaint = int(resp.headers.get("icy-metaint") or 0)
++            if resp.status != 200 or not (0 < metaint <= 65536):
++                return ""
++            await resp._r.readexactly(metaint)
++            n = (await resp._r.readexactly(1))[0] * 16
++            if not n:
++                return ""
++            raw = (await resp._r.readexactly(n)).rstrip(b"\0")
++            for enc in ("utf-8", "latin-1"):
++                try:
++                    txt = raw.decode(enc)
++                    break
++                except UnicodeDecodeError:
++                    continue
++            if "Ã" in txt or "Â" in txt:  # UTF-8 codificado duas vezes pela emissora
++                try:
++                    txt = txt.encode("latin-1").decode("utf-8")
++                except (UnicodeEncodeError, UnicodeDecodeError):
++                    pass
++            m = re.search(r"StreamTitle='(.*?)';", txt)
++            return (m.group(1).strip() if m else "")[:120]
++        title = await asyncio.wait_for(_read(), timeout + 1)
++    except Exception:
++        title = ""
++    finally:
++        try:
++            if resp is not None:
++                resp._w.close()
++        except Exception:
++            pass
++    if title.lower() in ("", "-", "unknown", "live", "ao vivo") or title.lower() == (s.get("name") or "").lower():
++        title = ""
++    _NOW_CACHE[sid] = (time.time(), title)
++    return title
++
++
++async def get_radio_stream(media_id: str, base: str = "") -> list[dict]:
++    s = _station_from_id(media_id)
++    if not s:
++        return []
++    desc = " · ".join(x for x in (s.get("name") or "Rádio", _place(s), _quality(s)) if x)
++    base = (base or "").rstrip("/")
++    relay = {"name": "📻 Ao vivo", "description": desc + "\nvia servidor",
++             "url": f"{base}/radio/{s['id']}" + (".m3u8" if s.get("hls") else ""),
++             "behaviorHints": {"notWebReady": False}} if base else None
++    out: list[dict] = []
++    direct = s.get("https_url") or ""
++    # O ExoPlayer decide HLS pela extensão da URL: HLS sem ".m3u8" no caminho vai pelo relay primeiro.
++    hls_no_ext = bool(s.get("hls")) and not urlsplit(direct).path.lower().endswith(".m3u8")
++    if direct and not (hls_no_ext and relay):
++        out.append({"name": "📻 Ao vivo", "description": desc, "url": direct,
++                    "behaviorHints": {"notWebReady": False}})
++        if relay:
++            relay["name"] = "📻 Ao vivo (2)"
++            out.append(relay)
++    else:
++        if relay:
++            out.append(relay)
++        http = direct or s.get("stream_url") or ""
++        if http:
++            out.append({"name": "📻 Ao vivo (2)" if relay else "📻 Ao vivo", "description": desc + ("\ndireto" if direct else "\ndireto (http)"),
++                        "url": http, "behaviorHints": {"notWebReady": False}})
++    return out
++
++
++# ---------------------------------------------------------------------------
++# Relay
++# ---------------------------------------------------------------------------
++_PASS_HEADERS = ("content-type", "icy-name", "icy-genre", "icy-br", "icy-description", "icy-url",
++                 "icy-metaint", "icy-pub", "icy-sr", "icy-audio-info", "ice-audio-info")
++
++
++def _seg_ext(u: str) -> str:
++    p = urlsplit(u).path.lower()
++    for ext in (".m3u8", ".aac", ".mp4", ".m4s", ".mp3", ".ts"):
++        if p.endswith(ext):
++            return ext
++    return ".ts"
++
++
++async def relay_radio(station_id: str, request):
++    """Proxy do áudio (FastAPI/Starlette). Rota sugerida: GET /radio/{station_id}."""
++    from fastapi.responses import Response, StreamingResponse
++
++    sid = (station_id or "").split(":")[-1]
++    for ext in (".m3u8", ".ts", ".aac", ".mp4", ".m4s", ".mp3"):
++        if sid.endswith(ext):
++            sid = sid[: -len(ext)]
++            break
++    s = _by_id.get(sid)
++    if not s:
++        return Response("estação desconhecida", status_code=404)
++    target = s.get("stream_url") or ""
++    sub = request.query_params.get("u") if request is not None else None
++    if s.get("hls"):
++        if sub:
++            sub = unquote(sub)
++            host = urlsplit(sub).hostname or ""
++            if host not in _hls_hosts.get(sid, {urlsplit(target).hostname or ""}):
++                return Response("host não permitido", status_code=403)
++            target = sub
++    elif sub:
++        return Response("parâmetro inválido", status_code=400)
++
++    hdrs = {}
++    if request is not None:
++        icy = request.headers.get("icy-metadata")
++        if icy and not s.get("hls"):
++            hdrs["Icy-MetaData"] = icy
++    try:
++        up = await open_stream(target, extra_headers=hdrs, timeout=8.0)
++    except Exception as e:
++        logger.warning(f"Rádio relay {s.get('name')}: {type(e).__name__}: {e}")
++        return Response("rádio fora do ar", status_code=502)
++    if up.status >= 400:
++        up.close()
++        return Response("rádio fora do ar", status_code=502)
++
++    ctype = up.headers.get("content-type", "audio/mpeg").split(";")[0].strip() or "audio/mpeg"
++    if s.get("hls") and (ctype in PLAYLIST_TYPES or target.lower().split("?")[0].endswith(".m3u8")
++                         or ctype.startswith("text/")):
++        try:
++            body = await up.read_upto(524288, time.monotonic() + 8)
++        finally:
++            up.close()
++        text = body.decode("utf-8", "replace")
++        allowed = _hls_hosts.setdefault(sid, {urlsplit(s.get("stream_url") or "").hostname or ""})
++        lines = []
++        for line in text.splitlines():
++            ls = line.strip()
++            if ls and not ls.startswith("#"):
++                absu = urljoin(up.url, ls)
++                allowed.add(urlsplit(absu).hostname or "")
++                line = f"/radio/{sid}{_seg_ext(absu)}?u={quote(absu, safe='')}"
++            elif 'URI="' in line:
++                def _rw(m):
++                    absu = urljoin(up.url, m.group(1))
++                    allowed.add(urlsplit(absu).hostname or "")
++                    return f'URI="/radio/{sid}{_seg_ext(absu)}?u={quote(absu, safe="")}"'
++                line = re.sub(r'URI="([^"]+)"', _rw, line)
++            lines.append(line)
++        if len(allowed) > 32:
++            _hls_hosts[sid] = set(list(allowed)[-32:])
++        return Response("\n".join(lines) + "\n", media_type="application/vnd.apple.mpegurl",
++                        headers={"Cache-Control": "no-cache"})
++
++    out_headers = {k: up.headers[k] for k in _PASS_HEADERS if k in up.headers and k != "content-type"}
++    out_headers["Cache-Control"] = "no-cache, no-store"
++    out_headers["X-Accel-Buffering"] = "no"
++
++    async def body_iter() -> AsyncIterator[bytes]:
++        try:
++            while True:
++                if request is not None and await request.is_disconnected():
++                    break
++                try:
++                    chunk = await up.read(16384, timeout=20.0)
++                except (asyncio.TimeoutError, OSError, ssl.SSLError):
++                    break
++                if not chunk:
++                    break
++                yield chunk
++        finally:
++            up.close()
++
++    return StreamingResponse(body_iter(), media_type=ctype, headers=out_headers)
++
++
++def radio_router():
++    """APIRouter opcional com GET /radio/{station_id} (para ``app.include_router``)."""
++    from fastapi import APIRouter, Request
++
++    globals()["Request"] = Request  # anotações viram string (__future__); o FastAPI resolve aqui
++    router = APIRouter()
++
++    @router.get("/radio/{station_id}")
++    async def _radio(station_id: str, request: Request):
++        return await relay_radio(station_id, request)
++
++    return router
++
++
++# ---------------------------------------------------------------------------
++# Status
++# ---------------------------------------------------------------------------
++def genre_counts(stations: Optional[list[dict]] = None) -> dict[str, int]:
++    sts = _stations if stations is None else stations
++    out = {g: 0 for g in RADIO_GENRES}
++    for s in sts:
++        for g in station_genres(s):
++            out[g] = out.get(g, 0) + 1
++    return out
++
++
++async def radio_status() -> dict:
++    return {
++        "stations": len(_stations),
++        "pernambuco": sum(1 for s in _stations if is_pe(s)),
++        "https_direct": sum(1 for s in _stations if s.get("https_url")),
++        "relay_only": sum(1 for s in _stations if not s.get("https_url")),
++        "updated": _state["updated"],
++        "age_h": round((time.time() - _state["updated_ts"]) / 3600, 1) if _state["updated_ts"] else -1,
++        "running": _state["running"],
++        "checked": _state["checked"],
++        "candidates": _state["candidates"],
++        "duration_s": _state["duration_s"],
++        "api_server": _state["api_server"],
++        "last_error": _state["last_error"],
++        "path": _state["path"],
++        "genres": genre_counts(),
++    }
 diff --git a/comet/services/row_warm.py b/comet/services/row_warm.py
 new file mode 100644
 index 0000000..07c85af
@@ -23697,12 +26041,523 @@ index 0000000..f249b6a
 +
 +def is_known_pt_filename(name: str | None) -> bool:
 +    return bool(name) and name.strip().lower() in _PT_FILENAMES
+diff --git a/comet/services/taste.py b/comet/services/taste.py
+new file mode 100644
+index 0000000..7efbb11
+--- /dev/null
++++ b/comet/services/taste.py
+@@ -0,0 +1,505 @@
++"""Motor que aprende o gosto: registra cada play feito por uma fonte do Comet, depois confere no
++histórico do Stremio se você assistiu até o fim ou largou, e transforma isso em preferência por
++grupo de release, resolução e faixa de tamanho.
++
++ONDE LIGAR NO COMET (destino sugerido: comet/services/taste.py)
++-----------------------------------------------------------------
++(a) Playback (endpoint que resolve o link do debrid, ex. comet/api/endpoints/playback.py):
++    logo DEPOIS de obter o link final, antes de devolver o redirect, disparar em background
++    (nunca atrasar o play):
++
++        from comet.services.taste import record_play
++        asyncio.create_task(record_play(
++            media_id,          # "tt123" (filme) ou "tt123:S:E" (episódio) — o id que o Stremio pediu
++            info_hash,         # hash do torrent escolhido
++            file_name,         # nome do arquivo dentro do torrent (pode ser "")
++            torrent_title,     # título do torrent
++            service,           # "torbox" / "realdebrid"
++            resolution,        # "2160p" / "1080p" / ... (o que o parser já deu)
++            size_bytes,        # tamanho do arquivo em bytes (ou None)
++            is_pt,             # True se áudio/legenda PT-BR
++        ))
++    Links diretos (FenixFlix/FrostStream) não passam por aqui e não são registrados.
++
++(b) "▶ Assistir" (onde a fonte padrão é escolhida): carregar `scores = await taste_scores()`
++    uma vez por requisição (é cacheado 1 h) e, na chave de ordenação, acrescentar
++    `-bonus(scores, torrent_title, resolution, size_bytes)` como DESEMPATE logo depois de
++    "risco de tela" e "PT não é padrão", ex.:
++        key = (risco_de_tela, pt_nao_padrao, -bonus(scores, t, res, size), ...resto atual...)
++    Bônus 0 quando não há dados — então sem histórico nada muda.
++
++(c) Bot do Telegram: comando `/gosto` → `await summary_text()` e enviar o texto.
++
++(d) App (startup/lifespan, junto dos outros serviços de fundo):
++        asyncio.create_task(start_taste_service())
++
++Banco: a tabela `play_log` é criada no primeiro uso (CREATE TABLE IF NOT EXISTS). Tipos escolhidos
++para funcionar em SQLite e PostgreSQL (id TEXT uuid, ts BIGINT em segundos unix).
++"""
++from __future__ import annotations
++
++import asyncio
++import datetime
++import re
++import time
++import uuid
++from typing import Any, Iterable
++
++from comet.core.database import database
++from comet.core.logger import logger
++
++# ───────────────────────── parâmetros ─────────────────────────
++
++DEDUP_SECONDS = 10 * 60
++EVAL_MIN_AGE = 6 * 3600           # só avalia plays com pelo menos 6 h
++UNCERTAIN_RETRY = 48 * 3600       # "incerto" antes disso fica NULL e é reavaliado no próximo ciclo
++ACTIVITY_WINDOW = 3 * 3600        # atividade além de 3 h após o play = nova sessão
++SHORT_WATCH_MS = 5 * 60 * 1000    # progresso < 5 min = largou
++DONE_RATIO = 0.85
++KEEP_DAYS = 180
++SCORES_TTL = 3600
++MIN_N = 2
++SMOOTH = 3
++
++W_GROUP, W_RES, W_SIZE = 0.6, 0.25, 0.15
++SIZE_BUCKETS = [(0, 3, "0-3 GB"), (3, 10, "3-10 GB"), (10, 30, "10-30 GB"), (30, None, "30+ GB")]
++
++_tables_ready = False
++_tables_lock = asyncio.Lock()
++_scores_cache: tuple[float, dict] | None = None
++
++
++async def _ensure_tables() -> None:
++    global _tables_ready
++    if _tables_ready:
++        return
++    async with _tables_lock:
++        if _tables_ready:
++            return
++        await database.execute(
++            """
++            CREATE TABLE IF NOT EXISTS play_log (
++                id TEXT PRIMARY KEY,
++                ts BIGINT NOT NULL,
++                media_id TEXT NOT NULL,
++                imdb TEXT NOT NULL,
++                season INTEGER,
++                episode INTEGER,
++                info_hash TEXT,
++                grp TEXT,
++                resolution TEXT,
++                size_gb DOUBLE PRECISION,
++                service TEXT,
++                is_pt INTEGER,
++                outcome TEXT
++            )
++            """
++        )
++        await database.execute(
++            "CREATE INDEX IF NOT EXISTS idx_play_log_dedup ON play_log (media_id, info_hash, ts)"
++        )
++        await database.execute("CREATE INDEX IF NOT EXISTS idx_play_log_outcome ON play_log (outcome, ts)")
++        _tables_ready = True
++
++
++# ───────────────────────── parsing ─────────────────────────
++
++_EXT_RE = re.compile(r"\.(mkv|mp4|avi|m4v|ts|m2ts|webm|mov|wmv)$", re.I)
++_SITE_RE = re.compile(r"(?:WWW\.)?([A-Z0-9]+)\.(?:COM|TV|ORG|NET|ME|IO|TO)(?:\.BR)?\b", re.I)
++_NOT_GROUPS = {
++    "DL", "RIP", "WEB", "DUAL", "AUDIO", "DUBLADO", "LEGENDADO", "NACIONAL", "X264", "X265", "H264",
++    "H265", "HEVC", "AAC", "AC3", "DTS", "HDR", "SDR", "REMUX", "BLURAY", "1080P", "720P", "2160P",
++    "480P", "4K", "MULTI", "SUBS", "SUB", "DUB", "PT", "BR", "PTBR", "EAC3", "DDP", "DD", "ATMOS",
++}
++
++
++def _clean_group(raw: str) -> str | None:
++    g = raw.strip().strip("[](){}. _").upper()
++    m = _SITE_RE.fullmatch(g)
++    if m:
++        g = m.group(1).upper()
++    g = re.sub(r"^WWW\.", "", g)
++    g = re.sub(r"\.(COM|TV|ORG|NET)(\.BR)?$", "", g)
++    g = g.strip(". _")
++    if not g or len(g) > 24 or g in _NOT_GROUPS or g.isdigit():
++        return None
++    if not re.fullmatch(r"[A-Z0-9][A-Z0-9._&-]*", g):
++        return None
++    return g
++
++
++def extract_group(name: str | None) -> str | None:
++    """Grupo de release a partir do nome do torrent/arquivo (normalizado em maiúsculas)."""
++    if not name:
++        return None
++    s = name.strip()
++    s = s.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
++    s = _EXT_RE.sub("", s).strip()
++    # [Grupo] Título ...  (anime)
++    m = re.match(r"^\[([^\]]+)\]", s)
++    if m:
++        g = _clean_group(m.group(1))
++        if g:
++            return g
++    # sufixos tipo "[rarbg]" / "(1)" no fim não são o grupo
++    s2 = re.sub(r"(\s*[\[(][^\])]*[\])])+$", "", s).strip()
++    if "-" in s2:
++        tail = s2.rsplit("-", 1)[1]
++        tail = re.split(r"\s", tail.strip())[0] if tail.strip() else ""
++        g = _clean_group(tail)
++        if g:
++            return g
++    # site no nome sem hífen (ex.: "Filme.2023.WWW.BLUDV.COM")
++    m = re.search(r"WWW\.([A-Z0-9]+)\.(?:COM|TV|ORG|NET)", s, re.I)
++    if m:
++        return _clean_group(m.group(1))
++    return None
++
++
++def _group_from(file_name: str | None, torrent_title: str | None) -> str | None:
++    return extract_group(file_name) or extract_group(torrent_title)
++
++
++def normalize_resolution(res: Any) -> str | None:
++    if not res:
++        return None
++    r = str(res).strip().lower()
++    if r in ("4k", "uhd", "2160", "2160p"):
++        return "2160p"
++    m = re.search(r"(\d{3,4})p?", r)
++    if m:
++        return f"{m.group(1)}p"
++    return r or None
++
++
++def size_bucket(size_bytes: Any = None, size_gb: Any = None) -> str | None:
++    try:
++        gb = float(size_gb) if size_gb is not None else float(size_bytes) / 1024**3
++    except (TypeError, ValueError):
++        return None
++    if gb <= 0:
++        return None
++    for lo, hi, label in SIZE_BUCKETS:
++        if gb >= lo and (hi is None or gb < hi):
++            return label
++    return None
++
++
++def _parse_media_id(media_id: str) -> tuple[str, int | None, int | None]:
++    parts = str(media_id).split(":")
++    imdb = parts[0]
++    if len(parts) >= 3:
++        try:
++            return imdb, int(parts[1]), int(parts[2])
++        except ValueError:
++            pass
++    return imdb, None, None
++
++
++def _to_epoch(val: Any) -> float | None:
++    """lastWatched pode vir em ISO ou em ms."""
++    if val is None or val == "":
++        return None
++    if isinstance(val, (int, float)):
++        return float(val) / 1000 if val > 1e11 else float(val)
++    s = str(val).strip()
++    if re.fullmatch(r"\d+(\.\d+)?", s):
++        return _to_epoch(float(s))
++    try:
++        dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
++    except ValueError:
++        return None
++    if dt.tzinfo is None:
++        dt = dt.replace(tzinfo=datetime.timezone.utc)
++    return dt.timestamp()
++
++
++def _num(v: Any) -> float:
++    try:
++        return float(v or 0)
++    except (TypeError, ValueError):
++        return 0.0
++
++
++# ───────────────────────── 1. registrar ─────────────────────────
++
++async def record_play(media_id, info_hash, file_name, torrent_title, service, resolution, size_bytes, is_pt) -> None:
++    try:
++        await _ensure_tables()
++        now = int(time.time())
++        ih = (info_hash or "").lower() or None
++        dup = await database.fetch_one(
++            "SELECT id FROM play_log WHERE media_id = :m AND info_hash = :h AND ts >= :since",
++            {"m": str(media_id), "h": ih, "since": now - DEDUP_SECONDS},
++        )
++        if dup:
++            return
++        imdb, season, episode = _parse_media_id(media_id)
++        size_gb = None
++        try:
++            if size_bytes:
++                size_gb = round(float(size_bytes) / 1024**3, 3)
++        except (TypeError, ValueError):
++            pass
++        await database.execute(
++            """
++            INSERT INTO play_log (id, ts, media_id, imdb, season, episode, info_hash, grp, resolution,
++                                  size_gb, service, is_pt, outcome)
++            VALUES (:id, :ts, :m, :imdb, :s, :e, :h, :grp, :res, :gb, :svc, :pt, NULL)
++            """,
++            {
++                "id": uuid.uuid4().hex, "ts": now, "m": str(media_id), "imdb": imdb, "s": season,
++                "e": episode, "h": ih, "grp": _group_from(file_name, torrent_title),
++                "res": normalize_resolution(resolution), "gb": size_gb,
++                "svc": (service or None), "pt": 1 if is_pt else 0,
++            },
++        )
++    except Exception as e:  # nunca derrubar o playback
++        logger.warning(f"taste.record_play: {type(e).__name__}: {e}")
++
++
++# ───────────────────────── 2. avaliar ─────────────────────────
++
++def _index_library(library_items: Any) -> dict[str, dict]:
++    if isinstance(library_items, dict):
++        library_items = library_items.values()
++    idx: dict[str, dict] = {}
++    for it in library_items or []:
++        if isinstance(it, dict) and it.get("_id"):
++            idx[str(it["_id"])] = it
++    return idx
++
++
++def _progress(state: dict) -> tuple[float, float, float]:
++    """(timeOffset_ms, ratio_offset, ratio_watched)"""
++    off = _num(state.get("timeOffset"))
++    dur = _num(state.get("duration"))
++    watched = _num(state.get("timeWatched"))
++    if dur <= 0:
++        return off, 0.0, 0.0
++    return off, off / dur, watched / dur
++
++
++def _no_later_session(state: dict, play_ts: float) -> bool:
++    """lastWatched existe, é deste play (≥ play−10 min) e não passa de 3 h depois dele."""
++    lw = _to_epoch(state.get("lastWatched"))
++    if lw is None:
++        return False
++    return play_ts - 600 <= lw <= play_ts + ACTIVITY_WINDOW
++
++
++def _current_episode(state: dict) -> tuple[int, int] | None:
++    vid = state.get("video_id") or ""
++    parts = str(vid).split(":")
++    if len(parts) >= 3:
++        try:
++            return int(parts[-2]), int(parts[-1])
++        except ValueError:
++            pass
++    try:
++        if state.get("season") is not None and state.get("episode") is not None:
++            return int(state["season"]), int(state["episode"])
++    except (TypeError, ValueError):
++        pass
++    return None
++
++
++def classify(play: dict, item: dict | None) -> str:
++    if not item:
++        return "incerto"
++    state = item.get("state") or {}
++    play_ts = float(play["ts"])
++    off, r_off, r_watched = _progress(state)
++    done = r_off >= DONE_RATIO or r_watched >= DONE_RATIO
++
++    if play.get("season") is None:  # filme
++        if _num(state.get("timesWatched")) > 0 or bool(state.get("flaggedWatched")) or done:
++            return "completo"
++        if off < SHORT_WATCH_MS and _no_later_session(state, play_ts):
++            return "abandonado"
++        return "incerto"
++
++    played = (int(play["season"]), int(play["episode"]))
++    cur = _current_episode(state)
++    if cur is None:
++        return "incerto"
++    if cur > played:
++        return "completo"
++    if cur == played:
++        if done:
++            return "completo"
++        if off < SHORT_WATCH_MS and _no_later_session(state, play_ts):
++            return "abandonado"
++    return "incerto"
++
++
++async def evaluate(library_items, now=None) -> dict:
++    await _ensure_tables()
++    now = float(now if now is not None else time.time())
++    idx = _index_library(library_items)
++    rows = await database.fetch_all(
++        "SELECT id, ts, imdb, season, episode FROM play_log WHERE outcome IS NULL AND ts <= :lim ORDER BY ts",
++        {"lim": int(now - EVAL_MIN_AGE)},
++    )
++    counts = {"completo": 0, "abandonado": 0, "incerto": 0, "pendente": 0}
++    for r in rows:
++        play = {"ts": r["ts"], "season": r["season"], "episode": r["episode"]}
++        outcome = classify(play, idx.get(r["imdb"]))
++        if outcome == "incerto" and now - float(r["ts"]) < UNCERTAIN_RETRY:
++            counts["pendente"] += 1  # talvez ainda termine: tenta de novo no próximo ciclo
++            continue
++        await database.execute("UPDATE play_log SET outcome = :o WHERE id = :id", {"o": outcome, "id": r["id"]})
++        counts[outcome] += 1
++    if counts["completo"] or counts["abandonado"] or counts["incerto"]:
++        invalidate_scores()
++    counts["avaliados"] = counts["completo"] + counts["abandonado"] + counts["incerto"]
++    return counts
++
++
++# ───────────────────────── 3. pontuar ─────────────────────────
++
++def invalidate_scores() -> None:
++    global _scores_cache
++    _scores_cache = None
++
++
++def _aggregate(pairs: Iterable[tuple[str | None, str]]) -> dict[str, dict]:
++    acc: dict[str, dict] = {}
++    for key, outcome in pairs:
++        if not key:
++            continue
++        a = acc.setdefault(key, {"n": 0, "completos": 0, "abandonados": 0})
++        a["n"] += 1
++        if outcome == "completo":
++            a["completos"] += 1
++        elif outcome == "abandonado":
++            a["abandonados"] += 1
++    out = {}
++    for key, a in acc.items():
++        if a["n"] >= MIN_N:
++            a["score"] = round((a["completos"] - 2 * a["abandonados"]) / (a["n"] + SMOOTH), 4)
++            out[key] = a
++    return out
++
++
++async def taste_scores(force: bool = False) -> dict:
++    global _scores_cache
++    if not force and _scores_cache and time.time() - _scores_cache[0] < SCORES_TTL:
++        return _scores_cache[1]
++    await _ensure_tables()
++    rows = await database.fetch_all(
++        "SELECT grp, resolution, size_gb, outcome FROM play_log WHERE outcome IS NOT NULL"
++    )
++    rows = [(r["grp"], r["resolution"], r["size_gb"], r["outcome"]) for r in rows]
++    scores = {
++        "evaluated": len(rows),
++        "completos": sum(1 for r in rows if r[3] == "completo"),
++        "abandonados": sum(1 for r in rows if r[3] == "abandonado"),
++        "group": _aggregate((g, o) for g, _, _, o in rows),
++        "resolution": _aggregate((res, o) for _, res, _, o in rows),
++        "size": _aggregate((size_bucket(size_gb=gb) if gb else None, o) for _, _, gb, o in rows),
++    }
++    _scores_cache = (time.time(), scores)
++    return scores
++
++
++# ───────────────────────── 4. bônus ─────────────────────────
++
++def _component(table: dict, key: str | None) -> float:
++    if not key or not table or key not in table:
++        return 0.0
++    return max(-1.0, min(1.0, float(table[key].get("score", 0.0))))
++
++
++def bonus(scores, torrent_title, resolution, size_bytes) -> float:
++    """−1..+1; maior = mais a sua cara. Use `-bonus(...)` na chave de ordenação (crescente)."""
++    if not scores:
++        return 0.0
++    b = (
++        W_GROUP * _component(scores.get("group", {}), extract_group(torrent_title))
++        + W_RES * _component(scores.get("resolution", {}), normalize_resolution(resolution))
++        + W_SIZE * _component(scores.get("size", {}), size_bucket(size_bytes=size_bytes))
++    )
++    return max(-1.0, min(1.0, round(b, 4)))
++
++
++# ───────────────────────── 5. resumo (/gosto) ─────────────────────────
++
++def _plural(n: int, um: str, varios: str) -> str:
++    return f"{n} {um if n == 1 else varios}"
++
++
++async def summary_text() -> str:
++    s = await taste_scores(force=True)
++    total = s["evaluated"]
++    if total == 0:
++        return ("🎯 Seu gosto\n\nAinda não tenho plays avaliados. Cada play por uma fonte do Comet é "
++                "conferido no seu histórico do Stremio depois de 6 h.")
++    lines = [
++        "🎯 Seu gosto",
++        "",
++        f"{_plural(total, 'play avaliado', 'plays avaliados')}: "
++        f"{s['completos']} até o fim, {_plural(s['abandonados'], 'largado', 'largados')}, "
++        f"{_plural(total - s['completos'] - s['abandonados'], 'incerto', 'incertos')}.",
++    ]
++    groups = s["group"]
++    good = sorted((g for g in groups.items() if g[1]["score"] > 0 and g[1]["completos"] > 0),
++                  key=lambda kv: (-kv[1]["score"], -kv[1]["n"]))[:3]
++    bad = sorted((g for g in groups.items() if g[1]["abandonados"] > 0 and g[1]["score"] < 0),
++                 key=lambda kv: kv[1]["score"])[:3]
++    lines.append("")
++    if good:
++        lines.append("✅ Você assiste até o fim:")
++        for name, a in good:
++            lines.append(f"  • {name} — {a['completos']} de {a['n']}")
++    else:
++        lines.append("✅ Ainda sem grupo favorito (precisa de pelo menos 2 plays do mesmo grupo).")
++    if bad:
++        lines.append("⚠️ Você costuma largar:")
++        for name, a in bad:
++            lines.append(f"  • {name} — largou {a['abandonados']} de {a['n']}")
++    res = s["resolution"]
++    if res:
++        best = max(res.items(), key=lambda kv: (kv[1]["score"], kv[1]["n"]))
++        lines.append("")
++        lines.append(f"📺 Resolução preferida: {best[0]} ({best[1]['completos']} de {best[1]['n']} até o fim)")
++    size = s["size"]
++    if size:
++        best = max(size.items(), key=lambda kv: (kv[1]["score"], kv[1]["n"]))
++        lines.append(f"💾 Tamanho que mais funciona: {best[0]}")
++    return "\n".join(lines)
++
++
++# ───────────────────────── 6. serviço ─────────────────────────
++
++async def cleanup_old(now: float | None = None) -> None:
++    await _ensure_tables()
++    now = float(now if now is not None else time.time())
++    await database.execute("DELETE FROM play_log WHERE ts < :lim", {"lim": int(now - KEEP_DAYS * 86400)})
++
++
++async def run_once() -> dict | None:
++    from comet.core.models import settings
++    from comet.services.stremio_library import get_stremio_library
++
++    auth_key = getattr(settings, "STREMIO_AUTH_KEY", None)
++    result = None
++    if auth_key:
++        items = await get_stremio_library(auth_key)
++        if items:  # lista vazia = erro de rede/credencial: não marcar nada como incerto
++            result = await evaluate(items)
++            logger.info(f"Taste: {result}")
++    await cleanup_old()
++    return result
++
++
++async def start_taste_service() -> None:
++    await asyncio.sleep(15 * 60)
++    while True:
++        try:
++            await run_once()
++        except asyncio.CancelledError:
++            raise
++        except Exception as e:
++            logger.warning(f"Taste service: {type(e).__name__}: {e}")
++        await asyncio.sleep(6 * 3600)
 diff --git a/comet/services/telegram_bot.py b/comet/services/telegram_bot.py
 new file mode 100644
-index 0000000..c416c7b
+index 0000000..bf836ec
 --- /dev/null
 +++ b/comet/services/telegram_bot.py
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,399 @@
 +"""Bot do Telegram do Comet (link pessoal).
 +
 +- Pedidos em texto livre: "Duna 2 dublado", "The Last of Us T2E3".
@@ -23979,7 +26834,7 @@ index 0000000..c416c7b
 +_HELP = ("Me mande o que quer assistir, do jeito que falaria:\n"
 +         "• Duna 2 dublado\n• The Last of Us T2E3\n• Matrix 1999\n\n"
 +         "Eu procuro, e se o dublado não estiver pronto mando o Real-Debrid baixar e te aviso quando ficar ⚡.\n\n"
-+         "/status — como está o A71\n/ajuda — esta mensagem")
++         "/status — como está o A71\n/gosto — o que o Comet aprendeu do seu gosto\n/ajuda — esta mensagem")
 +
 +try:
 +    from comet.services.wishlist import HELP_WISHLIST as _HW
@@ -24085,6 +26940,9 @@ index 0000000..c416c7b
 +            pass
 +        elif low.startswith("/start") or low.startswith("/ajuda") or low.startswith("/help"):
 +            reply = "👋 Oi! Sou o Comet do A71.\n\n" + _HELP
++        elif low.startswith("/gosto"):
++            from comet.services.taste import summary_text as _taste_summary
++            reply = await _taste_summary()
 +        elif low.startswith("/status"):
 +            reply = await _status_text()
 +        elif _norm(text).strip(' !?.') in _GREETINGS or len(_norm(text)) < 3:

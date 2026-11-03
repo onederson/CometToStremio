@@ -44,7 +44,15 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 
 **Legendas:** OpenSubtitles + SubSource + SubDL, escolhidas pela release e sincronizadas; tradução automática para PT-BR quando só existe em inglês; legenda 🎓 PT+EN; nenhuma legenda quando o áudio já é PT.
 
-**TV ao vivo grátis:** Pluto TV (sessão v4 + espelho) e canais abertos do iptv-org, validados diariamente.
+**TV ao vivo grátis:**
+- Pluto TV e canais abertos do iptv-org (Brasil + canais em português de outros países), revalidados a cada 12 h.
+- Só aparecem os canais que funcionam, sem duplicatas.
+- Português primeiro, com filtro `🇧🇷 Em português` / `🌎 Outros idiomas`.
+- O "Ao vivo" é testado na hora do clique.
+
+**📻 Rádios ao vivo:** cerca de 370 rádios brasileiras validadas (Radio Browser), com Recife e Pernambuco primeiro. Separadas por região e por tipo, com repasse pelo A71 para funcionar no 4G.
+
+**Dublado de primeira:** quando o arquivo começa em inglês, o Comet ajusta o cabeçalho no caminho e o PT vira a faixa padrão, sem reencodar. **O Comet aprende** o que você assiste até o fim (`/gosto` no Telegram).
 
 **Kids:** link próprio só com conteúdo infantil (inclui família, clássicos e canais infantis). A "hora de dormir" está pronta e **desligada** (`KIDS_BEDTIME=21:00-07:00` no `.env` liga).
 

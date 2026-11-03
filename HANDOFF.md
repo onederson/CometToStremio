@@ -241,9 +241,57 @@ Flags importantes do `.env`:
     - **📅 Sua semana** (`week_cards.py`, `comet_myweek`, antes de `comet_week`): um cartão desenhado por dia; clicar abre os episódios do dia (`cometsaga:w-AAAAMMDD`).
     - **Maratonas e anime sem filler** (`marathon.py`, `watch_orders.py` com 8 coleções/81 filmes conferidos no Cinemeta, `anime_canon.py`): `🍿 Maratonas na ordem da história` (`cometsaga:o-<chave>`) e `🎌 Anime só a história` (`cometsaga:c-<imdb>`, One Piece 1.085 eps sem 94 fillers). Reaproveitam o prefixo `cometsaga:` (sem reinstalar). Dúvidas de ordem em `downloads/work/orders/watch_orders_check.txt` (não versionado): posição de Deadpool & Wolverine, Homem-Aranha 2026.
     - **Lista de desejos + radar** (`wishlist.py`, comandos `/quero`, `/desejos`, `/remover`, `/radar on|off`, frases "me avisa quando sair X dublado"): checa a cada 3 h; o bot do Telegram prefere título exato na lista de desejos (aceita o que ainda não estreou, ex.: Duna: Parte Três) e título já lançado no pedido normal (`_tmdb_find(..., prefer_released)`).
-    - **Ainda não feito (MELHORIAS ★★):** 6 (corrigir o arquivo no caminho: PT padrão/áudio para a TV, exige ffmpeg e proxy de vídeo) e 12 (o Comet que aprende com o que você assiste até o fim).
+    - **Ainda não feito (MELHORIAS ★★) na época:** 6 e 12. Os dois foram feitos no item 31.
     - **Fundo animado (testado e descartado):** WebP/GIF animado como `background`/`poster` (`/art/anim/...`) ficou parado no app da TV do usuário. Fileira de teste desligada (`PREVIEW_TEST_ROW=False`; a rota continua). Prévia em vídeo ao focar não é possível pelo protocolo; o que existe é `trailerStreams` (dublado + legendado) na página do título.
     - **Pegadinha nova:** o `grep` do Android (fora do chroot) não entende `\|`; use `grep -E "a|b"`. Emoji no padrão do grep enviado pelo `a71.ps1` também falha: procure por texto ASCII.
+31. **PT padrão, gosto, TV reformulada e rádios (03/11/2026; Claude + 2 subagentes):**
+    - **PT como faixa padrão sem reencodar (MELHORIAS ★★ 6).**
+      - Peças: `comet/services/media_probe.py` registra os filhos de cada TrackEntry e o CRC-32 das Tracks; `flag_plan.py` (`make_plan(summary, head, extra)`) calcula a troca; `flag_proxy.py` faz o repasse.
+      - Como funciona: toda faixa de áudio antes do PT ganha `FlagDefault=0` (o elemento é escrito por cima ou é reaproveitado um filho do mesmo tamanho: FlagForced, FlagLacing, Void...). O PT fica com 1 e o CRC é recalculado (zlib, little-endian).
+      - Onde fica o plano: é gravado em `media_info.summary.pt_fix` na leitura do arquivo.
+      - Na lista: a fonte ganha `&fix=1` e `PT padrão (ajustado pelo Comet)`, só em casa e até 30 Mbps. O `▶ Assistir` passa a tratar essas fontes como PT padrão.
+      - No play: com `fix=1`, o `playback.py` (`_pt_fix_response`) repassa o arquivo pelo A71, com Range, trocando só os bytes do plano; sem plano, faz o redirecionamento normal.
+      - Testado em 3 GoT reais (BLUDV com CRC; WEB-DL PiA com EN default+forced): o ffprobe mostra `eng=0 / por=1`. O avanço para 30 min abriu em 3 s.
+      - Testes locais em `downloads/work/flagfix/` (15 + 14, não versionados).
+      - O áudio DTS/TrueHD para a TV ficou de fora: pesado demais para o A71.
+    - **O Comet que aprende (★★ 12).**
+      - `comet/services/taste.py`: `play_log` + avaliação a cada 6 h com o histórico do Stremio.
+      - O `▶ Assistir` usa a nota de gosto como desempate.
+      - `/gosto` no Telegram mostra o que ele aprendeu.
+    - **Anime só a história:** `marathon._clean` tira os campos `null` (o app descartava a página inteira). Detetive Conan foi removido da lista.
+    - **TV ao vivo reformulada** (`live_tv.py`, `api/endpoints/live_routes.py`).
+      - **Causa do "não abre":** a lista de canais vivos do Pluto nunca era gravada (só validava depois de 24 h ligado), então canais mortos e duplicados apareciam. Exemplo: "Nickelodeon Clássico" em Infantil não existe mais, e o que funciona é o de Nickelodeon.
+      - **Validação:** agora roda 2 min depois de subir (se a lista tiver mais de 20 h) e a cada 12 h, com 2 tentativas por fonte. Grava `data/pluto_alive.json` e o idioma do áudio de cada canal (`data/pluto_info.json`, lido do `EXT-X-MEDIA`). Proteção: queda geral do Pluto não apaga a lista.
+      - **Catálogo:**
+        - sem duplicatas (por nome normalizado; cópias do Pluto no iptv-org saem);
+        - português primeiro, gêneros novos `🇧🇷 Em português` e `🌎 Outros idiomas`;
+        - o Início só mostra canais em PT.
+      - **Idioma:** o Pluto marca muito canal nacional como `en`. Por isso há a lista `_FORCE_PT_WORDS` e as categorias `_FORCE_PT_CATS` (infantil, Nickelodeon, novelas, TV brasileira).
+      - **Causa real do "fica só carregando":** uma sessão v4 do Pluto compartilhada entre canais e aparelhos (era uma só, em cache) faz o Pluto devolver playlists de variante **vazias** quando duas aberturas se cruzam. O ExoPlayer fica esperando para sempre.
+      - **Opção 1 por clique:** `📺 Ao vivo` aponta para `PUBLIC_BASE_URL/live/pluto/<id>.m3u8`. O A71 (`resolve_pluto_url`) cria uma **sessão v4 nova e exclusiva** (`_fresh_pluto_session`, clientID aleatório), confere master + 1 variante com segmentos sem baixar vídeo, tenta de novo uma vez e, se falhar, cai no jmp2. A opção 2 é o jmp2 direto.
+      - **Medição real** com ffmpeg no PC (o vídeo tem que andar 15 s): a sessão compartilhada falhava em 11–20% das aberturas da opção 1; com a sessão por clique, **178/179** com 6 canais abrindo ao mesmo tempo (a falha foi o Naruto lento). Scripts em `downloads/work/tvplay.py` (não versionado).
+      - **iptv-org:** revalidado em 03/11 (227 canais). O rótulo de áudio do HLS erra muito, então nome com BR/Brazil/termo nacional = PT (`_iptv_lang`). Códigos de 3 letras (`por`) são convertidos (`_lang2`).
+    - **Reinício preso (03/11, 04:08):** depois de um `pkill`, o uvicorn ficou esperando um stream aberto fechar (TV tocando) e parou de atender sem sair. Correções:
+      - `timeout_graceful_shutdown=8` no `comet/main.py`;
+      - o `watchdog.sh` mata com `-9` o Comet que está vivo mas não responde há 3 checagens (15 min).
+    - **DNS (03/11, 05h):**
+      - O que aconteceu: o `1.1.1.1` (primeiro do `/data/debian/etc/resolv.conf`) passou a responder em 1–3 s ou nem responder nesta rede. Os catálogos do TMDB davam timeout e o regress falhava.
+      - Correção: a ordem agora é `9.9.9.9`, `8.8.8.8`, `1.1.1.1` com `options timeout:2 attempts:2` (o `install_rootfs.sh` já grava assim).
+      - Se os catálogos voltarem a dar timeout, meça cada servidor com uma consulta UDP crua antes de mexer em código.
+    - **iptv-org em português:** além de `countries/br.m3u`, entra `languages/por.m3u` (Portugal, Angola...).
+      - O `index.m3u` mundial (>10 mil canais) foi descartado: pesado demais para validar no A71 e quase nada em PT.
+      - URLs repetidas são validadas uma vez só; o semáforo baixou de 15 para 8.
+    - **Servidor a 190% de CPU (03/11, achado com `py-spy dump`, instalado no venv via `uv pip`):** `_get_ready_tt_list` (fileira ⚡ Prontos) refazia `RTN.parse` de todos os títulos da `debrid_availability` a cada cálculo. A tabela cresceu com o TorBox principal, e vários cálculos rodavam em paralelo (o timeout do catálogo não cancela a thread) e seguravam o GIL. Resultado: os catálogos do TMDB davam timeout e o regress falhava em 6 testes. Correções:
+      - memória por (título, tracker) em `_READY_PT_MEMO`;
+      - um cálculo por vez por tipo (`_READY_LOCKS`); quem chega no meio do cálculo recebe a lista antiga.
+    - **Não rode validação do iptv-org e o regress ao mesmo tempo:** a validação faz centenas de consultas DNS e o resto dá timeout.
+    - **📻 Rádios ao vivo** (`comet/services/radio.py`, catálogo `comet_radio`). A página da rádio mostra `🎵 Tocando agora` (ICY `StreamTitle`, 3 s no máximo, cache de 2 min, conserta UTF-8 duplo).
+      - Fonte: Radio Browser, 380 candidatas (todas de PE + as 10 maiores de cada estado + populares). 371 passam na validação de bytes reais (MP3/AAC/Ogg/HLS). A lista é revalidada a cada 24 h em `data/radio_alive.json` e nunca é gravada com menos de 20.
+      - Gêneros: `📍 Recife e Pernambuco` (39 rádios) primeiro, depois por região e por tipo (Notícias, Esporte, Forró...).
+      - IDs `cometlive:radio:<uuid>` (prefixo já existente: meta e stream sem reinstalar; o catálogo novo aparece depois de reinstalar o link).
+      - Repasse `/radio/<id>` (http → https para o 4G; HLS reescrito em `.m3u8`). Capa desenhada `/art/radio.png?n=` quando a rádio não tem logo.
+      - **Pegadinha:** o `uvloop` não aceita `happy_eyeballs_delay` em `open_connection` (a primeira validação deu 0 rádios); há fallback.
+    - **Regress:** `t_livetv` agora reprova canal duplicado e meta com `null`, e testa a opção 1 pelo A71 local.
 20. **Episódio não lançado (31/10/2026):** VisionQuest E07/E08 (estreia 04/11 e 11/11) recebiam packs da temporada e um link FrostStream "MegaEmbed" falso (só áudio). Agora, em série com data do episódio maior que hoje, o Comet devolve só o aviso `[⏳] Comet` "Episódio ainda não lançado. Estreia em DD/MM/AAAA." (sem links diretos). O `DIGITAL_RELEASE_FILTER` segue desligado (bloquearia filmes de cinema).
 21. **Legenda só sem áudio PT (31/10/2026):** o pedido de legendas devolve vazio quando o arquivo é PT-BR: links diretos PT (ganham `behaviorHints.filename` `<Addon>.direct.PTBR`), nome do arquivo com PT detectado (`apply_ptbr_detection`) ou arquivo que o Comet já marcou 🇧🇷 na lista de streams (memória `remember_pt_filename`, 50 mil nomes; cobre DUAL de fonte BR). Ressalva: essa memória zera quando o Comet reinicia.
 14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
@@ -323,7 +371,12 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 ## 8. Onde paramos e próximo passo
 
-**Estado (02/11/2026, noite):** tudo da Seção 4 (itens 1–29) está rodando no A71, testado (`SMOKE OK`, `REGRESS OK` com 41 testes; o WARN de `comet_mylist` vazio é normal) e no GitHub (`onederson/CometToStremio`, branch `main`). A restauração automática do smoke está **ligada** (sem `data/smoke.disable`).
+**Estado (03/11/2026, manhã):**
+- O item 31 (PT padrão, gosto, TV reformulada, rádios, DNS) está rodando no A71 e no GitHub.
+- **O usuário precisa reinstalar o link pessoal** para ver a fileira `📻 Rádios ao vivo` e os filtros de idioma da TV. O link é o mesmo; meta e stream das rádios já funcionam sem reinstalar.
+- Próximas ideias: `MELHORIAS.md` ★★★ (10 melhorias + 10 novidades).
+
+**Estado anterior (02/11/2026, noite):** tudo da Seção 4 (itens 1–29) está rodando no A71, testado (`SMOKE OK`, `REGRESS OK` com 41 testes; o WARN de `comet_mylist` vazio é normal) e no GitHub (`onederson/CometToStremio`, branch `main`). A restauração automática do smoke está **ligada** (sem `data/smoke.disable`).
 
 **Último passo feito:** acesso fora de casa (item 29). O link agora é `https://a71comet.duckdns.org:7443/<PERSONAL_LINK_TOKEN>/manifest.json` e foi testado de fora (5 países, HTTP 200). **O usuário reinstalou com o link :7443 e confirmou que funciona no 4G (02/11/2026).**
 
