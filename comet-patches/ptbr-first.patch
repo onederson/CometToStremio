@@ -17657,10 +17657,10 @@ index 0000000..017e3f2
 +    return meta_id.startswith(("cometsaga:o-", "cometsaga:c-", "cometsaga:w-"))
 diff --git a/comet/services/media_info.py b/comet/services/media_info.py
 new file mode 100644
-index 0000000..fb0d977
+index 0000000..97707ed
 --- /dev/null
 +++ b/comet/services/media_info.py
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,179 @@
 +"""Qualidade de verdade: lê o cabeçalho do arquivo (MKV/MP4) e guarda o resumo (vídeo, HDR/DV, bitrate,
 +faixas de áudio e qual é a padrão). Usa comet/services/media_probe.py (Python puro).
 +
@@ -17825,7 +17825,10 @@ index 0000000..fb0d977
 +        return {}
 +    _aud = lb.get("audio")
 +    if summary.get("_pt_fixed") and _aud:
-+        _aud = f"{_aud} · PT padrão (ajustado pelo Comet)"
++        _pre = "🔊 " if _aud.startswith("🔊") else ""
++        _parts = [p.replace(" padrão", "").strip() for p in _aud.replace("🔊", "").split(" · ") if p.strip()]
++        _others = [p for p in _parts if not p.upper().startswith("PT")]
++        _aud = _pre + " · ".join(["PT padrão (ajustado pelo Comet)"] + _others)
 +    return {"video": lb.get("video"), "audio": _aud, "warnings": lb.get("warnings") or []}
 +
 +
