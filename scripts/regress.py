@@ -1427,6 +1427,12 @@ def t_nuvio(token: str, nuvio_token: str) -> tuple[str, str]:
         if "/art/hero" not in bg_p:
             return "FAIL", "link pessoal perdeu a arte do fundo"
         st = client.get(f"/{nuvio_token}/stream/series/tt0944947:1:1.json").json().get("streams") or []
+        saga = client.get(f"/{nuvio_token}/catalog/movie/comet_saga.json").json().get("metas") or []
+        reacher = client.get(f"/{nuvio_token}/stream/series/tt9288030:1:1.json").json().get("streams") or []
+    if not saga:
+        return "FAIL", "Descobrir > Sagas vazio sem gênero"
+    if any("preacher" in (s.get("description") or "").lower() for s in reacher):
+        return "FAIL", "Preacher na lista de Reacher"
     if not st:
         return "FAIL", "sem streams"
     if any("fix=1" in (s.get("url") or "") for s in st):

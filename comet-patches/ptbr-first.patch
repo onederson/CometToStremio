@@ -2023,7 +2023,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..2454751 100644
+index 94f56ae..c5928a1 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -2091,7 +2091,7 @@ index 94f56ae..2454751 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +102,702 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +102,710 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -2680,8 +2680,16 @@ index 94f56ae..2454751 100644
 +
 +    # 2) link direto em PT-BR (validado)
 +    if not best_stream:
++        _ready_hd = _pick(
++            lambda i: i.get("cached")
++            and not i.get("is_cam")
++            and _format_resolution(i.get("resolution")) in ("4K", "1080p", "720p")
++        )
 +        for cand in candidates:
 +            if (cand.get("_is_direct") or cand.get("_is_direct_pt")) and cand.get("_is_pt"):
++                # Costuma ser outra versao da obra (ex.: Hunter x Hunter de 1999 no lugar do de 2011).
++                if _ready_hd and str(cand.get("_res") or "") in ("480p", "SD"):
++                    continue
 +                best_stream = cand
 +                best_meta = ("🇧🇷 PT-BR", cand.get("_res") or "HD", None)
 +                break
@@ -2794,7 +2802,7 @@ index 94f56ae..2454751 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +855,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +863,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -2832,7 +2840,7 @@ index 94f56ae..2454751 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +893,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +901,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -2841,7 +2849,7 @@ index 94f56ae..2454751 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +916,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +924,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -2932,7 +2940,7 @@ index 94f56ae..2454751 100644
      return selected_info_hashes
  
  
-@@ -198,6 +1009,56 @@ async def stream(
+@@ -198,6 +1017,56 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
@@ -2989,7 +2997,7 @@ index 94f56ae..2454751 100644
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +1101,30 @@ async def stream(
+@@ -240,12 +1109,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -3021,7 +3029,7 @@ index 94f56ae..2454751 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +1136,8 @@ async def stream(
+@@ -257,6 +1144,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -3030,7 +3038,7 @@ index 94f56ae..2454751 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +1151,94 @@ async def stream(
+@@ -270,53 +1159,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -3160,7 +3168,7 @@ index 94f56ae..2454751 100644
              is_empty=True,
          )
  
-@@ -329,7 +1251,7 @@ async def stream(
+@@ -329,7 +1259,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -3169,7 +3177,7 @@ index 94f56ae..2454751 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1259,7 @@ async def stream(
+@@ -337,6 +1267,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -3177,7 +3185,7 @@ index 94f56ae..2454751 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1271,7 @@ async def stream(
+@@ -348,7 +1279,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -3186,7 +3194,7 @@ index 94f56ae..2454751 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1301,7 @@ async def stream(
+@@ -378,7 +1309,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -3195,7 +3203,7 @@ index 94f56ae..2454751 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1316,40 @@ async def stream(
+@@ -393,8 +1324,40 @@ async def stream(
                  }
              )
  
@@ -3237,7 +3245,7 @@ index 94f56ae..2454751 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1357,31 @@ async def stream(
+@@ -402,18 +1365,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -3271,7 +3279,7 @@ index 94f56ae..2454751 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1397,164 @@ async def stream(
+@@ -429,21 +1405,164 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -3444,7 +3452,7 @@ index 94f56ae..2454751 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1574,83 @@ async def stream(
+@@ -463,38 +1582,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -3538,7 +3546,7 @@ index 94f56ae..2454751 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1671,10 @@ async def stream(
+@@ -515,6 +1679,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -3549,7 +3557,7 @@ index 94f56ae..2454751 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1682,27 @@ async def stream(
+@@ -522,6 +1690,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -3577,7 +3585,7 @@ index 94f56ae..2454751 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1714,271 @@ async def stream(
+@@ -533,12 +1722,271 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3853,7 +3861,7 @@ index 94f56ae..2454751 100644
  
      has_results = len(final_streams) > 0
  
-@@ -546,3 +1986,12 @@ async def stream(
+@@ -546,3 +1994,12 @@ async def stream(
          {"streams": final_streams},
          is_empty=not has_results,
      )
@@ -8648,10 +8656,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..dea7417
+index 0000000..d34a142
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,4884 @@
+@@ -0,0 +1,4888 @@
 +import asyncio
 +import datetime
 +import json
@@ -12625,7 +12633,11 @@ index 0000000..dea7417
 +                return []
 +            genre = None
 +        else:
-+            if media_type != "movie" or not genre:
++            if media_type != "movie":
++                return []
++            # Apps como o Nuvio abrem o Descobrir sem genero: mostra a primeira saga.
++            genre = genre or (SAGA_OPTIONS[0] if SAGA_OPTIONS else None)
++            if not genre:
 +                return []
 +        skip_raw = extra.get("skip", 0)
 +        try:
@@ -13777,10 +13789,10 @@ index 0000000..4c2b0a7
 +                break
 diff --git a/comet/services/direct_addons.py b/comet/services/direct_addons.py
 new file mode 100644
-index 0000000..4d3a279
+index 0000000..b9eeda2
 --- /dev/null
 +++ b/comet/services/direct_addons.py
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,483 @@
 +import asyncio
 +import random
 +import re
@@ -14162,6 +14174,14 @@ index 0000000..4d3a279
 +            logger.info("🌐 diretos: 0/0")
 +            return []
 +
++        # O lote tem 7 s: valida primeiro os dublados e as maiores resolucoes.
++        def _validation_priority(cand):
++            texto = f"{cand[0].get('name') or ''} {cand[0].get('title') or cand[0].get('description') or ''}"
++            is_pt = any(kw in texto.lower() for kw in PT_KEYWORDS)
++            return (0 if is_pt else 1, RES_RANKS.get(_extract_res(texto), 4))
++
++        raw_candidates.sort(key=_validation_priority)
++
 +        # Validate URLs in parallel (max 8 concurrent, total batch timeout 7.0s)
 +        sem = asyncio.Semaphore(8)
 +
@@ -14257,7 +14277,7 @@ index 0000000..4d3a279
 +        logger.warning(f"fetch_direct_streams unexpected error: {e}")
 +        return []
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
-index b844e5e..55d1183 100644
+index b844e5e..5d084d9 100644
 --- a/comet/services/filtering.py
 +++ b/comet/services/filtering.py
 @@ -1,6 +1,7 @@
@@ -14380,7 +14400,23 @@ index b844e5e..55d1183 100644
  
  if settings.RTN_FILTER_DEBUG:
  
-@@ -96,6 +202,7 @@ class TitleMatcher:
+@@ -89,6 +195,15 @@ def scrub(t: str):
+     return " ".join(normalize_title(t).split())
+ 
+ 
++def _short_title_mismatch(title: str, parsed_title: str) -> bool:
++    """Titulos curtos quase iguais sao obras diferentes (Reacher x Preacher, Fargo x Cargo)."""
++    a = re.sub(r"[^a-z0-9]", "", scrub(title or ""))
++    b = re.sub(r"[^a-z0-9]", "", scrub(parsed_title or ""))
++    if not a or not b or a == b:
++        return False
++    return max(len(a), len(b)) <= 10 and abs(len(a) - len(b)) <= 1
++
++
+ class TitleMatcher:
+     """Prepared title/year matcher shared by live and persisted torrents."""
+ 
+@@ -96,6 +211,7 @@ class TitleMatcher:
          "_matches_cache",
          "aliases",
          "aliases_normalized",
@@ -14388,7 +14424,7 @@ index b844e5e..55d1183 100644
          "max_year",
          "min_year",
          "title",
-@@ -103,17 +210,36 @@ class TitleMatcher:
+@@ -103,17 +219,36 @@ class TitleMatcher:
          "year_end",
      )
  
@@ -14427,7 +14463,7 @@ index b844e5e..55d1183 100644
          )
  
          self.min_year = 0
-@@ -129,6 +255,8 @@ class TitleMatcher:
+@@ -129,8 +264,12 @@ class TitleMatcher:
                  self.max_year = year + 1
  
      def matches_title(self, torrent_title: str, parsed_title: str) -> bool:
@@ -14435,8 +14471,12 @@ index b844e5e..55d1183 100644
 +            return False
          if exact_alias_match(scrub(parsed_title), self.aliases_normalized):
              return True
++        if _short_title_mismatch(self.title, parsed_title):
++            return False
          return title_match(
-@@ -295,10 +423,19 @@ def _do_parse_and_cache(
+             self.title, parsed_title, aliases=self.aliases
+         ) or alternate_title_match(torrent_title, self.title, self.aliases)
+@@ -295,10 +434,19 @@ def _do_parse_and_cache(
  
  
  def filter_worker(
@@ -14458,7 +14498,7 @@ index b844e5e..55d1183 100644
      aliases = matcher.aliases
  
      country_aliases = {}
-@@ -355,6 +492,7 @@ def filter_worker(
+@@ -355,6 +503,7 @@ def filter_worker(
                  )
                  parsed.languages.append(language)
  
