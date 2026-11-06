@@ -1,6 +1,6 @@
 # HANDOFF: Comet Stremio no Galaxy A71 (para outra IA continuar)
 
-*Última atualização: 30/10/2026 (horário de Brasília)*
+*Última atualização: 05/11/2026 (horário de Brasília)*
 
 Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado real verificado, as regras do projeto, como testar e o que vem a seguir**. O `README.md` (Seção 0 e Mapa de arquivos) tem os detalhes da instalação. A Fase 1 (AdGuard) está em `README adguard contexto.md`.
 
@@ -292,6 +292,13 @@ Flags importantes do `.env`:
       - Repasse `/radio/<id>` (http → https para o 4G; HLS reescrito em `.m3u8`). Capa desenhada `/art/radio.png?n=` quando a rádio não tem logo.
       - **Pegadinha:** o `uvloop` não aceita `happy_eyeballs_delay` em `open_connection` (a primeira validação deu 0 rádios); há fallback.
     - **Regress:** `t_livetv` agora reprova canal duplicado e meta com `null`, e testa a opção 1 pelo A71 local.
+32. **Nuvio no Fire TV (05/11/2026):** o usuário testou o app Nuvio (`com.nuvio.tv`, Fire TV `192.168.3.29:5555`, 1.0.0) e pediu para deixá-lo redondo.
+    - **Link próprio:** `NUVIO_LINK_TOKEN` no `.env` (`https://a71comet.duckdns.org:7443/<token>/manifest.json`), mesma config do link pessoal (`is_personal_request`). Instalado na TV; o Stremio segue com o link pessoal, sem mudança. O Nuvio não troca addon de mesmo id: remova o antigo antes de instalar.
+    - **Diferenças em relação ao pessoal (`is_nuvio_request`):** `meta.py` não usa `/art/hero` (o Nuvio escreve logo, notas e elenco por cima e o texto duplicava); `stream.py` não põe `&fix=1` nem o aviso "Começa em EN" e mostra `PT · EN` (`_pt_auto`), porque o Nuvio com a TV em pt-BR escolheu Português sozinho em Reacher, cujo arquivo traz EN primeiro. Teste `t_nuvio` no `regress.py`.
+    - **Conferido na TV:** tela inicial, Sua semana, Chegou dublado, Top 10, Maratonas (toca o filme certo), busca, lista de fontes, legendas, TV (relato do usuário), `Pular Abertura` (introdb.app, em Hunter x Hunter). O cartão "Próximo episódio" mantém a fonte `▶ Assistir`. No fim do episódio o Nuvio pergunta "Continuar assistindo?" e não avança sozinho (ao menos em 20 s).
+    - **Rádio:** o som sai, mas fica em "Iniciando vídeo…", porque a tela de carregamento do Nuvio espera um quadro de vídeo. Vídeo falso exigiria ffmpeg, que o A71 não tem.
+    - **Pendências achadas:** o link direto 480p do `▶ Assistir` em Hunter x Hunter T1:E2 é o anime de 1999 (a série pedida é a de 2011) e travou o player depois de muitos saltos seguidos; Reacher recebe um torrent de Preacher (`Preacher.S01E01...`, título parecido); `Descobrir` → `Sagas` (filme) fica vazio em Destaques; o elenco da página do título vem sem foto.
+    - **Dicas de ADB na TV:** `input keyevent 66` (Enter) abre os botões do player e `23` só pausa; em Fire TV, `input text` embaralha letras no teclado (envie letra por letra); `uiautomator dump` lê os textos do Compose.
 20. **Episódio não lançado (31/10/2026):** VisionQuest E07/E08 (estreia 04/11 e 11/11) recebiam packs da temporada e um link FrostStream "MegaEmbed" falso (só áudio). Agora, em série com data do episódio maior que hoje, o Comet devolve só o aviso `[⏳] Comet` "Episódio ainda não lançado. Estreia em DD/MM/AAAA." (sem links diretos). O `DIGITAL_RELEASE_FILTER` segue desligado (bloquearia filmes de cinema).
 21. **Legenda só sem áudio PT (31/10/2026):** o pedido de legendas devolve vazio quando o arquivo é PT-BR: links diretos PT (ganham `behaviorHints.filename` `<Addon>.direct.PTBR`), nome do arquivo com PT detectado (`apply_ptbr_detection`) ou arquivo que o Comet já marcou 🇧🇷 na lista de streams (memória `remember_pt_filename`, 50 mil nomes; cobre DUAL de fonte BR). Ressalva: essa memória zera quando o Comet reinicia.
 14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
@@ -370,6 +377,8 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 ---
 
 ## 8. Onde paramos e próximo passo
+
+**Estado (05/11/2026, noite):** item 32 (Nuvio) rodando no A71. Pendências no fim do item 32. `data/smoke.disable` removido.
 
 **Estado (03/11/2026, manhã):**
 - O item 31 (PT padrão, gosto, TV reformulada, rádios, DNS) está rodando no A71 e no GitHub.

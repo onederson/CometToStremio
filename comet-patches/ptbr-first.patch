@@ -257,7 +257,7 @@ index 0000000..1fdce15
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..bed4c9c
+index 0000000..dfd0fd6
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
 @@ -0,0 +1,208 @@
@@ -265,7 +265,7 @@ index 0000000..bed4c9c
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
 +
-+from comet.core.config_validation import config_check, is_kids_request
++from comet.core.config_validation import config_check, is_kids_request, is_personal_request
 +from comet.core.logger import logger
 +from comet.core.models import settings
 +from comet.services.catalogs import get_catalog
@@ -415,7 +415,7 @@ index 0000000..bed4c9c
 +
 +        base_url = (getattr(settings, "PUBLIC_BASE_URL", None) or f"{request.url.scheme}://{request.url.netloc}").rstrip("/")
 +        kids = is_kids_request(b64config)
-+        is_personal = bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
++        is_personal = is_personal_request(b64config)
 +        if id in ("comet_livetv", "comet_livehome", "comet_radio") and b64config is not None and not is_personal and not kids:
 +            return JSONResponse(
 +                content={"metas": []},
@@ -564,7 +564,7 @@ index 0000000..6808008
 +    from comet.services.radio import relay_radio
 +    return await relay_radio(station_id, request)
 diff --git a/comet/api/endpoints/manifest.py b/comet/api/endpoints/manifest.py
-index bce0fec..ae04666 100644
+index bce0fec..bce38a9 100644
 --- a/comet/api/endpoints/manifest.py
 +++ b/comet/api/endpoints/manifest.py
 @@ -1,8 +1,12 @@
@@ -574,7 +574,7 @@ index bce0fec..ae04666 100644
  from fastapi import APIRouter, Request
  
 -from comet.core.config_validation import config_check
-+from comet.core.config_validation import config_check, is_kids_request
++from comet.core.config_validation import config_check, is_kids_request, is_personal_request
  from comet.core.models import settings
  from comet.debrid.manager import build_addon_name
 +from comet.services.catalogs import build_manifest_catalogs
@@ -608,7 +608,7 @@ index bce0fec..ae04666 100644
 +        )
 +
 +    kids = is_kids_request(b64config)
-+    is_personal = bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
++    is_personal = is_personal_request(b64config)
 +    meta_prefixes = ["tt", "cometlive:", "cometsaga:"] if getattr(settings, "LIVE_TV", True) else ["tt", "cometsaga:"]
 +    if kids:
 +        base_manifest["id"] = f"{settings.ADDON_ID}.kids"
@@ -660,27 +660,28 @@ index bce0fec..ae04666 100644
          request,
 diff --git a/comet/api/endpoints/meta.py b/comet/api/endpoints/meta.py
 new file mode 100644
-index 0000000..910109a
+index 0000000..6977175
 --- /dev/null
 +++ b/comet/api/endpoints/meta.py
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,160 @@
 +import asyncio
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
 +
-+from comet.core.config_validation import config_check
++from comet.core.config_validation import config_check, is_nuvio_request
 +from comet.core.logger import logger
 +from comet.services.meta_ptbr import get_meta_ptbr
 +
 +router = APIRouter()
 +
 +
-+async def _apply_live_art(meta: dict, mtype: str, imdb: str) -> dict:
++async def _apply_live_art(meta: dict, mtype: str, imdb: str, clean_background: bool = False) -> dict:
 +    """Fundo editorial (capa viva) e selos nas miniaturas dos episódios."""
 +    from comet.services.live_art_svc import ep_url, hero_url
 +    meta = dict(meta)
 +    _orig_bg = meta.get("background")
-+    if meta.get("background"):
++    # O Nuvio desenha logo, notas e elenco por cima do fundo: a arte com texto duplicaria tudo.
++    if meta.get("background") and not clean_background:
 +        meta["background"] = hero_url(mtype, imdb)
 +    vids = meta.get("videos")
 +    if mtype == "series" and isinstance(vids, list) and vids:
@@ -808,7 +809,7 @@ index 0000000..910109a
 +            except Exception:
 +                pass
 +            try:
-+                meta = await _apply_live_art(meta, type, clean_id.split(":")[0])
++                meta = await _apply_live_art(meta, type, clean_id.split(":")[0], clean_background=is_nuvio_request(b64config))
 +            except Exception as _la_err:
 +                logger.debug(f"live art meta: {_la_err}")
 +        return JSONResponse(
@@ -2022,7 +2023,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..f0056b5 100644
+index 94f56ae..2454751 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -2035,15 +2036,16 @@ index 94f56ae..f0056b5 100644
  
  from fastapi import APIRouter, BackgroundTasks, Request
  
+-from comet.core.config_validation import config_check
+-from comet.core.models import settings
+-from comet.debrid.manager import get_debrid_extension
 +from comet.api.endpoints.playback import (
 +    _cache_download_link_safely,
 +    _valid_download_url,
 +    set_preresolved_link,
 +)
 +from comet.core.logger import logger
- from comet.core.config_validation import config_check
--from comet.core.models import settings
--from comet.debrid.manager import get_debrid_extension
++from comet.core.config_validation import config_check, is_nuvio_request
 +from comet.core.database import (
 +    build_json_list_membership_predicate,
 +    encode_json_param,
@@ -3575,7 +3577,7 @@ index 94f56ae..f0056b5 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1714,267 @@ async def stream(
+@@ -533,12 +1714,271 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3620,7 +3622,11 @@ index 94f56ae..f0056b5 100644
 +                        p_res = probe_map.get((info["info_hash"].lower(), str(f_name)))
 +                    _mi = media_map.get((info["info_hash"].lower(), f_key)) or media_map.get((info["info_hash"].lower(), "n"))
 +                    if _mi:
-+                        if _mi.get("pt_fix") and not _is_remote_req and float(_mi.get("bitrate_mbps") or 0) <= 30 \
++                        if is_nuvio_request(b64config):
++                            # O Nuvio escolhe a faixa em PT sozinho: sem aviso e sem repassar o video pelo A71.
++                            if _mi.get("pt_audio") and not _mi.get("pt_is_default"):
++                                _mi = {**_mi, "pt_is_default": True, "_pt_auto": True}
++                        elif _mi.get("pt_fix") and not _is_remote_req and float(_mi.get("bitrate_mbps") or 0) <= 30 \
 +                                and "url" in s_dict and "&fix=1" not in s_dict["url"]:
 +                            s_dict["url"] = s_dict["url"] + "&fix=1"
 +                            _mi = {**_mi, "pt_is_default": True, "_pt_fixed": True}
@@ -3847,7 +3853,7 @@ index 94f56ae..f0056b5 100644
  
      has_results = len(final_streams) > 0
  
-@@ -546,3 +1982,12 @@ async def stream(
+@@ -546,3 +1986,12 @@ async def stream(
          {"streams": final_streams},
          is_empty=not has_results,
      )
@@ -4516,10 +4522,10 @@ index 0000000..eea7d2f
 +            )
 +        return res
 diff --git a/comet/core/config_validation.py b/comet/core/config_validation.py
-index 44bf701..6524e2f 100644
+index 44bf701..3722421 100644
 --- a/comet/core/config_validation.py
 +++ b/comet/core/config_validation.py
-@@ -112,12 +112,62 @@ def _parse_and_validate_config(b64config: str):
+@@ -112,12 +112,73 @@ def _parse_and_validate_config(b64config: str):
          return None
  
  
@@ -4527,6 +4533,21 @@ index 44bf701..6524e2f 100644
 +    if not b64config or not settings.KIDS_LINK_TOKEN:
 +        return False
 +    return b64config == settings.KIDS_LINK_TOKEN
++
++
++def is_nuvio_request(b64config: str | None) -> bool:
++    """Link do app Nuvio: igual ao pessoal, mas sem arte com texto no fundo."""
++    if not b64config or not settings.NUVIO_LINK_TOKEN:
++        return False
++    return b64config == settings.NUVIO_LINK_TOKEN
++
++
++def is_personal_request(b64config: str | None) -> bool:
++    if not b64config:
++        return False
++    if is_nuvio_request(b64config):
++        return True
++    return bool(settings.PERSONAL_LINK_TOKEN and b64config == settings.PERSONAL_LINK_TOKEN)
 +
 +
  def config_check(b64config: str | None, strict_b64config: bool = False):
@@ -4542,11 +4563,7 @@ index 44bf701..6524e2f 100644
 +        b64config = settings.PERSONAL_LINK_CONFIG
 +        is_token = True
 +    # Link pessoal: o token curto do .env vale pela config completa salva no servidor.
-+    elif (
-+        settings.PERSONAL_LINK_TOKEN
-+        and settings.PERSONAL_LINK_CONFIG
-+        and b64config == settings.PERSONAL_LINK_TOKEN
-+    ):
++    elif settings.PERSONAL_LINK_CONFIG and is_personal_request(b64config):
 +        b64config = settings.PERSONAL_LINK_CONFIG
 +        is_token = True
 +
@@ -4739,7 +4756,7 @@ index 88b8606..796cafe 100644
 +        "swaps_451": swaps_451,
 +    }
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..49f7d99 100644
+index 835a975..51135da 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4767,17 +4784,18 @@ index 835a975..49f7d99 100644
      CUSTOM_HEADER_HTML: str | None = None
      PROXY_DEBRID_STREAM: bool | None = False
      PROXY_DEBRID_STREAM_PASSWORD: str | None = Field(default_factory=_generate_secret)
-@@ -268,6 +279,9 @@ class AppSettings(ServerSettings):
+@@ -268,6 +279,10 @@ class AppSettings(ServerSettings):
      )
      TORRENT_DISABLED_STREAM_URL: str | None = "https://comet.feels.legal"
      PUBLIC_BASE_URL: str | None = None
 +    PERSONAL_LINK_TOKEN: str | None = None
 +    PERSONAL_LINK_CONFIG: str | None = None
 +    KIDS_LINK_TOKEN: str | None = None
++    NUVIO_LINK_TOKEN: str | None = None
      REMOVE_ADULT_CONTENT: bool | None = False
      BACKGROUND_SCRAPER_ENABLED: bool | None = False
      BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
-@@ -317,6 +331,53 @@ class AppSettings(ServerSettings):
+@@ -317,6 +332,53 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -4831,7 +4849,7 @@ index 835a975..49f7d99 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +714,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +715,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -17657,10 +17675,10 @@ index 0000000..017e3f2
 +    return meta_id.startswith(("cometsaga:o-", "cometsaga:c-", "cometsaga:w-"))
 diff --git a/comet/services/media_info.py b/comet/services/media_info.py
 new file mode 100644
-index 0000000..97707ed
+index 0000000..288252e
 --- /dev/null
 +++ b/comet/services/media_info.py
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,184 @@
 +"""Qualidade de verdade: lê o cabeçalho do arquivo (MKV/MP4) e guarda o resumo (vídeo, HDR/DV, bitrate,
 +faixas de áudio e qual é a padrão). Usa comet/services/media_probe.py (Python puro).
 +
@@ -17829,6 +17847,11 @@ index 0000000..97707ed
 +        _parts = [p.replace(" padrão", "").strip() for p in _aud.replace("🔊", "").split(" · ") if p.strip()]
 +        _others = [p for p in _parts if not p.upper().startswith("PT")]
 +        _aud = _pre + " · ".join(["PT padrão (ajustado pelo Comet)"] + _others)
++    if summary.get("_pt_auto") and _aud:
++        _pre = "🔊 " if _aud.startswith("🔊") else ""
++        _parts = [p.replace(" padrão", "").strip() for p in _aud.replace("🔊", "").split(" · ") if p.strip()]
++        _others = [p for p in _parts if not p.upper().startswith("PT")]
++        _aud = _pre + " · ".join(["PT"] + _others)
 +    return {"video": lb.get("video"), "audio": _aud, "warnings": lb.get("warnings") or []}
 +
 +

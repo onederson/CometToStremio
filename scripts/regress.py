@@ -1411,6 +1411,30 @@ def t_notas(token: str) -> tuple[str, str]:
     return "PASS", first[:90]
 
 
+def t_nuvio(token: str, nuvio_token: str) -> tuple[str, str]:
+    """Link do Nuvio: mesmas fileiras do pessoal, fundo sem texto e sem repasse fix=1."""
+    if not nuvio_token:
+        return "WARN", "NUVIO_LINK_TOKEN não configurado"
+    with get_client(timeout=60.0) as client:
+        a = client.get(f"/{nuvio_token}/manifest.json").json()
+        b = client.get(f"/{token}/manifest.json").json()
+        if [c.get("id") for c in a.get("catalogs", [])] != [c.get("id") for c in b.get("catalogs", [])]:
+            return "FAIL", "fileiras diferentes do link pessoal"
+        bg_n = ((client.get(f"/{nuvio_token}/meta/movie/tt0816692.json").json().get("meta") or {}).get("background") or "")
+        bg_p = ((client.get(f"/{token}/meta/movie/tt0816692.json").json().get("meta") or {}).get("background") or "")
+        if "/art/hero" in bg_n:
+            return "FAIL", "Nuvio recebeu a arte com texto no fundo"
+        if "/art/hero" not in bg_p:
+            return "FAIL", "link pessoal perdeu a arte do fundo"
+        st = client.get(f"/{nuvio_token}/stream/series/tt0944947:1:1.json").json().get("streams") or []
+    if not st:
+        return "FAIL", "sem streams"
+    if any("fix=1" in (s.get("url") or "") for s in st):
+        return "FAIL", "Nuvio recebeu fonte com fix=1"
+    if any("Começa em" in (s.get("description") or "") for s in st):
+        return "FAIL", "aviso de faixa no Nuvio"
+    return "PASS", f"{len(a.get('catalogs', []))} fileiras, fundo limpo, {len(st)} fontes sem fix=1"
+
 
 # =====================================================================
 # Runner Principal
@@ -1428,6 +1452,7 @@ def main():
     env = load_env()
     token = env.get("PERSONAL_LINK_TOKEN", "")
     kids_token = env.get("KIDS_LINK_TOKEN", "")
+    nuvio_token = env.get("NUVIO_LINK_TOKEN", "")
     public_base = env.get("PUBLIC_BASE_URL", "").rstrip("/")
     tokens_to_sanitize = get_sensitive_tokens(env)
 
@@ -1527,6 +1552,7 @@ def main():
         ("saga", lambda: t_saga(token, public_base)),
         ("fileiras_novas", lambda: t_fileiras_novas(token)),
         ("notas", lambda: t_notas(token)),
+        ("nuvio", lambda: t_nuvio(token, nuvio_token)),
         ("geracional", lambda: t_geracional(token)),
     ]
 
