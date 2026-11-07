@@ -19151,10 +19151,10 @@ index a111c8c..631dd5b 100644
          cached_count = sum(
 diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
 new file mode 100644
-index 0000000..3ed664d
+index 0000000..5c305e2
 --- /dev/null
 +++ b/comet/services/meta_ptbr.py
-@@ -0,0 +1,606 @@
+@@ -0,0 +1,735 @@
 +import asyncio
 +import copy
 +import re
@@ -19279,6 +19279,108 @@ index 0000000..3ed664d
 +            if trailer_streams:
 +                base_meta["trailerStreams"] = trailer_streams
 +                base_meta["trailers"] = trailers
++
++
++def _overlay_episode(v: dict, tmdb_ep: dict) -> None:
++    """Põe nome e sinopse PT-BR do TMDB no episódio do Cinemeta."""
++    ep_name = (tmdb_ep.get("name") or "").strip()
++    if ep_name and not _is_generic_title(ep_name):
++        v["name"] = ep_name
++        v["title"] = ep_name
++    ep_overview = (tmdb_ep.get("overview") or "").strip()
++    if ep_overview:
++        v["overview"] = ep_overview
++        if "description" in v:
++            v["description"] = ep_overview
++
++
++def _ep_sort_key(v: dict) -> tuple[int, int]:
++    try:
++        return int(v.get("season") or 0), int(v.get("episode") or v.get("number") or 0)
++    except (TypeError, ValueError):
++        return 0, 0
++
++
++def _parse_day(value) -> "datetime.date | None":
++    import datetime
++
++    if not isinstance(value, str) or len(value) < 10:
++        return None
++    try:
++        return datetime.date.fromisoformat(value[:10])
++    except ValueError:
++        return None
++
++
++def _overlay_mismatched_seasons(
++    cinemeta_videos: list, tmdb_seasons: list[list[dict]], pending_seasons: set[int]
++) -> int:
++    """Traduz episódios cujas temporadas o Cinemeta e o TMDB dividem diferente.
++
++    1) Mesmo total de episódios (fora especiais): casa pela ordem geral.
++    2) Senão: casa pela data de lançamento (tolerância de 1 dia por causa do
++       fuso), só quando a data aponta para um único episódio do TMDB.
++    """
++    import datetime
++
++    cm_all = sorted(
++        (
++            v
++            for v in cinemeta_videos
++            if isinstance(v, dict) and _ep_sort_key(v)[0] >= 1
++        ),
++        key=_ep_sort_key,
++    )
++    tmdb_all = [ep for season in tmdb_seasons for ep in season]
++    if not cm_all or not tmdb_all:
++        return 0
++
++    applied = 0
++    if len(cm_all) == len(tmdb_all):
++        for v, ep in zip(cm_all, tmdb_all):
++            if _ep_sort_key(v)[0] in pending_seasons:
++                _overlay_episode(v, ep)
++                applied += 1
++        return applied
++
++    by_day: dict = {}
++    for i, ep in enumerate(tmdb_all):
++        d = _parse_day(ep.get("air_date"))
++        if d:
++            by_day.setdefault(d, []).append(i)
++    cm_days: dict = {}
++    for v in cm_all:
++        d = _parse_day(v.get("released") or v.get("firstAired"))
++        if d:
++            cm_days[d] = cm_days.get(d, 0) + 1
++
++    used: set[int] = set()
++    one_day = datetime.timedelta(days=1)
++    for v in cm_all:
++        if _ep_sort_key(v)[0] not in pending_seasons:
++            continue
++        d = _parse_day(v.get("released") or v.get("firstAired"))
++        if not d or cm_days.get(d, 0) != 1:
++            continue
++        exact = [i for i in by_day.get(d, []) if i not in used]
++        if len(exact) == 1:
++            pick = exact[0]
++        elif not exact:
++            near = [
++                i
++                for dd in (d - one_day, d + one_day)
++                for i in by_day.get(dd, [])
++                if i not in used
++            ]
++            if len(near) != 1 or cm_days.get(d - one_day, 0) or cm_days.get(d + one_day, 0):
++                continue
++            pick = near[0]
++        else:
++            continue
++        used.add(pick)
++        _overlay_episode(v, tmdb_all[pick])
++        applied += 1
++    return applied
 +
 +
 +def _extract_movie_rating(tmdb_movie: dict) -> str | None:
@@ -19592,54 +19694,81 @@ index 0000000..3ed664d
 +                                pass
 +
 +                    sem = asyncio.Semaphore(5)
++                    tmdb_season_eps: dict[int, list[dict]] = {}
++                    done_seasons: set[int] = set()
 +
-+                    async def fetch_and_overlay_season(season_num: int):
++                    async def fetch_tmdb_season(season_num: int) -> list[dict] | None:
++                        if season_num in tmdb_season_eps:
++                            return tmdb_season_eps[season_num]
 +                        async with sem:
 +                            s_data = await tmdb._get_json(
 +                                f"tv/{tmdb_id}/season/{season_num}?language=pt-BR",
 +                                f"tv season {tmdb_id}:{season_num}",
 +                            )
-+                            if not isinstance(s_data, dict):
-+                                return
-+                            tmdb_episodes = s_data.get("episodes")
-+                            if not isinstance(tmdb_episodes, list):
-+                                return
++                        if not isinstance(s_data, dict):
++                            return None
++                        eps = s_data.get("episodes")
++                        if not isinstance(eps, list):
++                            return None
++                        eps = [e for e in eps if isinstance(e, dict)]
++                        tmdb_season_eps[season_num] = eps
++                        return eps
 +
-+                            cm_season_videos = [
-+                                v
-+                                for v in cinemeta_videos
-+                                if isinstance(v, dict) and v.get("season") == season_num
-+                            ]
-+                            if len(tmdb_episodes) != len(cm_season_videos):
-+                                return
++                    async def fetch_and_overlay_season(season_num: int):
++                        tmdb_episodes = await fetch_tmdb_season(season_num)
++                        if not tmdb_episodes:
++                            return
 +
-+                            tmdb_ep_map = {}
-+                            for ep in tmdb_episodes:
-+                                if isinstance(ep, dict):
-+                                    ep_num = ep.get("episode_number")
-+                                    if ep_num is not None:
-+                                        tmdb_ep_map[ep_num] = ep
++                        cm_season_videos = [
++                            v
++                            for v in cinemeta_videos
++                            if isinstance(v, dict) and v.get("season") == season_num
++                        ]
++                        # Temporadas divididas de outro jeito (comum em anime) são
++                        # tratadas depois, pela ordem geral ou pela data.
++                        if len(tmdb_episodes) != len(cm_season_videos):
++                            return
 +
-+                            for v in cm_season_videos:
-+                                ep_num = v.get("episode")
-+                                tmdb_ep = tmdb_ep_map.get(ep_num)
-+                                if tmdb_ep:
-+                                    ep_name = (tmdb_ep.get("name") or "").strip()
-+                                    if ep_name and not _is_generic_title(ep_name):
-+                                        v["name"] = ep_name
-+                                        v["title"] = ep_name
-+                                    ep_overview = (
-+                                        tmdb_ep.get("overview") or ""
-+                                    ).strip()
-+                                    if ep_overview:
-+                                        v["overview"] = ep_overview
-+                                        if "description" in v:
-+                                            v["description"] = ep_overview
++                        # Mesma quantidade: casa pela ordem (o TMDB às vezes numera
++                        # a temporada de forma absoluta, ex.: 137-148).
++                        tmdb_sorted = sorted(
++                            tmdb_episodes,
++                            key=lambda e: e.get("episode_number") or 0,
++                        )
++                        for v, tmdb_ep in zip(
++                            sorted(cm_season_videos, key=_ep_sort_key), tmdb_sorted
++                        ):
++                            _overlay_episode(v, tmdb_ep)
++                        done_seasons.add(season_num)
 +
 +                    await asyncio.gather(
 +                        *[fetch_and_overlay_season(s) for s in sorted(seasons_set)],
 +                        return_exceptions=True,
 +                    )
++
++                    try:
++                        pending_seasons = seasons_set - done_seasons
++                        if pending_seasons and isinstance(tmdb_tv, dict):
++                            tmdb_season_nums = sorted(
++                                int(s.get("season_number"))
++                                for s in (tmdb_tv.get("seasons") or [])
++                                if isinstance(s, dict)
++                                and isinstance(s.get("season_number"), int)
++                                and s.get("season_number") >= 1
++                            )
++                            await asyncio.gather(
++                                *[fetch_tmdb_season(s) for s in tmdb_season_nums],
++                                return_exceptions=True,
++                            )
++                            _overlay_mismatched_seasons(
++                                cinemeta_videos,
++                                [tmdb_season_eps.get(s) or [] for s in tmdb_season_nums],
++                                pending_seasons,
++                            )
++                    except Exception as e:
++                        logger.warning(
++                            f"Error matching mismatched seasons for {media_id}: {e}"
++                        )
 +
 +                    # 1. "Previamente em..." no 1º episódio de cada temporada >= 2
 +                    try:

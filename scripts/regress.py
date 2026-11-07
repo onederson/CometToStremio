@@ -276,6 +276,30 @@ def t_unit_predownload_pick() -> tuple[str, str]:
     return "PASS", "escolhe PT ⬇️ certo; pula PT pronto, link direto PT, sem PT e > 15 GB"
 
 
+def t_unit_episodios_ptbr() -> tuple[str, str]:
+    from comet.services.meta_ptbr import _overlay_mismatched_seasons as overlay
+    # Mesmo total (anime com temporadas divididas diferente): casa pela ordem geral.
+    cm = [{"season": 1, "episode": i, "name": f"EN {i}", "overview": "x", "description": "x"} for i in (1, 2, 3)]
+    cm += [{"season": 2, "episode": 1, "name": "EN 4", "overview": "x"}]
+    tm = [[{"name": f"PT {i}", "overview": f"pt {i}"} for i in (1, 2)], [{"name": f"PT {i}", "overview": f"pt {i}"} for i in (3, 4)]]
+    assert overlay(cm, tm, {1, 2}) == 4
+    assert [v["name"] for v in cm] == ["PT 1", "PT 2", "PT 3", "PT 4"], cm
+    assert cm[0]["description"] == "pt 1"
+    # Total diferente: casa pela data (1 dia de folga), sem repetir episódio.
+    cm = [
+        {"season": 1, "episode": 1, "name": "A", "released": "2020-01-01T05:00:00.000Z"},
+        {"season": 1, "episode": 2, "name": "B", "released": "2020-01-08T05:00:00.000Z"},
+        {"season": 1, "episode": 3, "name": "C", "released": "2020-02-01T05:00:00.000Z"},
+    ]
+    tm = [[
+        {"name": "PT A", "overview": "a", "air_date": "2020-01-02"},
+        {"name": "PT B", "overview": "b", "air_date": "2020-01-08"},
+    ]]
+    assert overlay(cm, tm, {1}) == 2
+    assert [v["name"] for v in cm] == ["PT A", "PT B", "C"], cm
+    return "PASS", "temporadas divididas diferente: casa pela ordem e, sem total igual, pela data"
+
+
 def t_unit_source_breaker() -> tuple[str, str]:
     from comet.core import breaker
     breaker.reset()
@@ -1501,6 +1525,7 @@ def main():
         ("unit_merge_aliases", t_unit_merge_aliases),
         ("unit_source_breaker", t_unit_source_breaker),
         ("unit_predownload_pick", t_unit_predownload_pick),
+        ("unit_episodios_ptbr", t_unit_episodios_ptbr),
     ]
 
     all_results = []
