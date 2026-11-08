@@ -303,7 +303,8 @@ def t_unit_episodios_ptbr() -> tuple[str, str]:
 def t_unit_nuvio_4k_natal() -> tuple[str, str]:
     import datetime as _dt
     from comet.api.endpoints.stream import _apply_clean_layout
-    from comet.services.catalogs import _xmas_year, _xmas_catalogs, _raw_build_tmdb_path_and_params
+    from comet.services.catalogs import _raw_build_tmdb_path_and_params, build_manifest_catalogs
+    from comet.services.seasonal import seasonal_catalogs, _easter, SEASONS
 
     def cand(res, has_pt, size_gb, is_pt=True, h="a"):
         info = {"kind": "rd", "cached": True, "is_pt": is_pt, "has_pt": has_pt, "resolution": res,
@@ -323,14 +324,28 @@ def t_unit_nuvio_4k_natal() -> tuple[str, str]:
     so_original = [cand("1080p", 0, 3, is_pt=False, h="a"), cand("2160p", 0, 20, is_pt=False, h="b")]
     assert pick(so_original, prefer_4k=True) == "2160p", "sem PT: melhor original"
 
-    assert _xmas_year(_dt.date(2026, 11, 7)) == 2026
-    assert _xmas_year(_dt.date(2027, 1, 3)) == 2026
-    assert _xmas_year(_dt.date(2026, 7, 1)) is None and _xmas_catalogs(_dt.date(2026, 7, 1)) == []
-    ids = [c["id"] for c in _xmas_catalogs(_dt.date(2026, 12, 1))]
-    assert ids == ["comet_xmas_new", "comet_xmas_all"], ids
+    def hot(d):
+        return [c["id"] for c in seasonal_catalogs(_dt.date.fromisoformat(d))[0]]
+
+    assert _easter(2027) == _dt.date(2027, 3, 28) and _easter(2026) == _dt.date(2026, 4, 5)
+    assert hot("2026-11-08") == ["comet_xmas_new", "comet_xmas_all"]
+    assert hot("2026-12-31")[:2] == ["comet_xmas_new", "comet_xmas_all"] and "comet_newyear" in hot("2026-12-31")
+    assert "comet_xmas_new" not in hot("2027-01-02"), "Natal desce depois de 31/dez"
+    assert hot("2026-10-05") == ["comet_kidsday", "comet_hallo_new", "comet_hallo_all"]
+    assert hot("2026-11-01")[:2] == ["comet_xmas_new", "comet_xmas_all"] and "comet_hallo_new" not in hot("2026-11-01")
+    assert hot("2027-07-10") == []
+    allc = seasonal_catalogs(_dt.date(2027, 7, 10))[1]
+    assert allc[0]["id"] == "comet_dad", "fora de época: próxima data primeiro"
+    assert [c["name"] for c in allc if c["id"] == "comet_xmas_new"] == ["🎄 Filmes novos de Natal (2026)"]
+    cats = build_manifest_catalogs(is_personal=True)
+    ids = [c["id"] for c in cats]
+    t10 = max(i for i, x in enumerate(ids) if x == "comet_top10")
+    assert set(ids) >= {s["id"] for ss in SEASONS for s in ss["lists"]}
+    for h in hot(_dt.date.today().isoformat()):
+        assert ids.index(h) <= t10 + 4, f"{h} em destaque deveria ficar logo depois do Top 10"
     _, p = _raw_build_tmdb_path_and_params("movie", "comet_xmas_all", None, 1)
     assert p["with_keywords"] == 207317 and p["sort_by"] == "primary_release_date.desc"
-    return "PASS", "Nuvio: 4K PT > 1080p PT > melhor original; listas de Natal só na temporada"
+    return "PASS", "Nuvio: 4K PT > 1080p PT > melhor original; datas comemorativas sobem perto da data"
 
 
 def t_unit_source_breaker() -> tuple[str, str]:

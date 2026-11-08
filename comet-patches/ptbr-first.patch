@@ -8664,10 +8664,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..7da43b3
+index 0000000..9a76be9
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,4941 @@
+@@ -0,0 +1,4901 @@
 +import asyncio
 +import datetime
 +import json
@@ -8916,34 +8916,7 @@ index 0000000..7da43b3
 +    return list(PROVIDERS.keys())
 +
 +
-+def _xmas_year(today: datetime.date | None = None) -> int | None:
-+    """Ano dos "lançamentos de Natal" na temporada (1/nov a 6/jan); fora dela, None."""
-+    today = today or datetime.date.today()
-+    if today.month >= 11:
-+        return today.year
-+    if today.month == 1 and today.day <= 6:
-+        return today.year - 1
-+    return None
-+
-+
-+def _xmas_catalogs(today: datetime.date | None = None) -> list[dict]:
-+    year = _xmas_year(today)
-+    if year is None:
-+        return []
-+    return [
-+        {
-+            "type": "movie",
-+            "id": "comet_xmas_new",
-+            "name": f"🎄 Filmes novos de Natal ({year})",
-+            "extra": [{"name": "skip", "isRequired": False}],
-+        },
-+        {
-+            "type": "movie",
-+            "id": "comet_xmas_all",
-+            "name": f"🎅 Natal de {year - 1} para trás",
-+            "extra": [{"name": "skip", "isRequired": False}],
-+        },
-+    ]
++from comet.services import seasonal as _seasonal
 +
 +
 +def build_manifest_catalogs(kids: bool = False, is_personal: bool = True) -> list[dict]:
@@ -9162,7 +9135,6 @@ index 0000000..7da43b3
 +                {"name": "skip", "isRequired": False},
 +            ],
 +        },
-+        *_xmas_catalogs(),
 +        # 4. ⚡ Pronto dublado filme, série
 +        {
 +            "type": "movie",
@@ -9668,6 +9640,11 @@ index 0000000..7da43b3
 +            }
 +        )
 +
++    _hot, _cold = _seasonal.seasonal_catalogs()
++    _t10 = max((i for i, c in enumerate(catalogs) if c.get("id") == "comet_top10"), default=-1)
++    catalogs[_t10 + 1:_t10 + 1] = _hot
++    catalogs.extend(_cold)
++
 +    if is_personal and not kids and getattr(settings, "PREVIEW_TEST_ROW", True):
 +        catalogs.insert(
 +            0,
@@ -9753,27 +9730,8 @@ index 0000000..7da43b3
 +            "page": page,
 +        }
 +
-+    if catalog_id in ("comet_xmas_new", "comet_xmas_all"):
-+        # Palavra-chave "christmas" do TMDB (207317)
-+        year = _xmas_year(today) or today.year
-+        if media_type != "movie":
-+            return None
-+        params = {
-+            "with_keywords": 207317,
-+            "language": language,
-+            "page": page,
-+            "sort_by": "primary_release_date.desc",
-+        }
-+        if catalog_id == "comet_xmas_new":
-+            # Filmes de Natal do ano, conforme vão sendo lançados
-+            params["primary_release_date.gte"] = f"{year}-01-01"
-+            params["primary_release_date.lte"] = min(today_str, f"{year}-12-31")
-+            params["vote_count.gte"] = 2
-+        else:
-+            # Todos os anteriores, do ano mais novo para o mais antigo
-+            params["primary_release_date.lte"] = f"{year - 1}-12-31"
-+            params["vote_count.gte"] = 20
-+        return "discover/movie", params
++    if _seasonal.is_seasonal(catalog_id):
++        return _seasonal.tmdb_query(catalog_id, media_type, language, page, today)
 +
 +    if catalog_id == "comet_top10":
 +        path = f"trending/{tmdb_type}/day"
@@ -10225,7 +10183,7 @@ index 0000000..7da43b3
 +        seen_tmdb_ids = set()
 +        today_str = datetime.date.today().isoformat()
 +        is_lancamentos = (
-+            genre in ("Lançamentos", "Lancamentos") or catalog_id in ("comet_new", "comet_xmas_new")
++            genre in ("Lançamentos", "Lancamentos") or (catalog_id == "comet_new" or _seasonal.is_new_list(catalog_id))
 +        )
 +
 +        for item in raw_items:
@@ -12712,7 +12670,9 @@ index 0000000..7da43b3
 +        try:
 +            async with asyncio.timeout(10.0):
 +                metas = await _fetch_saga_items(genre, skip)
-+                if metas:
++                # Fileira de Sagas incompleta (o TMDB não respondeu a tempo): não guarda
++                complete = genre is not None or len(metas) >= len(SAGAS[skip : skip + 40])
++                if metas and complete:
 +                    _set_cached_catalog(cache_key, metas)
 +                return metas
 +        except TimeoutError:
@@ -23450,6 +23410,225 @@ index 0000000..07c85af
 +            await _worker_task
 +        except asyncio.CancelledError:
 +            pass
+diff --git a/comet/services/seasonal.py b/comet/services/seasonal.py
+new file mode 100644
+index 0000000..98802c9
+--- /dev/null
++++ b/comet/services/seasonal.py
+@@ -0,0 +1,213 @@
++"""Listas de datas comemorativas (Natal, Halloween, Páscoa...).
++
++Cada data tem uma "janela de destaque". Dentro dela, as listas sobem para logo
++depois do Top 10. Fora dela, ficam no fim da tela inicial, em ordem da próxima data.
++"""
++
++import datetime
++
++_D = datetime.date
++_TD = datetime.timedelta
++
++
++def _easter(year: int) -> datetime.date:
++    """Domingo de Páscoa (algoritmo gregoriano anônimo)."""
++    a = year % 19
++    b, c = divmod(year, 100)
++    d, e = divmod(b, 4)
++    f = (b + 8) // 25
++    g = (b - f + 1) // 3
++    h = (19 * a + b - d - g + 15) % 30
++    i, k = divmod(c, 4)
++    l = (32 + 2 * e + 2 * i - h - k) % 7
++    m = (a + 11 * h + 22 * l) // 451
++    month, day = divmod(h + l - 7 * m + 114, 31)
++    return _D(year, month, day + 1)
++
++
++def _second_sunday(year: int, month: int) -> datetime.date:
++    first = _D(year, month, 1)
++    return first + _TD(days=(6 - first.weekday()) % 7 + 7)
++
++
++# Gêneros do TMDB que não combinam com datas em família
++_DARK = "27,53,80"
++
++# id -> data(ano), dias de destaque antes/depois e as listas.
++# Cada lista: id do catálogo, nome ({y} = ano da data, {p} = ano anterior), tipo e filtro do TMDB.
++SEASONS = [
++    {
++        "key": "natal",
++        "date": lambda y: _D(y, 12, 25),
++        "before": 54,  # desde 1/nov
++        "after": 6,  # até 31/dez
++        "lists": [
++            {"id": "comet_xmas_new", "name": "🎄 Filmes novos de Natal ({y})", "mode": "new",
++             "params": {"with_keywords": 207317}},
++            {"id": "comet_xmas_all", "name": "🎅 Natal de {p} para trás", "mode": "byyear",
++             "params": {"with_keywords": 207317}},
++        ],
++    },
++    {
++        "key": "anonovo",
++        "date": lambda y: _D(y, 1, 1),
++        "before": 6,  # 26/dez a 1/jan
++        "after": 0,
++        "lists": [
++            {"id": "comet_newyear", "name": "🎆 Filmes com virada de ano", "mode": "popular",
++             "params": {"with_keywords": 613, "vote_count.gte": 300}},
++        ],
++    },
++    {
++        "key": "pascoa",
++        "date": _easter,
++        "before": 21,
++        "after": 0,
++        "lists": [
++            {"id": "comet_easter", "name": "🐰 Filmes de Páscoa", "mode": "popular",
++             "params": {"with_keywords": 9921, "vote_count.gte": 5}},
++        ],
++    },
++    {
++        "key": "maes",
++        "date": lambda y: _second_sunday(y, 5),
++        "before": 14,
++        "after": 0,
++        "lists": [
++            {"id": "comet_mom", "name": "💐 Filmes para o Dia das Mães", "mode": "popular",
++             "params": {"with_keywords": "240315|240237", "without_genres": _DARK + ",878,10752",
++                        "vote_count.gte": 300}},
++        ],
++    },
++    {
++        "key": "namorados",
++        "date": lambda y: _D(y, 6, 12),
++        "before": 14,
++        "after": 0,
++        "lists": [
++            {"id": "comet_valent", "name": "💘 Romances para o Dia dos Namorados", "mode": "popular",
++             "params": {"with_genres": 10749, "without_genres": "27,16", "vote_count.gte": 1500}},
++        ],
++    },
++    {
++        "key": "pais",
++        "date": lambda y: _second_sunday(y, 8),
++        "before": 14,
++        "after": 0,
++        "lists": [
++            {"id": "comet_dad", "name": "👔 Filmes para o Dia dos Pais", "mode": "popular",
++             "params": {"with_keywords": "240119|240303", "without_genres": _DARK + ",10752",
++                        "vote_count.gte": 300}},
++        ],
++    },
++    {
++        "key": "criancas",
++        "date": lambda y: _D(y, 10, 12),
++        "before": 14,
++        "after": 0,
++        "lists": [
++            {"id": "comet_kidsday", "name": "🧸 Filmes para o Dia das Crianças", "mode": "popular",
++             "params": {"with_genres": "16|10751", "without_genres": "27,53", "vote_count.gte": 1000}},
++        ],
++    },
++    {
++        "key": "halloween",
++        "date": lambda y: _D(y, 10, 31),
++        "before": 30,  # desde 1/out
++        "after": 0,
++        "lists": [
++            {"id": "comet_hallo_new", "name": "🎃 Filmes novos de Halloween ({y})", "mode": "new",
++             "params": {"with_keywords": "3335|180193"}},
++            {"id": "comet_hallo_all", "name": "👻 Halloween de {p} para trás", "mode": "byyear",
++             "params": {"with_keywords": "3335|180193"}},
++        ],
++    },
++]
++
++_BY_LIST = {lst["id"]: (s, lst) for s in SEASONS for lst in s["lists"]}
++
++
++def _window(season: dict, year: int) -> tuple[datetime.date, datetime.date, datetime.date]:
++    d = season["date"](year)
++    return d - _TD(days=season["before"]), d, d + _TD(days=season["after"])
++
++
++def season_year(season: dict, today: datetime.date) -> int:
++    """Ano da data "da vez": a última cuja janela já começou."""
++    best = None
++    for y in (today.year - 1, today.year, today.year + 1):
++        start, d, _ = _window(season, y)
++        if start <= today:
++            best = d.year
++    return best if best is not None else today.year - 1
++
++
++def season_state(season: dict, today: datetime.date) -> tuple[bool, datetime.date]:
++    """(em destaque agora, data que manda na ordem: a atual se em destaque, senão a próxima)."""
++    nxt = None
++    for y in (today.year - 1, today.year, today.year + 1):
++        start, d, end = _window(season, y)
++        if start <= today <= end:
++            return True, d
++        if start > today and (nxt is None or d < nxt):
++            nxt = d
++    return False, nxt or season["date"](today.year + 1)
++
++
++def _entry(lst: dict, year: int) -> dict:
++    return {
++        "type": "movie",
++        "id": lst["id"],
++        "name": lst["name"].format(y=year, p=year - 1),
++        "extra": [{"name": "skip", "isRequired": False}],
++    }
++
++
++def seasonal_catalogs(today: datetime.date | None = None) -> tuple[list[dict], list[dict]]:
++    """(listas em destaque, listas fora de época), cada grupo em ordem de data."""
++    today = today or datetime.date.today()
++    hot, cold = [], []
++    for s in SEASONS:
++        is_hot, when = season_state(s, today)
++        year = season_year(s, today)
++        (hot if is_hot else cold).append((when, [_entry(lst, year) for lst in s["lists"]]))
++    hot.sort(key=lambda x: x[0])
++    cold.sort(key=lambda x: x[0])
++    return [c for _, cs in hot for c in cs], [c for _, cs in cold for c in cs]
++
++
++def is_seasonal(catalog_id: str) -> bool:
++    return catalog_id in _BY_LIST
++
++
++def is_new_list(catalog_id: str) -> bool:
++    item = _BY_LIST.get(catalog_id)
++    return bool(item and item[1]["mode"] == "new")
++
++
++def tmdb_query(catalog_id: str, media_type: str, language: str, page: int,
++               today: datetime.date | None = None) -> tuple[str, dict] | None:
++    item = _BY_LIST.get(catalog_id)
++    if not item or media_type != "movie":
++        return None
++    season, lst = item
++    today = today or datetime.date.today()
++    year = season_year(season, today)
++    params = {"language": language, "page": page}
++    params.update(lst["params"])
++    mode = lst["mode"]
++    if mode == "new":
++        # Os do ano da data, conforme vão sendo lançados
++        params["sort_by"] = "primary_release_date.desc"
++        params["primary_release_date.gte"] = f"{year}-01-01"
++        params["primary_release_date.lte"] = min(today.isoformat(), f"{year}-12-31")
++        params.setdefault("vote_count.gte", 2)
++    elif mode == "byyear":
++        # Todos os anteriores, do ano mais novo para o mais antigo
++        params["sort_by"] = "primary_release_date.desc"
++        params["primary_release_date.lte"] = f"{year - 1}-12-31"
++        params.setdefault("vote_count.gte", 20)
++    else:
++        params["sort_by"] = "popularity.desc"
++        params["primary_release_date.lte"] = today.isoformat()
++    return "discover/movie", params
 diff --git a/comet/services/smart_search.py b/comet/services/smart_search.py
 new file mode 100644
 index 0000000..efec780
