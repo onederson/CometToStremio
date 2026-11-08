@@ -2023,7 +2023,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..c5928a1 100644
+index 94f56ae..56f131c 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -2091,7 +2091,7 @@ index 94f56ae..c5928a1 100644
  
  def _first_meta_value(value):
      if isinstance(value, list):
-@@ -68,6 +102,710 @@ def _build_kodi_meta(parsed, formatted_components: dict):
+@@ -68,6 +102,717 @@ def _build_kodi_meta(parsed, formatted_components: dict):
      }
  
  
@@ -2503,6 +2503,7 @@ index 94f56ae..c5928a1 100644
 +    notice_count: int,
 +    blocked_hashes: set[str] | None = None,
 +    remote: bool = False,
++    prefer_4k: bool = False,
 +) -> tuple[list[dict], dict | None, list[dict]]:
 +    for s in final_streams:
 +        info = s.get("_info")
@@ -2624,6 +2625,8 @@ index 94f56ae..c5928a1 100644
 +        r = str(info.get("resolution") or "").lower()
 +        if remote:  # fora de casa (dados móveis): leve primeiro
 +            return {"1080p": 0, "720p": 1, "2160p": 3, "4k": 3, "1440p": 2}.get(r, 2)
++        if prefer_4k:  # Nuvio na TV 4K: 4K PT, depois 1080p PT, depois o melhor que houver
++            return {"2160p": 0, "4k": 0, "1440p": 1, "1080p": 1, "720p": 2}.get(r, 3)
 +        return {"1080p": 0, "2160p": 1, "4k": 1, "1440p": 1, "720p": 2}.get(r, 3)
 +
 +    def _pick(pred):
@@ -2653,19 +2656,23 @@ index 94f56ae..c5928a1 100644
 +                _tb = _taste_bonus(_TASTE_NOW, info.get("raw_title") or info.get("torrent_title") or "", info.get("resolution"), info.get("size"))
 +            except Exception:
 +                _tb = 0.0
-+            key = (too_big or bool(_risky), _res_pref(info), _pt_nd, -_tb, idx)
++            # No Nuvio a resolução pesa antes da confirmação do áudio PT (só desempata).
++            _unconfirmed = (info.get("has_pt") != 1) if prefer_4k else False
++            key = (too_big or bool(_risky), _res_pref(info), _unconfirmed, _pt_nd, -_tb, idx)
 +            if best_key is None or key < best_key:
 +                best_key, chosen = key, cand
 +        return chosen
 +
 +    # 1) dublado/dual pronto no RD (prefere 1080p e arquivos ate 30 GB)
 +    # Prefer has_pt == 1; NEVER choose has_pt == 0 as dublado.
-+    chosen = _pick(
-+        lambda i: i.get("cached")
-+        and i.get("is_pt")
-+        and not i.get("is_cam")
-+        and i.get("has_pt") == 1
-+    )
++    chosen = None
++    if not prefer_4k:
++        chosen = _pick(
++            lambda i: i.get("cached")
++            and i.get("is_pt")
++            and not i.get("is_cam")
++            and i.get("has_pt") == 1
++        )
 +    if not chosen:
 +        chosen = _pick(
 +            lambda i: i.get("cached")
@@ -2802,7 +2809,7 @@ index 94f56ae..c5928a1 100644
  def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
      return plain_name if kodi else emoji_name
  
-@@ -125,6 +863,37 @@ def _encode_playback_scope(value: int | None) -> str:
+@@ -125,6 +870,37 @@ def _encode_playback_scope(value: int | None) -> str:
      return str(value) if value is not None else "n"
  
  
@@ -2840,7 +2847,7 @@ index 94f56ae..c5928a1 100644
  def _select_info_hashes_by_resolution(
      ranked_info_hashes,
      torrents: dict,
-@@ -132,6 +901,8 @@ def _select_info_hashes_by_resolution(
+@@ -132,6 +908,8 @@ def _select_info_hashes_by_resolution(
      max_results: int,
      cached_only: bool,
      prioritize_cached: bool,
@@ -2849,7 +2856,7 @@ index 94f56ae..c5928a1 100644
  ):
      if max_results <= 0:
          return None
-@@ -153,27 +924,75 @@ def _select_info_hashes_by_resolution(
+@@ -153,27 +931,75 @@ def _select_info_hashes_by_resolution(
              for info_hash in ranked_info_hashes
          }
  
@@ -2940,7 +2947,7 @@ index 94f56ae..c5928a1 100644
      return selected_info_hashes
  
  
-@@ -198,6 +1017,56 @@ async def stream(
+@@ -198,6 +1024,56 @@ async def stream(
      chilllink: bool = False,
      kodi: bool = False,
  ):
@@ -2997,7 +3004,7 @@ index 94f56ae..c5928a1 100644
      if media_type not in ["movie", "series"]:
          return _build_stream_response(request, {"streams": []}, is_empty=True)
  
-@@ -240,12 +1109,30 @@ async def stream(
+@@ -240,12 +1116,30 @@ async def stream(
              "empty" if is_empty else "success",
              result_count,
          )
@@ -3029,7 +3036,7 @@ index 94f56ae..c5928a1 100644
  
      search_result = await search_media(
          media_type,
-@@ -257,6 +1144,8 @@ async def stream(
+@@ -257,6 +1151,8 @@ async def stream(
      stream_cache_state = search_result.cache_state
  
      if search_result.status is MediaSearchStatus.INVALID:
@@ -3038,7 +3045,7 @@ index 94f56ae..c5928a1 100644
          return _stream_response({"streams": []}, is_empty=True)
  
      if search_result.status is MediaSearchStatus.DISABLED:
-@@ -270,53 +1159,94 @@ async def stream(
+@@ -270,53 +1166,94 @@ async def stream(
          return _stream_response({"streams": [placeholder_stream]})
  
      if search_result.status is MediaSearchStatus.UNRELEASED:
@@ -3168,7 +3175,7 @@ index 94f56ae..c5928a1 100644
              is_empty=True,
          )
  
-@@ -329,7 +1259,7 @@ async def stream(
+@@ -329,7 +1266,7 @@ async def stream(
      debrid_errors = search_result.debrid_errors
      sort_mixed = search_result.sort_mixed
      torrents = search_result.torrents
@@ -3177,7 +3184,7 @@ index 94f56ae..c5928a1 100644
          {
              "name": (f"[ERROR] {service}" if kodi else f"[❌] {service}"),
              "description": error.display_message,
-@@ -337,6 +1267,7 @@ async def stream(
+@@ -337,6 +1274,7 @@ async def stream(
          }
          for service, error in search_result.debrid_errors.items()
      ]
@@ -3185,7 +3192,7 @@ index 94f56ae..c5928a1 100644
      non_cached_results = []
      debrid_stream_specs = [
          (entry_index, entry["service"], get_debrid_extension(entry["service"]))
-@@ -348,7 +1279,7 @@ async def stream(
+@@ -348,7 +1286,7 @@ async def stream(
          and settings.PROXY_DEBRID_STREAM
          and settings.PROXY_DEBRID_STREAM_PASSWORD != config["debridStreamProxyPassword"]
      ):
@@ -3194,7 +3201,7 @@ index 94f56ae..c5928a1 100644
              {
                  "name": _stream_notice_name(kodi, "[⚠️] Comet", "[WARN] Comet"),
                  "description": "Debrid Stream Proxy Password incorrect.\nStreams will not be proxied.",
-@@ -378,7 +1309,7 @@ async def stream(
+@@ -378,7 +1316,7 @@ async def stream(
  
      if search_result.show_account_sync_trigger:
          for entry_index, _, debrid_extension in debrid_stream_specs:
@@ -3203,7 +3210,7 @@ index 94f56ae..c5928a1 100644
                  {
                      "name": (
                          f"[{debrid_extension}] Comet Sync"
-@@ -393,8 +1324,40 @@ async def stream(
+@@ -393,8 +1331,40 @@ async def stream(
                  }
              )
  
@@ -3245,7 +3252,7 @@ index 94f56ae..c5928a1 100644
          torrents=torrents,
          service_cache_status=service_cache_status,
          max_results=config["maxResultsPerResolution"],
-@@ -402,18 +1365,31 @@ async def stream(
+@@ -402,18 +1372,31 @@ async def stream(
              config["cachedOnly"] and debrid_entries and not enable_torrent
          ),
          prioritize_cached=bool(debrid_entries and not sort_mixed),
@@ -3279,7 +3286,7 @@ index 94f56ae..c5928a1 100644
          torrent_title = torrent["title"]
          torrent_size = torrent["size"]
          formatted_components = format_components(
-@@ -429,21 +1405,164 @@ async def stream(
+@@ -429,21 +1412,164 @@ async def stream(
          info_hash_cache_status = service_cache_status.get(info_hash)
          quoted_torrent_title = quote(torrent_title)
  
@@ -3452,7 +3459,7 @@ index 94f56ae..c5928a1 100644
  
              behavior_hints = {
                  "bingeGroup": f"comet|{service}|{info_hash}",
-@@ -463,38 +1582,83 @@ async def stream(
+@@ -463,38 +1589,83 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="C" if is_cached else "U",
              )
@@ -3546,7 +3553,7 @@ index 94f56ae..c5928a1 100644
                  continue
  
              behavior_hints = {
-@@ -515,6 +1679,10 @@ async def stream(
+@@ -515,6 +1686,10 @@ async def stream(
                  seeders=torrent["seeders"],
                  status="P2P",
              )
@@ -3557,7 +3564,7 @@ index 94f56ae..c5928a1 100644
  
              the_stream = {
                  "name": stream_name,
-@@ -522,6 +1690,27 @@ async def stream(
+@@ -522,6 +1697,27 @@ async def stream(
                  "behaviorHints": behavior_hints,
                  "infoHash": info_hash,
              }
@@ -3585,7 +3592,7 @@ index 94f56ae..c5928a1 100644
  
              if chilllink:
                  the_stream["_chilllink"] = format_chilllink(formatted_components, False)
-@@ -533,12 +1722,271 @@ async def stream(
+@@ -533,12 +1729,272 @@ async def stream(
              if sources:
                  the_stream["sources"] = sources
  
@@ -3748,7 +3755,8 @@ index 94f56ae..c5928a1 100644
 +        if _remote:
 +            logger.info("📶 fora de casa: ▶ Assistir prefere versão leve")
 +        final_streams, chosen_assistir, next_pt_candidates = _apply_clean_layout(
-+            final_streams, len(notice_streams), blocked_hashes=all_blocked, remote=_remote
++            final_streams, len(notice_streams), blocked_hashes=all_blocked, remote=_remote,
++            prefer_4k=is_nuvio_request(b64config),
 +        )
 +
 +    if chosen_assistir and chosen_assistir.get("_info"):
@@ -3861,7 +3869,7 @@ index 94f56ae..c5928a1 100644
  
      has_results = len(final_streams) > 0
  
-@@ -546,3 +1994,12 @@ async def stream(
+@@ -546,3 +2002,12 @@ async def stream(
          {"streams": final_streams},
          is_empty=not has_results,
      )
@@ -8656,10 +8664,10 @@ index 0000000..be67dda
 +    }
 diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
 new file mode 100644
-index 0000000..d34a142
+index 0000000..7da43b3
 --- /dev/null
 +++ b/comet/services/catalogs.py
-@@ -0,0 +1,4888 @@
+@@ -0,0 +1,4941 @@
 +import asyncio
 +import datetime
 +import json
@@ -8908,6 +8916,36 @@ index 0000000..d34a142
 +    return list(PROVIDERS.keys())
 +
 +
++def _xmas_year(today: datetime.date | None = None) -> int | None:
++    """Ano dos "lançamentos de Natal" na temporada (1/nov a 6/jan); fora dela, None."""
++    today = today or datetime.date.today()
++    if today.month >= 11:
++        return today.year
++    if today.month == 1 and today.day <= 6:
++        return today.year - 1
++    return None
++
++
++def _xmas_catalogs(today: datetime.date | None = None) -> list[dict]:
++    year = _xmas_year(today)
++    if year is None:
++        return []
++    return [
++        {
++            "type": "movie",
++            "id": "comet_xmas_new",
++            "name": f"🎄 Filmes novos de Natal ({year})",
++            "extra": [{"name": "skip", "isRequired": False}],
++        },
++        {
++            "type": "movie",
++            "id": "comet_xmas_all",
++            "name": f"🎅 Natal de {year - 1} para trás",
++            "extra": [{"name": "skip", "isRequired": False}],
++        },
++    ]
++
++
 +def build_manifest_catalogs(kids: bool = False, is_personal: bool = True) -> list[dict]:
 +    if kids:
 +        catalogs = [
@@ -9124,6 +9162,7 @@ index 0000000..d34a142
 +                {"name": "skip", "isRequired": False},
 +            ],
 +        },
++        *_xmas_catalogs(),
 +        # 4. ⚡ Pronto dublado filme, série
 +        {
 +            "type": "movie",
@@ -9714,6 +9753,28 @@ index 0000000..d34a142
 +            "page": page,
 +        }
 +
++    if catalog_id in ("comet_xmas_new", "comet_xmas_all"):
++        # Palavra-chave "christmas" do TMDB (207317)
++        year = _xmas_year(today) or today.year
++        if media_type != "movie":
++            return None
++        params = {
++            "with_keywords": 207317,
++            "language": language,
++            "page": page,
++            "sort_by": "primary_release_date.desc",
++        }
++        if catalog_id == "comet_xmas_new":
++            # Filmes de Natal do ano, conforme vão sendo lançados
++            params["primary_release_date.gte"] = f"{year}-01-01"
++            params["primary_release_date.lte"] = min(today_str, f"{year}-12-31")
++            params["vote_count.gte"] = 2
++        else:
++            # Todos os anteriores, do ano mais novo para o mais antigo
++            params["primary_release_date.lte"] = f"{year - 1}-12-31"
++            params["vote_count.gte"] = 20
++        return "discover/movie", params
++
 +    if catalog_id == "comet_top10":
 +        path = f"trending/{tmdb_type}/day"
 +        params = {
@@ -10164,7 +10225,7 @@ index 0000000..d34a142
 +        seen_tmdb_ids = set()
 +        today_str = datetime.date.today().isoformat()
 +        is_lancamentos = (
-+            genre in ("Lançamentos", "Lancamentos") or catalog_id == "comet_new"
++            genre in ("Lançamentos", "Lancamentos") or catalog_id in ("comet_new", "comet_xmas_new")
 +        )
 +
 +        for item in raw_items:

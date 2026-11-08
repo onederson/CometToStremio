@@ -300,6 +300,39 @@ def t_unit_episodios_ptbr() -> tuple[str, str]:
     return "PASS", "temporadas divididas diferente: casa pela ordem e, sem total igual, pela data"
 
 
+def t_unit_nuvio_4k_natal() -> tuple[str, str]:
+    import datetime as _dt
+    from comet.api.endpoints.stream import _apply_clean_layout
+    from comet.services.catalogs import _xmas_year, _xmas_catalogs, _raw_build_tmdb_path_and_params
+
+    def cand(res, has_pt, size_gb, is_pt=True, h="a"):
+        info = {"kind": "rd", "cached": True, "is_pt": is_pt, "has_pt": has_pt, "resolution": res,
+                "size": size_gb * 1024**3, "service": "realdebrid", "info_hash": h * 40,
+                "raw_title": f"Filme.{res}.mkv"}
+        return {"name": res, "description": "", "url": f"http://x/{h}", "_info": info}
+
+    def pick(streams, **kw):
+        out, best, _ = _apply_clean_layout([dict(s, _info=dict(s["_info"])) for s in streams], 0, **kw)
+        return best["_info"]["resolution"] if best else None
+
+    pt = [cand("1080p", 1, 3, h="a"), cand("2160p", None, 20, h="b"), cand("2160p", 1, 70, h="c")]
+    assert pick(pt, prefer_4k=True) == "2160p", "Nuvio: 4K PT primeiro"
+    assert pick(pt) == "1080p", "Stremio segue com 1080p primeiro"
+    sem_4k_pt = [cand("1080p", None, 3, h="a"), cand("2160p", 0, 20, is_pt=False, h="b")]
+    assert pick(sem_4k_pt, prefer_4k=True) == "1080p", "sem 4K PT: 1080p PT"
+    so_original = [cand("1080p", 0, 3, is_pt=False, h="a"), cand("2160p", 0, 20, is_pt=False, h="b")]
+    assert pick(so_original, prefer_4k=True) == "2160p", "sem PT: melhor original"
+
+    assert _xmas_year(_dt.date(2026, 11, 7)) == 2026
+    assert _xmas_year(_dt.date(2027, 1, 3)) == 2026
+    assert _xmas_year(_dt.date(2026, 7, 1)) is None and _xmas_catalogs(_dt.date(2026, 7, 1)) == []
+    ids = [c["id"] for c in _xmas_catalogs(_dt.date(2026, 12, 1))]
+    assert ids == ["comet_xmas_new", "comet_xmas_all"], ids
+    _, p = _raw_build_tmdb_path_and_params("movie", "comet_xmas_all", None, 1)
+    assert p["with_keywords"] == 207317 and p["sort_by"] == "primary_release_date.desc"
+    return "PASS", "Nuvio: 4K PT > 1080p PT > melhor original; listas de Natal só na temporada"
+
+
 def t_unit_source_breaker() -> tuple[str, str]:
     from comet.core import breaker
     breaker.reset()
@@ -1526,6 +1559,7 @@ def main():
         ("unit_source_breaker", t_unit_source_breaker),
         ("unit_predownload_pick", t_unit_predownload_pick),
         ("unit_episodios_ptbr", t_unit_episodios_ptbr),
+        ("unit_nuvio_4k_natal", t_unit_nuvio_4k_natal),
     ]
 
     all_results = []
