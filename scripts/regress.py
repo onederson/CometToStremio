@@ -300,6 +300,49 @@ def t_unit_episodios_ptbr() -> tuple[str, str]:
     return "PASS", "temporadas divididas diferente: casa pela ordem e, sem total igual, pela data"
 
 
+def t_unit_novidades_1108() -> tuple[str, str]:
+    """Modo 4G, 'Onde você parou', guardião e lembretes (08/11/2026)."""
+    from comet.api.endpoints.stream import _apply_clean_layout
+    from comet.services.resume import build_series_lines, build_movie_lines
+    from comet.services.guardian import should_vacuum
+    from comet.services.reminders import parse_command, matches
+
+    def cand(res, size_gb, h, br=None):
+        info = {"kind": "rd", "cached": True, "is_pt": True, "has_pt": 1, "resolution": res,
+                "size": size_gb * 1024**3, "service": "torbox", "info_hash": h * 40, "raw_title": f"X.{res}.mkv"}
+        if br:
+            info["_media"] = {"bitrate_mbps": br}
+        return {"name": res, "description": "", "url": f"http://x/{h}", "_info": info}
+
+    def pick(streams, **kw):
+        _, best, _ = _apply_clean_layout([dict(s, _info=dict(s["_info"])) for s in streams], 0, **kw)
+        return best["_info"]["info_hash"][0] if best else None
+
+    eps = [cand("1080p", 3.5, "a"), cand("720p", 1.2, "b")]
+    assert pick(eps, remote=True, is_episode=True) == "b", "4G: episódio de 3,5 GB é pesado demais"
+    assert pick(eps, remote=True) == "a", "4G: filme de 3,5 GB ainda cabe"
+    assert pick(eps) == "a", "em casa nada muda"
+    br = [cand("1080p", 3, "a", br=25), cand("1080p", 3.2, "b", br=8)]
+    assert pick(br, remote=True) == "b", "4G: bitrate lido do arquivo manda"
+
+    meta = {"videos": [{"season": 1, "episode": i, "title": f"Ep {i}", "overview": f"Resumo {i}"} for i in range(1, 6)]}
+    now = 1_800_000_000
+    lines = build_series_lines([{"season": 1, "episode": 2, "ts": now - 40 * 86400, "outcome": "completo"},
+                                {"season": 1, "episode": 3, "ts": now - 30 * 86400, "outcome": None}], meta, now)
+    assert lines[0].startswith("▶ Você parou em T1E3 · Ep 3"), lines
+    assert "Para lembrar" in lines[1] and "T1E2: Resumo 2" in lines[1], lines
+    fin = build_series_lines([{"season": 1, "episode": 4, "ts": now - 3600, "outcome": "completo"}], meta, now)
+    assert "Próximo: T1E5" in fin[0] and len(fin) == 1, fin
+    assert build_movie_lines([{"ts": now, "outcome": "completo"}])[0].startswith("✓ Você viu")
+
+    assert should_vacuum(30, 100, 10**12, 10**8) is True
+    assert should_vacuum(2, 100, 10**12, 10**8) is False
+    assert should_vacuum(30, 100, 2 * 10**8, 10**8) is False, "sem disco para o VACUUM"
+    assert parse_command("/lembrar Chaves") is not None and parse_command("oi") is None
+    assert matches({"title": "Chaves: Episódio 12"}, "chaves") and not matches({"title": "Chapolin"}, "chaves")
+    return "PASS", "4G por tamanho e bitrate, onde você parou, VACUUM só com folga, /lembrar"
+
+
 def t_unit_nuvio_4k_natal() -> tuple[str, str]:
     import datetime as _dt
     from comet.api.endpoints.stream import _apply_clean_layout
@@ -507,6 +550,11 @@ def t_catalogos(token: str, baseline_data: dict, current_baseline: dict, save_ba
                 relative_urls.extend(rels)
 
             is_personal = any(p in cat_id for p in ("mylist", "newep", "foryou", "dubready", "previewtest", "week"))
+            # fileiras extras: conteúdo depende do dia/hora (jogos, sugestões da noite, histórico)
+            if cat_id in ("comet_tonight", "comet_fut", "comet_recap", "comet_mytv"):
+                if count == 0 and cat_id in ("comet_mytv", "comet_recap"):
+                    warns.append(f"{cat_id} vazio")
+                continue
             if cat_id == "comet_previewtest":
                 if count != 4:
                     failed.append(f"{cat_id} ({count} itens != 4)")
@@ -1483,6 +1531,43 @@ def t_notas(token: str) -> tuple[str, str]:
     return "PASS", first[:90]
 
 
+def t_extras(token: str) -> tuple[str, str]:
+    """Fileiras extras (08/11/2026): no manifesto, Minha TV com grade e play, imagens, porta pública fechada."""
+    import subprocess
+    with get_client(timeout=120.0) as client:
+        ids = {c["id"] for c in client.get(f"/{token}/manifest.json").json().get("catalogs", [])}
+        falta = {"comet_tonight", "comet_fut", "comet_mytv", "comet_recap"} - ids
+        if falta:
+            return "FAIL", f"fileiras fora do manifesto: {sorted(falta)}"
+        m = client.get(f"/{token}/meta/tv/cometlive:mytv:main.json").json().get("meta")
+        if not m:
+            return "WARN", "Minha TV sem grade (menos de 3 séries no histórico?)"
+        if "Agora:" not in (m.get("description") or ""):
+            return "FAIL", "Minha TV sem 'Agora:' na descrição"
+        st = client.get(f"/{token}/stream/tv/cometlive:mytv:main.json").json().get("streams") or []
+        if not st or not st[0].get("url"):
+            return "FAIL", "Minha TV sem fonte para o programa atual"
+        img = client.get("/art/mytv/0.jpg")
+        if img.status_code != 200 or not img.headers.get("content-type", "").startswith("image/"):
+            return "FAIL", f"capa da Minha TV: {img.status_code}"
+        fut = client.get(f"/{token}/catalog/tv/comet_fut.json").json().get("metas", [])
+    # porta pública (Caddy 7443): painel e caminhos de robô fechados, manifesto aberto
+    def code(path):
+        try:
+            out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15", "--resolve",
+                                  "a71comet.duckdns.org:7443:127.0.0.1", f"https://a71comet.duckdns.org:7443{path}"],
+                                 capture_output=True, text=True, timeout=20)
+            return out.stdout.strip()
+        except Exception as e:
+            return type(e).__name__
+    blocked = {p: code(p) for p in ("/admin", "/metrics", "/wp-login.php", "/.env")}
+    if any(c != "404" for c in blocked.values()):
+        return "FAIL", f"porta 7443 deixou passar: {blocked}"
+    if code(f"/{token}/manifest.json") != "200":
+        return "FAIL", "porta 7443 bloqueou o manifesto"
+    return "PASS", f"4 fileiras no manifesto · Minha TV: {st[0].get('title', '')[:50]} · futebol hoje: {len(fut)} · 7443 fechada p/ admin/robôs"
+
+
 def t_nuvio(token: str, nuvio_token: str) -> tuple[str, str]:
     """Link do Nuvio: mesmas fileiras do pessoal, fundo sem texto e sem repasse fix=1."""
     if not nuvio_token:
@@ -1575,6 +1660,7 @@ def main():
         ("unit_predownload_pick", t_unit_predownload_pick),
         ("unit_episodios_ptbr", t_unit_episodios_ptbr),
         ("unit_nuvio_4k_natal", t_unit_nuvio_4k_natal),
+        ("unit_novidades_1108", t_unit_novidades_1108),
     ]
 
     all_results = []
@@ -1633,6 +1719,7 @@ def main():
         ("fileiras_novas", lambda: t_fileiras_novas(token)),
         ("notas", lambda: t_notas(token)),
         ("nuvio", lambda: t_nuvio(token, nuvio_token)),
+        ("extras", lambda: t_extras(token)),
         ("geracional", lambda: t_geracional(token)),
     ]
 

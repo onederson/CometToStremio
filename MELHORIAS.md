@@ -54,6 +54,8 @@ Cada ideia abaixo junta duas dessas peças. Por isso elas não existem em nenhum
 
 **Ordem que eu proponho:** M3 → M4 → M7 → N2 → N1 → N6 → M1 → M2 → N3 → N4 → N8 → M8 → N5 → N7 → M6 → M5 → M10 → N9 → M9 → N10.
 
+**Feito em 08/11/2026:** M3 (4G pelo bitrate), M8 (`/lembrar`), N1 (futebol: ESPN; o Pernambucano não existe lá), N2 (onde você parou), N3 (retrospectiva), N7 (sessão da noite) e N10 (Minha TV). Também a Parte 4: backup diário cifrado, saúde do A71, manutenção do banco, alerta de fonte morta, aviso de versão nova e a porta 7443 fechada para painel e robôs (sem limite por IP: o Caddy daqui não tem o módulo). Detalhes no item 33 do `HANDOFF.md`. N4 e M6 ficam de fora no Nuvio (precisam de ffmpeg).
+
 ---
 
 ## ★★ O salto geracional (12 ideias que nenhum addon tem)

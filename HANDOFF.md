@@ -1,6 +1,6 @@
 # HANDOFF: Comet Stremio no Galaxy A71 (para outra IA continuar)
 
-*Última atualização: 05/11/2026 (horário de Brasília)*
+*Última atualização: 08/11/2026 (horário de Brasília)*
 
 Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado real verificado, as regras do projeto, como testar e o que vem a seguir**. O `README.md` (Seção 0 e Mapa de arquivos) tem os detalhes da instalação. A Fase 1 (AdGuard) está em `README adguard contexto.md`.
 
@@ -311,6 +311,34 @@ Flags importantes do `.env`:
       - Plugins do Nuvio: um plugin próprio para o FenixFlix não ajudaria, porque as falhas são HTTP 500 do servidor dele e a TV sai pelo mesmo IP do A71. Os plugins PT-BR da comunidade (`lawlietbr/liet-nuvio`: Pomfy, Doramogo, MyEmbed, MyWallpaper) são JS ofuscado; o teste local foi bloqueado pelo classificador de segurança e nada foi instalado.
       - O FrostStream (`froststream.cloutteam.com`) parou de resolver DNS em 07/11; continua no `DIRECT_ADDONS_URL` (o breaker pausa).
     - **Dicas de ADB na TV:** `input keyevent 66` (Enter) abre os botões do player e `23` só pausa; em Fire TV, `input text` embaralha letras no teclado (envie letra por letra); `uiautomator dump` lê os textos do Compose.
+33. **Robustez e novidades (08/11/2026):** tudo em módulos novos em `comet/services/`, com ganchos pequenos no resto.
+    - **Protocolo comum.** Comandos do bot: cada módulo pode ter `handle_command`, `HELP` e `status_lines`; o `telegram_bot.py` despacha pela lista `_PLUGINS`. Também ganhou `send_telegram_file` (documento ou foto). Serviços de fundo: `start_service()`, iniciado pelo laço no `app.py`.
+    - **Fileiras extras.** `comet/services/extra_rows.py` despacha catálogo, meta, stream e rotas de imagem para os módulos que têm `ROWS`/`ID_PREFIX`/`router`. Elas só existem no link pessoal e no do Nuvio, e ficam sempre no manifesto (fileira vazia some sozinha no app). Para não precisar reinstalar o addon, os ids usam prefixos já declarados: `cometlive:fut:`, `cometlive:mytv:` e `cometsaga:recap-`.
+    - **Guardião (`guardian.py`):**
+      - **Backup diário** às 05:30: `.env`, Caddyfile, `.json` pequenos e um `comet-slim.db` sem os caches grandes (~0,7 MB). É cifrado com AES-GCM e a senha `BACKUP_PASSWORD` do `.env` (gerada e enviada uma vez pelo Telegram), e vai pelo bot. Restaurar: `python -m comet.services.guardian decrypt <arq.enc> <saida.tar.gz>`.
+      - **Saúde** a cada 5 min (bateria, CPU, disco, memória), com alertas e intervalo mínimo de 6 h.
+      - **Manutenção do banco** aos domingos às 05:00: `optimize` + `ANALYZE`, e `VACUUM` só se houver mais de 20 % livre e folga de disco.
+      - **Fonte morta:** pausada em ≥ 80 % das leituras em 24 h gera aviso.
+      - **Versão nova do Comet original:** às segundas, via API do GitHub.
+      - Comandos: `/backup`, `/saude`, `/fontes`, `/versao`.
+    - **Lembretes (`reminders.py`, M8):** `/lembrar`, `/lembretes`, `/esquecer`, na grade do Pluto; avisa 5 min antes.
+    - **Sessão da noite (`evening.py`, N7):** às 19 h, 3 filmes 🇧🇷 ⚡ que terminam antes das 23 h, mais o próximo episódio da série mais vista. Gera a fileira 🌙 Para hoje à noite (17h–2h) e responde `/hoje`. Variáveis: `EVENING_HOUR`, `EVENING_START` e `EVENING_END`.
+    - **Futebol (`football.py`, N1):**
+      - Placar da ESPN (`bra.1`, `bra.2`, `bra.copa_do_brazil`...). O Pernambucano não existe na ESPN.
+      - Fileira ⚽ Hoje no futebol: times de PE primeiro, depois Série A, Copa do Brasil e Série B, com capa desenhada (`/art/fut/<id>.jpg`).
+      - O play abre rádios de PE (Jornal, CBN Recife...).
+      - Avisos de início, gol e fim dos times de PE (`FOOTBALL_ALERTS=0` desliga).
+    - **Retrospectiva (`recap.py`, N3):** copia o `play_log` para `recap_plays` (o `play_log` é podado). Cartão "Wrapped" em `/art/recap/<AAAA-MM>.jpg`, fileira 🎁 Sua retrospectiva, envio no dia 1 às 10 h e em 31/12, e o comando `/retrospectiva [mês|ano]`. As horas contam cada play como o título inteiro (inclui plays curtos e de teste).
+    - **Minha TV (`mytv.py`, N10):**
+      - Canal com grade diária determinística, com séries do `play_log` e do histórico do Stremio (itens `removed` também valem, porque a pessoa assiste sem salvar).
+      - O play devolve o ▶ Assistir do episódio "no ar", que começa do início.
+      - A capa usa `tv_guide_card`.
+    - **Onde você parou (`resume.py`, N2):** no topo da descrição do título (só no link pessoal/Nuvio), com cache de 5 min nesse caso. Em série: "▶ Você parou em T3E7", ou "terminou…, Próximo: …", e um resumo dos 2 últimos episódios se faz mais de 14 dias. Em filme: "começou/viu em DD/MM".
+    - **Modo 4G (M3), em `_apply_clean_layout(is_episode=...)`:** fora de casa, o ▶ Assistir usa o bitrate lido do arquivo quando existe (teto `REMOTE_MAX_MBPS`, padrão 12). Sem bitrate, o teto é 2 GB por episódio e 4 GB por filme.
+    - **Bug corrigido:** o `play_log` nunca guardava temporada e episódio, porque a URL de play traz o IMDb separado. Agora `_record_play_bg` recebe `season`/`episode`. Os plays de série anteriores a 08/11 ficaram como filme.
+    - **Porta 7443 (Caddy):** responde 404 para `/admin`, `/metrics`, `/docs`, `/openapi.json`, `/configure`, `/cometnet` e caminhos de robô (`*.php`, `/.env`, `/.git`, `/wp-*`...). O Caddy daqui não tem módulo de limite de pedidos. Espelho em `config/Caddyfile`.
+    - **Testes:** `unit_novidades_1108` e `extras` no `regress.py`. As fileiras extras ficaram fora da contagem mínima do teste `catalogos`.
+    - **Listas de Natal "sumidas" no Nuvio:** não era bug. O manifesto já as tinha em 3º e 4º, e a TV passou a pedi-las às 10:35 de 08/11 (`uiautomator` mostrou as fileiras).
 20. **Episódio não lançado (31/10/2026):** VisionQuest E07/E08 (estreia 04/11 e 11/11) recebiam packs da temporada e um link FrostStream "MegaEmbed" falso (só áudio). Agora, em série com data do episódio maior que hoje, o Comet devolve só o aviso `[⏳] Comet` "Episódio ainda não lançado. Estreia em DD/MM/AAAA." (sem links diretos). O `DIGITAL_RELEASE_FILTER` segue desligado (bloquearia filmes de cinema).
 21. **Legenda só sem áudio PT (31/10/2026):** o pedido de legendas devolve vazio quando o arquivo é PT-BR: links diretos PT (ganham `behaviorHints.filename` `<Addon>.direct.PTBR`), nome do arquivo com PT detectado (`apply_ptbr_detection`) ou arquivo que o Comet já marcou 🇧🇷 na lista de streams (memória `remember_pt_filename`, 50 mil nomes; cobre DUAL de fonte BR). Ressalva: essa memória zera quando o Comet reinicia.
 14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
@@ -389,6 +417,8 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 ---
 
 ## 8. Onde paramos e próximo passo
+
+**Estado (08/11/2026):** item 33 (robustez e novidades) rodando no A71: `SMOKE OK`, `REGRESS OK` (45 pass, 2 warn). `data/smoke.disable` removido.
 
 **Estado (05/11/2026, noite):** item 32 (Nuvio) rodando no A71. Pendências no fim do item 32. `data/smoke.disable` removido.
 

@@ -13,6 +13,14 @@ a71comet.duckdns.org {
 # a71comet.duckdns.org -> 192.168.3.44, então o mesmo link funciona dentro e fora.
 a71comet.duckdns.org:7443 {
 	encode zstd gzip
+
+	# Porta aberta para a internet: fecha painel, métricas, docs da API e o que robôs varrem
+	@bloqueado {
+		path /admin* /metrics* /docs* /redoc* /openapi.json /cometnet* /configure* /dashboard*
+		path *.php *.asp *.aspx *.jsp *.cgi /.env* /.git* /wp-* /cgi-bin* /vendor/* /phpmyadmin* /actuator* /boaform*
+	}
+	respond @bloqueado 404
+
 	reverse_proxy 127.0.0.1:8000
 
 	tls {
