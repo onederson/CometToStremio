@@ -276,10 +276,10 @@ index 0000000..1fdce15
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..fd8af24
+index 0000000..58fb1e5
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,240 @@
 +import urllib.parse
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
@@ -313,6 +313,19 @@ index 0000000..fd8af24
 +        out = _PROGRESS_CACHE["map"]
 +    _PROGRESS_CACHE.update(ts=_t.time(), map=out)
 +    return out
++
++
++async def _pt_fix(metas: list, media_type: str) -> list:
++    """Título brasileiro e sinopse em PT em toda fileira (PT_TEXT=False desliga)."""
++    if not metas or not getattr(settings, "PT_TEXT", True):
++        return metas
++    try:
++        from comet.services.pt_text import fix_metas
++
++        return await fix_metas(metas, media_type)
++    except Exception as e:
++        log_swallowed("catalog._pt_fix", e)
++        return metas
 +
 +
 +def _status_ribbons(metas: list, catalog_id: str) -> list:
@@ -455,7 +468,7 @@ index 0000000..fd8af24
 +                _skip = 0
 +            _base_tok = f"{base_url}/{b64config}" if b64config else base_url
 +            return JSONResponse(
-+                content={"metas": await _extra_rows.catalog(id, _base_tok, _skip)},
++                content={"metas": await _pt_fix(await _extra_rows.catalog(id, _base_tok, _skip), type)},
 +                headers={"Cache-Control": "public, max-age=60"},
 +            )
 +        metas = await get_catalog(
@@ -496,6 +509,7 @@ index 0000000..fd8af24
 +            metas = await _apply_live_covers(metas, id, is_personal)
 +        except Exception as _lc_err:
 +            logger.debug(f"live covers: {_lc_err}")
++        metas = await _pt_fix(metas, type)
 +        return JSONResponse(
 +            content={"metas": metas},
 +            headers={"Cache-Control": "public, max-age=600"},
@@ -704,16 +718,17 @@ index bce0fec..bce38a9 100644
          request,
 diff --git a/comet/api/endpoints/meta.py b/comet/api/endpoints/meta.py
 new file mode 100644
-index 0000000..317b5ae
+index 0000000..d6dc9de
 --- /dev/null
 +++ b/comet/api/endpoints/meta.py
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,182 @@
 +import asyncio
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
 +
 +from comet.core.config_validation import config_check, is_nuvio_request, is_personal_request
 +from comet.core.logger import logger, log_swallowed
++from comet.core.models import settings
 +from comet.services.meta_ptbr import get_meta_ptbr
 +
 +router = APIRouter()
@@ -844,6 +859,12 @@ index 0000000..317b5ae
 +                )
 +
 +        meta = await get_meta_ptbr(type, clean_id)
++        if isinstance(meta, dict) and getattr(settings, "PT_TEXT", True):
++            try:  # título brasileiro e sinopse em PT (o que passar de 4 s fica para a próxima)
++                from comet.services.pt_text import fix_meta as _pt_fix_meta
++                meta = await asyncio.wait_for(asyncio.shield(_pt_fix_meta(meta, type)), timeout=4)
++            except Exception as _pt_err:
++                log_swallowed("meta.pt_text", _pt_err)
 +        if isinstance(meta, dict) and clean_id.startswith("tt") and type in ("movie", "series"):
 +            try:
 +                from comet.services.omdb import get_omdb, ratings_line
@@ -4871,7 +4892,7 @@ index 88b8606..a66f209 100644
 +    except Exception:
 +        pass
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..e54f21d 100644
+index 835a975..f533a77 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4910,7 +4931,7 @@ index 835a975..e54f21d 100644
      REMOVE_ADULT_CONTENT: bool | None = False
      BACKGROUND_SCRAPER_ENABLED: bool | None = False
      BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
-@@ -317,6 +332,54 @@ class AppSettings(ServerSettings):
+@@ -317,6 +332,55 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -4941,6 +4962,7 @@ index 835a975..e54f21d 100644
 +    CATALOG_ORIGINALS: bool = True
 +    CATALOG_LANDSCAPE: bool = True
 +    CATALOG_GROUPS: bool = True  # junta fileiras parecidas (streamings, clima, gêneros) numa só com filtro
++    PT_TEXT: bool = True  # título brasileiro e sinopse sempre em PT (tradução automática quando o TMDB não tem)
 +    PREVIEW_TEST_ROW: bool = False
 +    CATALOG_PROVIDERS: str | list[str] = [
 +        "netflix",
@@ -4965,7 +4987,7 @@ index 835a975..e54f21d 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +716,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +717,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -24164,6 +24186,436 @@ index 0000000..e9e666f
 +    task = asyncio.create_task(_later())
 +    _TASKS.add(task)
 +    task.add_done_callback(_TASKS.discard)
+diff --git a/comet/services/pt_text.py b/comet/services/pt_text.py
+new file mode 100644
+index 0000000..eb50666
+--- /dev/null
++++ b/comet/services/pt_text.py
+@@ -0,0 +1,424 @@
++"""Português sempre: sinopse em PT-BR e título brasileiro.
++
++Regras (pedido do usuário em 09/11/2026):
++- Sinopse: sempre em português. Ordem: sinopse PT-BR do TMDB; se não houver,
++  tradução automática da sinopse em inglês (ou da que veio).
++- Título: o título brasileiro quando a obra tem um (tradução pt-BR no TMDB, ex.:
++  "Transformers" continua "Transformers", "Spirited Away" vira "A Viagem de Chihiro").
++  Sem título brasileiro, fica o original; se o original estiver numa escrita que
++  não se lê (tailandês, japonês, coreano...), usa o título em inglês.
++- Textos montados por nós (TV, Sua semana, Minha TV): só as linhas em outra
++  escrita são traduzidas.
++
++O que demora mais que o orçamento de tempo continua em segundo plano e entra no
++cache (arquivo em data/catalog_cache/pt_text.json), valendo na próxima abertura.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++import os
++import re
++import time
++
++import aiohttp
++
++from comet.core.logger import logger, log_swallowed
++
++CACHE_FILE = "/opt/comet/data/catalog_cache/pt_text.json"
++_CACHE_MAX = 30000
++_TTL_OK = 30 * 86400  # entrada completa
++_TTL_MISS = 2 * 86400  # TMDB sem resultado: tenta de novo depois
++
++_cache: dict[str, dict] = {}
++_loaded = False
++_dirty = False
++_save_task: asyncio.Task | None = None
++_inflight: dict[str, asyncio.Task] = {}
++_tr_cache: dict[str, str] = {}
++_sem = asyncio.Semaphore(6)
++
++_NONLATIN = re.compile(
++    r"[Ͱ-ϿЀ-ӿ֐-ۿऀ-෿฀-๿"
++    r"ᄀ-ᇿ぀-ヿ㐀-鿿가-힯]"
++)
++_WORD = re.compile(r"[a-zà-öø-ÿ]+")
++_PT = set(
++    "de da do das dos que uma um para com não nao em no na nos nas os as por mas sua seu suas seus "
++    "ele ela eles elas quando após apos sobre é são sao entre como mais anos vida ao à aos às pelo pela "
++    "também tambem já ja seus depois enquanto onde isso esse essa este esta ser foi tem têm até ate "
++    "num numa uma dois duas três quem seja sem muito nova novo mundo cidade filho filha família amigos".split()
++)
++_EN = set(
++    "the and of to in is his her their with when after for an on who that from must but this "
++    "they he she it its into while are was were has have will be by as at about young new world "
++    "life family friends find finds".split()
++)
++_ES_FR = set("el los las y del una pero cuando con su sus le les et des du une est dans pour qui avec".split())
++
++
++def _ensure_loaded() -> None:
++    global _loaded
++    if _loaded:
++        return
++    _loaded = True
++    try:
++        if os.path.exists(CACHE_FILE):
++            with open(CACHE_FILE, "r", encoding="utf-8") as f:
++                data = json.load(f)
++            if isinstance(data, dict):
++                _cache.update(data.get("items") or {})
++                _tr_cache.update(data.get("tr") or {})
++    except Exception as e:
++        log_swallowed("pt_text._ensure_loaded", e)
++
++
++def _save_now() -> None:
++    try:
++        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
++        if len(_cache) > _CACHE_MAX:
++            for k in sorted(_cache, key=lambda k: _cache[k].get("ts", 0))[: len(_cache) - _CACHE_MAX]:
++                _cache.pop(k, None)
++        if len(_tr_cache) > _CACHE_MAX:
++            for k in list(_tr_cache)[: len(_tr_cache) - _CACHE_MAX]:
++                _tr_cache.pop(k, None)
++        tmp = f"{CACHE_FILE}.tmp.{os.getpid()}"
++        with open(tmp, "w", encoding="utf-8") as f:
++            json.dump({"items": _cache, "tr": _tr_cache}, f, ensure_ascii=False)
++        os.replace(tmp, CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"pt_text: erro ao salvar cache: {e}")
++
++
++def _schedule_save() -> None:
++    """Grava no máximo a cada 20 s (muitos itens chegam juntos)."""
++    global _dirty, _save_task
++    _dirty = True
++    if _save_task and not _save_task.done():
++        return
++
++    async def _later():
++        global _dirty
++        await asyncio.sleep(20)
++        if _dirty:
++            _dirty = False
++            await asyncio.to_thread(_save_now)
++
++    try:
++        _save_task = asyncio.get_running_loop().create_task(_later())
++    except RuntimeError:
++        _save_now()
++
++
++# ---------------------------------------------------------------- idioma
++def has_nonlatin(text: str | None) -> bool:
++    return bool(text and _NONLATIN.search(text))
++
++
++def is_portuguese(text: str | None) -> bool:
++    """Heurística leve: palavras comuns do PT contra as do inglês/espanhol/francês."""
++    if not text or not text.strip():
++        return False
++    if has_nonlatin(text):
++        return False
++    words = _WORD.findall(text.lower())
++    if len(words) < 4:
++        return True  # curto demais para julgar (nomes, "Rádio ao vivo.")
++    pt = sum(w in _PT for w in words)
++    other = sum(w in _EN for w in words) + sum(w in _ES_FR for w in words)
++    if re.search(r"ção|ções|ões|ão\b|ã\b|nh[aeo]", text.lower()):
++        pt += 2
++    return pt > other and pt >= 1
++
++
++async def translate(text: str, sl: str = "auto") -> str | None:
++    """Tradução automática para PT-BR (mesmo tradutor das legendas), com cache."""
++    text = (text or "").strip()
++    if not text:
++        return None
++    key = text[:300]
++    if key in _tr_cache:
++        return _tr_cache[key]
++    try:
++        from comet.services.sub_translate import fetch_gtx
++
++        async with _sem:
++            res = await fetch_gtx(text[:4500], sl=sl, tl="pt")
++    except Exception as e:
++        log_swallowed("pt_text.translate", e)
++        return None
++    if res:
++        res = res.strip()
++        _tr_cache[key] = res
++        _schedule_save()
++        return res
++    return None
++
++
++# ---------------------------------------------------------------- TMDB
++def _pick_translation(translations: list, lang: str, country: str | None, field: str) -> str:
++    for t in translations or []:
++        if t.get("iso_639_1") == lang and (country is None or t.get("iso_3166_1") == country):
++            v = ((t.get("data") or {}).get(field) or "").strip()
++            if v:
++                return v
++    return ""
++
++
++async def _fetch_info(imdb_id: str, media_type: str) -> dict:
++    from comet.metadata.tmdb import TMDBApi
++
++    tmdb_type = "movie" if media_type == "movie" else "tv"
++    tkey = "title" if tmdb_type == "movie" else "name"
++    okey = "original_title" if tmdb_type == "movie" else "original_name"
++    info: dict = {"ts": time.time()}
++    timeout = aiohttp.ClientTimeout(total=10.0)
++    async with _sem:
++        async with aiohttp.ClientSession(timeout=timeout) as session:
++            tmdb = TMDBApi(session)
++            found = await tmdb._get_json(f"find/{imdb_id}?external_source=imdb_id", f"pt_text find {imdb_id}")
++            res = []
++            if isinstance(found, dict):
++                res = found.get(f"{tmdb_type}_results") or found.get(
++                    "tv_results" if tmdb_type == "movie" else "movie_results"
++                ) or []
++                if res and not found.get(f"{tmdb_type}_results"):
++                    tmdb_type = "tv" if tmdb_type == "movie" else "movie"
++                    tkey, okey = ("title", "original_title") if tmdb_type == "movie" else ("name", "original_name")
++            if not res:
++                info["miss"] = True
++                return info
++            tid = res[0].get("id")
++            data = await tmdb._get_json(
++                f"{tmdb_type}/{tid}?append_to_response=translations", f"pt_text {tmdb_type} {tid}"
++            )
++    if not isinstance(data, dict):
++        info["miss"] = True
++        return info
++    trs = ((data.get("translations") or {}).get("translations")) or []
++    info["orig"] = (data.get(okey) or "").strip()
++    info["en_title"] = (data.get(tkey) or "").strip() or _pick_translation(trs, "en", None, tkey)
++    info["br_title"] = _pick_translation(trs, "pt", "BR", tkey)
++    info["br_overview"] = _pick_translation(trs, "pt", "BR", "overview")
++    # sem pt-BR: a de Portugal ainda é português (melhor que tradução automática)
++    info["pt_overview"] = _pick_translation(trs, "pt", None, "overview")
++    info["en_overview"] = (data.get("overview") or "").strip() or _pick_translation(trs, "en", None, "overview")
++    return info
++
++
++async def _get_info(imdb_id: str, media_type: str) -> dict | None:
++    _ensure_loaded()
++    key = f"{media_type}:{imdb_id}"
++    cur = _cache.get(key)
++    if cur:
++        age = time.time() - cur.get("ts", 0)
++        if age < (_TTL_MISS if cur.get("miss") else _TTL_OK):
++            return cur
++    task = _inflight.get(key)
++    if task is None:
++        async def _run():
++            try:
++                info = await _fetch_info(imdb_id, media_type)
++                if not info.get("miss"):
++                    ov = info.get("br_overview") or info.get("pt_overview")
++                    if not ov and info.get("en_overview"):
++                        tr = await translate(info["en_overview"], sl="en")
++                        if tr:
++                            info["auto_overview"] = tr
++                _cache[key] = info
++                _schedule_save()
++                return info
++            except Exception as e:
++                log_swallowed("pt_text._get_info", e)
++                return None
++            finally:
++                _inflight.pop(key, None)
++
++        task = asyncio.get_running_loop().create_task(_run())
++        _inflight[key] = task
++    return await asyncio.shield(task)
++
++
++def title_for(info: dict, current: str) -> str:
++    """Título brasileiro; senão o original legível; senão o inglês."""
++    br = info.get("br_title") or ""
++    if br and not has_nonlatin(br):
++        return br
++    orig = info.get("orig") or ""
++    if current and not has_nonlatin(current):
++        # sem título brasileiro, o que veio (original ou inglês) já serve
++        return current
++    if orig and not has_nonlatin(orig):
++        return orig
++    return info.get("en_title") or current
++
++
++def overview_for(info: dict) -> str:
++    return info.get("br_overview") or info.get("pt_overview") or info.get("auto_overview") or ""
++
++
++# ---------------------------------------------------------------- metas
++_IMDB_RE = re.compile(r"^(tt\d+)")
++
++
++def _looks_title(line: str) -> bool:
++    return len(line) >= 40 and len(_WORD.findall(line.lower())) >= 6
++
++
++async def fix_meta(meta: dict, media_type: str | None = None) -> dict:
++    """Devolve uma cópia com título e sinopse em PT (o que não ficar pronto fica como está)."""
++    if not isinstance(meta, dict):
++        return meta
++    mtype = media_type or meta.get("type") or ""
++    mid = str(meta.get("id") or "")
++    m = _IMDB_RE.match(mid)
++    name = meta.get("name") or ""
++    desc = meta.get("description") or ""
++    out = dict(meta)
++    if isinstance(meta.get("videos"), list) and meta["videos"]:
++        out["videos"] = _fix_videos(meta["videos"])
++    if m and mtype in ("movie", "series", "anime"):
++        needs_desc = not desc.strip() or any(
++            _looks_title(ln) and not is_portuguese(ln) for ln in desc.split("\n")
++        ) or (len(desc) < 40 and has_nonlatin(desc))
++        info = await _get_info(m.group(1), "movie" if mtype == "movie" else "series")
++        if not info or info.get("miss"):
++            if needs_desc and desc.strip():
++                out["description"] = await _translate_lines(desc)
++            return out
++        # título brasileiro pode faltar mesmo num nome latino (Cinemeta/Kitsu mandam o inglês)
++        out["name"] = title_for(info, name)
++        if needs_desc:
++            ov = overview_for(info)
++            if not desc.strip():
++                if ov:
++                    out["description"] = ov
++            else:
++                lines = desc.split("\n")
++                en_ov = info.get("en_overview") or ""
++                new = []
++                for ln in lines:
++                    if _looks_title(ln) and not is_portuguese(ln):
++                        if ov and en_ov and (ln.strip()[:40] == en_ov[:40] or en_ov.startswith(ln.strip()[:40])):
++                            new.append(ov)
++                        elif ov and len(lines) == 1:
++                            new.append(ov)
++                        else:
++                            new.append(await translate(ln) or ln)
++                    else:
++                        new.append(ln)
++                out["description"] = "\n".join(new)
++        return out
++    # textos nossos (TV, Sua semana, Minha TV, sagas): só traduz linhas em escrita estrangeira
++    if desc and has_nonlatin(desc):
++        out["description"] = await _translate_lines(desc, only_nonlatin=True)
++    if has_nonlatin(name):
++        out["name"] = await translate(name) or name
++    return out
++
++
++_VID_BATCH = 300  # traduções novas de episódio por abertura, em 2º plano (o resto vem nas próximas)
++_vid_pending: set[str] = set()
++
++
++def _fix_videos(videos: list) -> list:
++    """Sinopse de episódio em PT: usa o que já está traduzido no cache e agenda o resto."""
++    out = []
++    todo: list[str] = []
++    for v in videos:
++        if not isinstance(v, dict):
++            out.append(v)
++            continue
++        key = "overview" if v.get("overview") else "description" if v.get("description") else None
++        txt = (v.get(key) or "").strip() if key else ""
++        if txt and _looks_title(txt) and not is_portuguese(txt):
++            tr = _tr_cache.get(txt[:300])
++            if tr:
++                v = dict(v)
++                v[key] = tr
++            elif txt not in _vid_pending and len(todo) < _VID_BATCH:
++                todo.append(txt)
++        out.append(v)
++    if todo:
++        _vid_pending.update(todo)
++
++        async def _bg():
++            try:
++                for t in todo:
++                    await translate(t)
++            finally:
++                _vid_pending.difference_update(todo)
++
++        try:
++            asyncio.get_running_loop().create_task(_bg())
++        except RuntimeError:
++            _vid_pending.difference_update(todo)
++    return out
++
++
++async def _translate_lines(desc: str, only_nonlatin: bool = False) -> str:
++    out = []
++    for ln in desc.split("\n"):
++        if only_nonlatin:
++            if has_nonlatin(ln):
++                # traduz só o trecho estrangeiro, mantendo o começo (•, ▶ Agora:, T1E2...)
++                out.append(_NONLATIN_SPAN.sub(lambda mm: _span_map.get(mm.group(0).strip(), mm.group(0)), ln))
++            else:
++                out.append(ln)
++        elif _looks_title(ln) and not is_portuguese(ln):
++            out.append(await translate(ln) or ln)
++        else:
++            out.append(ln)
++    return "\n".join(out)
++
++
++_NONLATIN_SPAN = re.compile(
++    r"[Ͱ-ϿЀ-ӿ֐-ۿऀ-෿฀-๿ᄀ-ᇿ぀-ヿ"
++    r"㐀-鿿가-힯＀-￯　-〿][^\n•·|]*?(?=\s+T\d+E\d+|\s*[·|(]|$)"
++)
++_span_map: dict[str, str] = {}
++
++
++async def _prepare_spans(texts: list[str]) -> None:
++    spans = set()
++    for t in texts:
++        for mm in _NONLATIN_SPAN.finditer(t or ""):
++            s = mm.group(0).strip()
++            if s and s not in _span_map:
++                spans.add(s)
++    async def _one(s):
++        tr = await translate(s)
++        if tr:
++            _span_map[s] = tr
++            if len(_span_map) > 5000:
++                _span_map.pop(next(iter(_span_map)))
++
++    await asyncio.gather(*[_one(s) for s in list(spans)[:60]])
++
++
++async def fix_metas(metas: list, media_type: str, budget: float = 3.0) -> list:
++    """Corrige uma lista de metas em paralelo dentro do orçamento de tempo.
++
++    O que não terminar continua em segundo plano (vai para o cache) e o item sai como veio.
++    """
++    if not metas:
++        return metas
++    _ensure_loaded()
++    try:
++        await asyncio.wait_for(
++            asyncio.shield(_prepare_spans([(m or {}).get("description") or "" for m in metas] + [(m or {}).get("name") or "" for m in metas])),
++            timeout=budget,
++        )
++    except Exception as e:
++        log_swallowed("pt_text.fix_metas.spans", e)
++    tasks = [asyncio.ensure_future(fix_meta(m, media_type)) for m in metas]
++    done, _pending = await asyncio.wait(tasks, timeout=budget)
++    out = []
++    for m, t in zip(metas, tasks):
++        if t in done and not t.cancelled() and t.exception() is None:
++            out.append(t.result())
++        else:
++            if t in done and t.exception() is not None:
++                log_swallowed("pt_text.fix_metas", t.exception())
++            out.append(m)
++    return out
 diff --git a/comet/services/radio.py b/comet/services/radio.py
 new file mode 100644
 index 0000000..3e83fc1

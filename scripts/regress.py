@@ -430,6 +430,23 @@ def t_unit_fileiras_homonimos() -> tuple[str, str]:
     return "PASS", "grupos (filtro, rodízio, posição) e homônimos (título de episódio, HDR, ano) OK"
 
 
+def t_unit_pt_text() -> tuple[str, str]:
+    """09/11/2026: título brasileiro (ou original legível, ou inglês) e detecção de PT."""
+    from comet.services.pt_text import is_portuguese, has_nonlatin, title_for
+
+    assert is_portuguese("Dois trabalhadores sem grana se unem para assaltar uma loja de departamentos.")
+    assert not is_portuguese("Years ago, the fearsome Pirate King was executed leaving a huge pile of treasure.")
+    assert not is_portuguese("En la época de los reinos combatientes, un joven huérfano y su amigo")
+    assert not is_portuguese("") and has_nonlatin("กฎหลังเที่ยงคืน")
+    # título brasileiro existe: usa (Cinemeta manda o inglês)
+    assert title_for({"br_title": "A Viagem de Chihiro", "orig": "千と千尋の神隠し", "en_title": "Spirited Away"}, "Spirited Away") == "A Viagem de Chihiro"
+    # sem título brasileiro: fica o que veio (Transformers, We Met in December)
+    assert title_for({"br_title": "", "orig": "Transformers", "en_title": "Transformers"}, "Transformers") == "Transformers"
+    # original ilegível e sem título brasileiro: inglês
+    assert title_for({"br_title": "", "orig": "กฎหลังเที่ยงคืน", "en_title": "The Rules"}, "กฎหลังเที่ยงคืน") == "The Rules"
+    return "PASS", "título BR > original legível > inglês; PT x EN/ES OK"
+
+
 def t_unit_source_breaker() -> tuple[str, str]:
     from comet.core import breaker
     breaker.reset()
@@ -1700,6 +1717,7 @@ def main():
         ("unit_episodios_ptbr", t_unit_episodios_ptbr),
         ("unit_nuvio_4k_natal", t_unit_nuvio_4k_natal),
         ("unit_fileiras_homonimos", t_unit_fileiras_homonimos),
+        ("unit_pt_text", t_unit_pt_text),
         ("unit_novidades_1108", t_unit_novidades_1108),
     ]
 
