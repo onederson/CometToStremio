@@ -1,6 +1,6 @@
 # Comet A71: o addon de Stremio da casa (Comet + Real-Debrid + TorBox, PT-BR primeiro)
 
-*Início: 29/10/2026 · Última atualização: 02/11/2026, noite (horário de Brasília)*
+*Início: 29/10/2026 · Última atualização: 09/11/2026 (horário de Brasília)*
 
 > **🤖 Para outra IA continuar daqui:** leia **`HANDOFF.md`** inteiro antes de rodar qualquer comando (regras, segurança, histórico item a item na Seção 4, onde paramos na Seção 8). O modo de trabalho está em **`CLAUDE.md`** (desde 02/11/2026 o Claude implementa direto, sem delegar ao `agy`). O contexto da Fase 1 (rede, AdGuard, ADB) está resumido nas Seções 1 e 3 do `HANDOFF.md`.
 
@@ -8,7 +8,7 @@
 
 ## 1. O que é
 
-Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71** com root, dentro de um Debian em chroot. Ele junta torrents de várias fontes, entrega pelo **Real-Debrid** e pelo **TorBox**, e coloca **dublado PT-BR em primeiro lugar**. Também monta uma tela inicial estilo Netflix, com TV ao vivo, legendas, avisos no Telegram e testes automáticos.
+Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71** com root, dentro de um Debian em chroot. Ele junta torrents de várias fontes, entrega pelo **TorBox** (principal) e pelo **Real-Debrid** (reserva), e coloca **dublado PT-BR em primeiro lugar**. Também monta uma tela inicial estilo Netflix, com TV ao vivo, legendas, avisos no Telegram e testes automáticos.
 
 **Links (o token fica no `.env`; não versionar):**
 
@@ -27,14 +27,15 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 ## 2. O que ele faz (resumo)
 
 **Fontes e reprodução**
-- Torrentio, MediaFusion, 2 instâncias do Comet, Zilean, StremThru, Peerflix, SeaDex, Prowlarr (Catálogo BeTor + Knaben), BRSites (sites BR) e links diretos FenixFlix/FrostStream.
-- Real-Debrid + **TorBox** (2º debrid): uma linha por torrent, RD ⚡ → TorBox ⚡ → baixar. O bloqueio 451 do RD cai automaticamente no TorBox.
+- Torrentio, MediaFusion, 2 instâncias do Comet, Zilean, StremThru, Peerflix, SeaDex, Prowlarr (Catálogo BeTor + Knaben), Nyaa (anime), BRSites (sites BR) e links diretos FenixFlix/FrostStream.
+- **TorBox** (debrid principal, `DEBRID_PRIMARY`) + Real-Debrid (reserva): uma linha por torrent, TorBox ⚡ → RD ⚡ → baixar. O bloqueio 451 do RD cai automaticamente no TorBox.
 - **`▶ Assistir`** no topo: a melhor opção (dublado pronto, 1080p, ≤ 30 GB) já pré-resolvida. **Fora de casa** (IP público/4G) prefere versão leve (≤ 4 GB, 720p antes de 4K).
 - **Áudio PT confirmado:** lê as faixas de áudio de dentro do MKV/MP4 (`🇧🇷✔ 🔊 PT · EN`); quem diz "dublado" e não tem português perde o 🇧🇷.
 - **Próximo episódio instantâneo:** ao abrir um episódio, o seguinte já é buscado. Se o dublado dele não estiver em cache, o debrid já começa a baixar (até 10 por dia).
 - Fonte que falha 3 vezes seguidas é pausada sozinha (breaker); CAM vai para o fim; episódio não lançado mostra aviso.
 
-**Tela inicial (65+ fileiras):** Top 10 com número, 🎲 Sorteio do dia, 📌 Minha lista, 🆕 Novos episódios, 🔔 Chegou dublado, 📅 Estreias da semana, 💡 Recomendados, 🔥 Em alta, 🆕 Lançamentos, 📺 Ao vivo agora, fileiras de mood (😭 chorar, 🤯 plot twist, ⚡ séries curtas, 😌 comédia leve, 👨‍👩‍👧 família, 🌙 suspense), 🏆 Vencedores do Oscar, ⭐ Mais bem avaliados, 📼 Clássicos dublados, originais por streaming, ⚡ Pronto dublado, 🎬 Sagas (abrem com todos os filmes), 🎌 Animes dublados, animes da temporada e TV ao vivo completa.
+**Tela inicial (47 catálogos no manifesto, 42 na tela inicial, em 09/11/2026):** Top 10 com número, 🎲 Sorteio do dia, 📌 Minha lista, 🆕 Novos episódios, 🔔 Chegou dublado, 📅 Estreias da semana, 💡 Recomendados, 🔥 Em alta, 🆕 Lançamentos, 📺 Ao vivo agora, fileiras de mood (😭 chorar, 🤯 plot twist, ⚡ séries curtas, 😌 comédia leve, 👨‍👩‍👧 família, 🌙 suspense), 🏆 Vencedores do Oscar, ⭐ Mais bem avaliados, 📼 Clássicos dublados, originais por streaming, ⚡ Pronto dublado, 🎬 Sagas (abrem com todos os filmes), 🎌 Animes dublados, animes da temporada e TV ao vivo completa.
+- **Fileiras agrupadas (09/11/2026):** fileiras parecidas viram uma só, com filtro `genre` e rodízio diário quando sem filtro: 🎭 Clima do dia (os moods de filme), 🎞️ Gêneros (filme e série), 📺 Nos streamings (filme e série) e ⭐ Originais dos streamings. Os ids antigos continuam respondendo; datas comemorativas só entram na época. Desligar: `CATALOG_GROUPS=False` no `.env`. Se o manifesto mudou, reinstale o link (Stremio e Nuvio) para ver as fileiras novas.
 - **Capas montadas:** logo do título, selos grandes (NOVO EPISÓDIO, DUBLADO, TOP 10), logo do streaming (Netflix, Max, Prime…) e selo dourado **OSCAR**.
 - **Tela inicial instantânea:** ao navegar, os 6 primeiros de cada fileira são aquecidos. Às 4h a "madrugada" aquece até 120 títulos.
 
@@ -50,7 +51,9 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 - Português primeiro, com filtro `🇧🇷 Em português` / `🌎 Outros idiomas`.
 - O "Ao vivo" é testado na hora do clique.
 
-**📻 Rádios ao vivo:** cerca de 370 rádios brasileiras validadas (Radio Browser), com Recife e Pernambuco primeiro. Separadas por região e por tipo, com repasse pelo A71 para funcionar no 4G.
+**📻 Rádios ao vivo:** cerca de 370 rádios brasileiras validadas (Radio Browser), com Recife e Pernambuco primeiro. Separadas por região e por tipo, com repasse pelo A71 para funcionar no 4G. No link do Nuvio a 1ª opção é a rádio em vídeo (`/radio/<id>/tv.ts`: capa parada + áudio, gerada por ffmpeg).
+
+**Nuvio:** link próprio (`NUVIO_LINK_TOKEN`, mesma config do pessoal) para o app NuvioTV na Fire TV; o Stremio segue com o link pessoal.
 
 **Dublado de primeira:** quando o arquivo começa em inglês, o Comet ajusta o cabeçalho no caminho e o PT vira a faixa padrão, sem reencodar. **O Comet aprende** o que você assiste até o fim (`/gosto` no Telegram).
 
@@ -104,7 +107,7 @@ Um servidor **Comet** (addon de Stremio) rodando 24 h num **Samsung Galaxy A71**
 - [x] Filtro/troca do 451, P2P de emergência, anime com numeração absoluta, CAM no fim
 - [x] Legendas PT-BR (sincronia, tradução automática, PT+EN)
 - [x] Tela inicial estilo Netflix, fileiras pessoais, sagas, Kids, capas montadas com selos
-- [x] TorBox como 2º debrid, próximo episódio instantâneo, `/status`
+- [x] TorBox como debrid principal (RD de reserva), próximo episódio instantâneo, `/status`
 - [x] Teste automático por hora (com restauração) e suíte de regressão no deploy
 - [x] Madrugada, Chegou dublado, Estreias da semana, mood, Animes dublados, prestígio (Oscar/Top/Clássicos)
 - [x] Áudio PT confirmado, pausa de fontes, pré-download no debrid

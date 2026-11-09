@@ -1,6 +1,6 @@
 # HANDOFF: Comet Stremio no Galaxy A71 (para outra IA continuar)
 
-*Última atualização: 08/11/2026 (horário de Brasília)*
+*Última atualização: 09/11/2026 (horário de Brasília)*
 
 Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado real verificado, as regras do projeto, como testar e o que vem a seguir**. O `README.md` (Seção 0 e Mapa de arquivos) tem os detalhes da instalação. A Fase 1 (AdGuard) está em `README adguard contexto.md`.
 
@@ -9,17 +9,8 @@ Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado rea
 ## 1. Regras obrigatórias (leia primeiro)
 
 ### Modo de trabalho (do `CLAUDE.md`)
-- A IA principal é **orquestradora**. Ela escreve a especificação em `.orquestra/tarefa.md`, delega ao `agy` (CLI do Antigravity) e revisa com `git diff --stat` / `git diff`, além de uma verificação independente no aparelho. Se aprovar, faz `git add -A`.
-- **Quem roda o `agy`:** desde 30/10/2026 o usuário autorizou a IA a rodá-lo **ela mesma, em segundo plano** (PowerShell com `run_in_background`, saída redirecionada para um log). A IA roda etapa por etapa, revisa cada uma, corrige e **entrega só o resultado final**. Se o ambiente bloquear, peça ao usuário para rodar com `! agy ...`. Comando padrão:
-  ```
-  agy -p "Execute exatamente o que está em .orquestra/tarefa.md. Não faça nada fora do escopo. Ao terminar, rode a verificação descrita e responda em no máximo 5 linhas: arquivos alterados e resultado da verificação." --model gemini-3.8-flash-high --dangerously-skip-permissions --print-timeout 900s
-  ```
-  Para tarefas difíceis, use `--model gemini-4-argon-high` (cota esgotada em 30/10/2026, volta em ~5 dias). Para continuar a mesma conversa, use `-c`. Nunca use os modelos `claude-*` do agy.
-- **Lições sobre o agy (flash):**
-  - Tarefas grandes estouram o tempo: divida em etapas e use `--print-timeout 1800s`.
-  - Ele às vezes dispara tarefas em segundo plano e sai no meio. Escreva no prompt: "NÃO rode tarefas em segundo plano".
-  - Ele relata "aprovado" mesmo quando a própria validação falha. **Sempre confira no aparelho** antes do `git add -A`.
-- Mudanças triviais (menos de ~20 linhas) a IA faz direto. No máximo 3 rodadas por tarefa; depois disso a IA corrige diretamente.
+- Vale o `CLAUDE.md`: desde 02/11/2026 o Claude implementa tudo direto (sem delegar ao `agy`) e pode abrir subagentes em arquivos diferentes. Fluxo resumido: planejar em `.orquestra/` se a tarefa for grande, implementar, verificar (`py_compile`, reiniciar, `smoke.ps1`, `regress.ps1`) e regenerar o patch.
+- O texto antigo sobre o `agy` (orquestrador, comando, lições do flash, até 02/11/2026) é **só histórico**; as especificações antigas estão em `.orquestra/`.
 - **Commit só quando o usuário pedir.** Escreva a mensagem num arquivo temporário e use `git commit -F arquivo`.
 
 ### Segurança e restrições
@@ -31,7 +22,7 @@ Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado rea
 - E-mail do git **só neste repo** (config local): `wandersonks02@gmail.com`.
 - **Não mexa no AdGuard Home nem em nada da Fase 1.** Única exceção: o watchdog do Comet escreve `-1000` em `/proc/<pid>/oom_score_adj` do processo do AdGuard (pedido do usuário), sem tocar em arquivos de `/data/adguard/`.
 - **Não contorne o bloqueio 451 do Real-Debrid** (DMCA, `infringing_file`). O usuário pediu duas vezes e foi recusado. O que existe é legítimo: troca automática para outro torrent e fallback P2P rotulado. Não proponha truques para fazer o RD servir um hash bloqueado.
-- **Não sugerir outro debrid nem outra assinatura**: o usuário não vai assinar.
+- **Não sugerir outro debrid nem outra assinatura**: o usuário não vai assinar. (O TorBox foi assinado pelo próprio usuário em 02/11/2026; ele é o debrid **principal**, `DEBRID_PRIMARY`, padrão `torbox`: TorBox ⚡ → RD ⚡ → baixar.)
 - Idioma das respostas ao usuário: **PT-BR**, linguagem simples.
 
 ### Pegadinhas do ambiente (Windows + PowerShell)
@@ -193,7 +184,7 @@ Flags importantes do `.env`:
     - Revisão: o agy deixou um `NameError: aliases` no pré-resolve (quebrava o pedido de stream com RD) e tratava DNS sem resposta como bloqueio; os dois corrigidos à mão.
 25. **Rodada "tinindo" (01/11/2026):**
     - **Teste automático** (`scripts/smoke.py` → `/opt/comet-tools/smoke.py`; `scripts/smoke.ps1` no PC, chamado pelos `deploy_*.ps1`): manifest, 4 fileiras (capas absolutas que abrem), stream de filme e série, play do `▶ Assistir` até o vídeo, e `Traceback`/`NameError` no log. O watchdog roda 3 min após o Comet subir e a cada 60 min (`SMOKE OK`/`SMOKE FALHOU`/`RESTAURADO` no `watchdog.log`). Passou → snapshot `/opt/comet/data/last_good.tar.gz` (+`.sha1`). Falhou **por código** (manifest, catálogos, log, stream 5xx/sem conexão) com código diferente do snapshot → restaura, reinicia e testa de novo; falha externa (poucos streams, link fora) só avisa. `data/smoke.disable` pausa. `NTFY_TOPIC` no `.env` (opcional) manda push pelo ntfy.sh. Resultado em `data/smoke_last.json`.
-    - **TorBox como 2º debrid** (`TORBOX_API_KEY` no `.env`; entra só nos links pessoal/Kids, depois do RD). Uma linha por torrent: RD ⚡ sem 451 → TorBox ⚡ → RD ⬇️ → TorBox ⬇️. Descrição mostra `Real-Debrid`/`TorBox`. Playback: 451 no RD tenta o mesmo hash no TorBox antes de trocar (`🔁 451 no RD → TorBox`). `Pronto dublado` conta os dois. Medido: dos 31 dublados bloqueados no RD, 28 estão no TorBox; Ben 10 Omniverse `1:2` 0 → 8 dublados ⚡; Avatar Seven Havens TorBox 1 → 76 ⚡.
+    - **TorBox como 2º debrid na época (virou o principal no item 30)** (`TORBOX_API_KEY` no `.env`; entra só nos links pessoal/Kids, depois do RD). Uma linha por torrent (ordem original; hoje o TorBox vem primeiro): RD ⚡ sem 451 → TorBox ⚡ → RD ⬇️ → TorBox ⬇️. Descrição mostra `Real-Debrid`/`TorBox`. Playback: 451 no RD tenta o mesmo hash no TorBox antes de trocar (`🔁 451 no RD → TorBox`). `Pronto dublado` conta os dois. Medido: dos 31 dublados bloqueados no RD, 28 estão no TorBox; Ben 10 Omniverse `1:2` 0 → 8 dublados ⚡; Avatar Seven Havens TorBox 1 → 76 ⚡.
       - Correção na revisão (`media_search.py`): o cache `debrid_availability` só guarda positivos, e o Comet só consultava torrents novos quando *algum* serviço já tinha positivo → o TorBox nunca era consultado para torrents já conhecidos. Agora `_CHECKED` (memória, 12 h) guarda o que cada serviço já checou e `select_debrid_refresh_hashes(..., services=)` consulta o que falta.
       - O TorBox recusa (403) pedidos sem `User-Agent`.
     - **Próximo episódio instantâneo** (`comet/services/prefetch.py`, `PREFETCH_NEXT_EPISODE=True`): ao dar play num episódio, busca em background a lista do seguinte (ou `S+1:1`; não se ainda não estreou), 1 por série/20 min, 2 ao mesmo tempo. Severance `2:3` → `2:4`: 17 s → 0,5 s. Log `⏭️ pré-busca`.
@@ -296,9 +287,9 @@ Flags importantes do `.env`:
     - **Link próprio:** `NUVIO_LINK_TOKEN` no `.env` (`https://a71comet.duckdns.org:7443/<token>/manifest.json`), mesma config do link pessoal (`is_personal_request`). Instalado na TV; o Stremio segue com o link pessoal, sem mudança. O Nuvio não troca addon de mesmo id: remova o antigo antes de instalar.
     - **Diferenças em relação ao pessoal (`is_nuvio_request`):** `meta.py` não usa `/art/hero` (o Nuvio escreve logo, notas e elenco por cima e o texto duplicava); `stream.py` não põe `&fix=1` nem o aviso "Começa em EN" e mostra `PT · EN` (`_pt_auto`), porque o Nuvio com a TV em pt-BR escolheu Português sozinho em Reacher, cujo arquivo traz EN primeiro. Teste `t_nuvio` no `regress.py`.
     - **Conferido na TV:** tela inicial, Sua semana, Chegou dublado, Top 10, Maratonas (toca o filme certo), busca, lista de fontes, legendas, TV (relato do usuário), `Pular Abertura` (introdb.app, em Hunter x Hunter). O cartão "Próximo episódio" mantém a fonte `▶ Assistir`. No fim do episódio o Nuvio pergunta "Continuar assistindo?" e não avança sozinho (ao menos em 20 s).
-    - **Rádio:** o som sai, mas fica em "Iniciando vídeo…", porque a tela de carregamento do Nuvio espera um quadro de vídeo. Vídeo falso exigiria ffmpeg, que o A71 não tem.
+    - **Rádio:** o som saía, mas ficava em "Iniciando vídeo…", porque a tela de carregamento do Nuvio espera um quadro de vídeo. **Resolvido em 09/11/2026** (item 34: vídeo gerado por ffmpeg).
     - **Correções (06/11/2026):** título curto quase igual é outra obra (`_short_title_mismatch` em `filtering.py`: Reacher × Preacher, até 10 letras e 1 de diferença no tamanho); os links diretos são validados com dublados e maiores resoluções primeiro (o FenixFlix manda ~26 links e o lote só tem 7 s); direto 480p/SD não vira `▶ Assistir` se houver ⚡ em 720p ou mais (em Hunter x Hunter ele é outra versão, sem ano no nome, e travou o player após muitos saltos); `movie/comet_saga` sem gênero abre a 1ª saga.
-    - **Ainda aberto:** o FenixFlix às vezes responde 403 ou demora; sem nenhum direto válido, o `▶ Assistir` pode cair em torrent SD dublado. O elenco no Nuvio vem sem foto (o app tem enriquecimento TMDB próprio; não testado).
+    - **Ainda aberto:** o FenixFlix às vezes responde 403 ou demora; sem nenhum direto válido, o `▶ Assistir` pode cair em torrent SD dublado. ~~O elenco no Nuvio vem sem foto~~ e ~~o autoplay do próximo episódio~~: **resolvidos pelo próprio app** (enriquecimento TMDB e "Autorreproduzir próximo episódio", ligados em 07/11/2026).
     - **Versão do Stremio congelada (07/11/2026):** a partir daqui o foco é o Nuvio. A versão que funcionava no Stremio ficou salva na tag `stremio-final` e no branch `stremio` (commit `a3f60cf`, patch idêntico ao que rodava no A71). No A71 há um backup completo em `/var/backups/stremio-final` (chroot): `stremio-final-20261107.tar.gz` (pasta `/opt/comet` sem `.venv`/`img_cache`/`live_art`, mais o Caddyfile), `comet.db.gz`, `env.bak`, `COMET_BASE_COMMIT` e `SHA256SUMS`. Para voltar: extrair o tar em `/opt` (ou `git checkout stremio-final` e `deploy_patches.ps1`), restaurar `.env` e o banco, reiniciar. Regra da fase Nuvio: o link pessoal do Stremio continua funcionando enquanto o Nuvio não provar que é estável; código só do Stremio é cortado em etapas aprovadas.
     - **Fase Nuvio, 1ª leva (07/11/2026):**
       - TV atualizada para o NuvioTV **1.1.0-beta.12** (armeabi-v7a, por cima, sem perder dados). APKs em `downloads/nuvio/` (fora do git), incluindo o `nuvio-1.0.0-base.apk` para voltar (voltar exige desinstalar, e isso apaga as configurações do app).
@@ -339,6 +330,14 @@ Flags importantes do `.env`:
     - **Porta 7443 (Caddy):** responde 404 para `/admin`, `/metrics`, `/docs`, `/openapi.json`, `/configure`, `/cometnet` e caminhos de robô (`*.php`, `/.env`, `/.git`, `/wp-*`...). O Caddy daqui não tem módulo de limite de pedidos. Espelho em `config/Caddyfile`.
     - **Testes:** `unit_novidades_1108` e `extras` no `regress.py`. As fileiras extras ficaram fora da contagem mínima do teste `catalogos`.
     - **Listas de Natal "sumidas" no Nuvio:** não era bug. O manifesto já as tinha em 3º e 4º, e a TV passou a pedi-las às 10:35 de 08/11 (`uiautomator` mostrou as fileiras).
+34. **Diagnóstico e enxugamento (09/11/2026):**
+    - **A. Fileiras agrupadas.** O manifesto pessoal caiu de 88 para 47 catálogos (42 na tela inicial). Novo `comet/services/row_groups.py` junta fileiras parecidas numa só, com filtro `genre` e rodízio diário quando sem filtro: 🎭 Clima do dia (8 moods de filme), 🎞️ Gêneros (filme: Ação, Comédias, Terror, Família, Documentários, Aclamados; série: Crime e suspense, Doramas, Aclamados), 📺 Nos streamings (filme e série: Netflix, Prime Video, Disney+, HBO Max, Apple TV+, Paramount+, Globoplay, Crunchyroll) e ⭐ Originais dos streamings (série). Os ids antigos continuam respondendo. Datas comemorativas fora de época saíram do manifesto (só entram na época). Desligar tudo: `CATALOG_GROUPS=False` no `.env`. A montagem do manifesto foi movida para `comet/services/catalog_manifest.py` (`catalogs.py` caiu de 4.910 para ~4.170 linhas). Como o manifesto mudou, o app precisa recarregar o manifesto. **Nuvio (09/11):** o botão "Atualizar addons" não recarrega; bastou fechar e abrir o app (aqui, junto com a atualização para o NuvioTV **1.1.0**), e a TV passou a mostrar 47 catálogos e as 4 fileiras agrupadas. O usuário autorizou atualizar o Nuvio sempre que sair versão nova (se der problema, voltar à anterior). **Stremio:** guarda o manifesto antigo na conta e continua funcionando, porque os ids antigos respondem; para ver as fileiras novas, reinstale o link pessoal.
+    - **B. Homônimos.** `comet/metadata/siblings.py` + `filtering.py` detectam série com o MESMO nome (One Piece anime 1999 × live-action 2023; Doctor Who 1963 × 2005) e bloqueiam releases da outra: por título de episódio exclusivo da outra (ou, se o título existe nas duas, só no número SxxEyy da outra), por Dolby Vision/HDR quando a nossa é antiga (≤ 2012) e a outra nova (≥ 2016), e por ano no nome ≥ estreia da homônima quando a nossa já acabou antes. Antes, o 1º resultado do One Piece anime era o live-action da Netflix. Limite: pacotes de temporada sem ano no nome do torrent ainda passam (Doctor Who 1963).
+    - **C. Anime.** O "1 dublado → 0" do regress em One Piece 1:1 era falso positivo antigo ("Dual-Audio" = japonês + inglês); hoje vêm 3 PT-BR (links diretos FenixFlix).
+    - **D. Velocidade.** O BrSites busca páginas e posts em paralelo (≈ 9 s → 4–5 s). O MediaFusion às vezes travava 30 s e segurava a busca toda: `.env` ganhou `SCRAPER_TIMEOUT_OVERRIDES={"mediafusion:live": 10}`. 1ª busca de episódio medida hoje: 8–17 s; o resto depende do Prowlarr (5–16 s). O aviso "Non-base32" do `normalize_info_hash` não imprime mais traceback.
+    - **E. Nuvio.** A rádio deixou de ficar em "Iniciando vídeo…": no link do Nuvio a 1ª opção é `/radio/<id>/tv.ts` (capa parada 1 quadro/s + áudio AAC, MPEG-TS gerado por ffmpeg; no máximo 2 processos; ffmpeg com `oom_score_adj` 500). ffmpeg 7.1.5 instalado no chroot (apt, `--no-install-recommends`, 89 pacotes; remover com `apt remove ffmpeg`). O Stremio segue com as opções antigas. **Conferido na TV em 09/11:** a opção "com capa na tela" mostra a capa e toca o som (Rádio Flashback Fm), e o ffmpeg fecha ao sair do player. Elenco com foto e autoplay do próximo episódio (pendências do item 32): resolvidos pelo próprio app.
+    - **F. Robustez.** 73 `except Exception: pass` em arquivos nossos agora chamam `log_swallowed("<arquivo>.<função>", e)` (novo em `comet/core/logger.py`: DEBUG no máximo 1x a cada 10 min por local+tipo). Caches em memória com limite (novo `comet/utils/bounded.py`): tradução e palavra-chave da busca, aquecimento, radar, homônimos. Banco: 422 MB, sem páginas livres (VACUUM não ganha nada); a tabela `torrents` (190 mil linhas, 274 MB) vence em 30 dias (`TORRENT_CACHE_TTL`), então o banco se estabiliza.
+    - **G. Testes.** `regress.py` ganhou `unit_fileiras_homonimos`, e `unit_nuvio_4k_natal` foi ajustado (só datas em época no manifesto). Resultado: `REGRESS OK` (47 pass, 1 warn: `comet_mylist` vazio, normal). Patch regenerado: 83 arquivos.
 20. **Episódio não lançado (31/10/2026):** VisionQuest E07/E08 (estreia 04/11 e 11/11) recebiam packs da temporada e um link FrostStream "MegaEmbed" falso (só áudio). Agora, em série com data do episódio maior que hoje, o Comet devolve só o aviso `[⏳] Comet` "Episódio ainda não lançado. Estreia em DD/MM/AAAA." (sem links diretos). O `DIGITAL_RELEASE_FILTER` segue desligado (bloquearia filmes de cinema).
 21. **Legenda só sem áudio PT (31/10/2026):** o pedido de legendas devolve vazio quando o arquivo é PT-BR: links diretos PT (ganham `behaviorHints.filename` `<Addon>.direct.PTBR`), nome do arquivo com PT detectado (`apply_ptbr_detection`) ou arquivo que o Comet já marcou 🇧🇷 na lista de streams (memória `remember_pt_filename`, 50 mil nomes; cobre DUAL de fonte BR). Ressalva: essa memória zera quando o Comet reinicia.
 14. **BRSites** (`comet/scrapers/brsites.py`, `SCRAPE_BRSITES=live`): busca pelo título (inglês e PT), filtra os posts pelo slug (em série, os posts da temporada ou do episódio vêm primeiro; máx. 4 por site), extrai todos os magnets e limpa os prefixos de site do `dn`. Em `filtering.py`, `dual` com tracker `BRSites` conta como PT-BR (igual ao BeTor). Levantamento de 12 sites em `.orquestra/levantamento-br.md`: só esses 2 trazem ganho real; os outros estão mortos ou não acrescentam nada. Ganho medido: GoT `7:2` 10→14 PT-BR, `6:5` 16→21; Transformers One (`tt8864596`) +1 dublado; Rick and Morty sem ganho. Tempo igual (~18 s por série, ~6 s por filme).
@@ -409,14 +408,16 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 3. **Cache por episódio:** antes, qualquer linha em cache da temporada (packs salvos na busca de outro episódio) fazia o Comet pular a busca ao vivo, e o 2º episódio aberto de uma série vinha pobre (ex.: One Piece T1E1 com 47 em vez de 382). Agora `primary_cached` (em `orchestration.py::get_cached_torrents`) só é verdadeiro se houver linha daquele episódio; cada episódio novo faz 1 busca ao vivo (~18 s) e depois vem do cache. A 2ª abertura do mesmo episódio traz um pouco menos que a 1ª (ex.: BB T3E5 370 ao vivo → 213 do cache), comportamento original do Comet.
 4. **Fontes:** MediaFusion recuperado (instância aberta Midnight + parsing corrigido); Peerflix e Comet adicionados com sucesso; TorrentsDB desativado por estar fora do ar (HTTP 502 na origem). AnimeTosho falha no DNS e NekoBT passa de 8 s.
 5. **Indexadores:** FlareSolverr instalado e ligado ao Prowlarr (tag `flaresolverr`; resolve o Cloudflare do 1337x em ~17 s, pico real de ~750 MB PSS). Mas o catálogo do Prowlarr só tem 2 definições públicas pt-BR: BeTor (já ativo) e um site pornô (removido). Os sites BR de dublado não existem mais lá. Testados 8 indexadores gerais (1337x, TPB, EZTV, YTS, uIndex, LimeTorrents, TorrentDownloads, KAT): **nenhum ganho** de total ou PT-BR (Torrentio/Knaben já cobrem) e a busca de série subiu de ~18 s para ~32 s; todos removidos (`PROWLARR_INDEXERS=["1","2","3"]`). Próximo ganho possível: definições Cardigann próprias (`/var/lib/prowlarr/Definitions/Custom`) para sites BR, usando o FlareSolverr já pronto.
-
----
-
-6. **Outros limites:** a 1ª busca de cada episódio leva ~18 s (filme ~6 s), por causa do Prowlarr. Em anime, quase todo PT-BR é legendado, não dublado.
+6. **Outros limites:** a 1ª busca de cada episódio leva 8–17 s (medido em 09/11/2026; filme ~6 s), e o que sobra depende do Prowlarr (5–16 s). Em anime, quase todo PT-BR é legendado, não dublado.
+7. **Homônimos:** pacotes de temporada sem ano no nome do torrent ainda passam (Doctor Who 1963 × 2005; item 34-B).
 
 ---
 
 ## 8. Onde paramos e próximo passo
+
+**Estado (09/11/2026):** item 34 (diagnóstico e enxugamento) rodando no A71: manifesto com 47 catálogos, homônimos bloqueados, rádio em vídeo no Nuvio, log de erros engolidos. `REGRESS OK` (47 pass, 1 warn: `comet_mylist` vazio, normal). `data/smoke.disable` removido.
+- **Pendente do usuário:** reinstalar o link (Stremio e Nuvio) para ver as fileiras agrupadas, e conferir a rádio no Nuvio (TV).
+- **Pendente técnico:** o Prowlarr ainda leva 5–16 s na 1ª busca de episódio; pacotes de temporada de homônimos sem ano no nome passam (Doctor Who 1963).
 
 **Estado (08/11/2026):** item 33 (robustez e novidades) rodando no A71: `SMOKE OK`, `REGRESS OK` (45 pass, 2 warn). `data/smoke.disable` removido.
 
@@ -432,8 +433,8 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 **Último passo feito:** acesso fora de casa (item 29). O link agora é `https://a71comet.duckdns.org:7443/<PERSONAL_LINK_TOKEN>/manifest.json` e foi testado de fora (5 países, HTTP 200). **O usuário reinstalou com o link :7443 e confirmou que funciona no 4G (02/11/2026).**
 
 **Pendente do lado do usuário:**
-2. (Opcional) AdGuard: reescrita `a71comet.duckdns.org` → `192.168.3.44` (o roteador já faz NAT loopback, então não é obrigatória).
-6. `NTFY_TOPIC` não é mais necessário: os avisos vão pelo Telegram.
+1. (Opcional) AdGuard: reescrita `a71comet.duckdns.org` → `192.168.3.44` (o roteador já faz NAT loopback, então não é obrigatória).
+2. `NTFY_TOPIC` não é mais necessário: os avisos vão pelo Telegram.
 
 **Se o usuário relatar problema:**
 - Fora de casa não abre: `nslookup a71comet.duckdns.org 1.1.1.1` tem que dar o IP público da casa (o watchdog atualiza a cada 10 min; falha aparece como `DuckDNS: falha` no `watchdog.log`); a regra 7443 do roteador tem que existir; teste externo em check-host.net (`check-http` em `https://a71comet.duckdns.org:7443/manifest.json`).
@@ -444,7 +445,7 @@ Em todos os casos os PT-BR vêm primeiro, ordenados por resolução. Também med
 
 **TorBox:** assinado pelo usuário em 02/11/2026. **SubDL:** o usuário decidiu não trocar a chave.
 
-**Próximas melhorias:** ver `MELHORIAS.md` (medido em 02/11: respostas sem compressão, tela inicial com 65 fileiras = 1,47 MB, lista de Interestelar com 1.489 fontes = 878 KB, capa nova 1–1,5 s). **Vigia externo ligado (02/11/2026):** `HEALTHCHECK_URL` no `.env` (healthchecks.io, check `Comet A71`, período 5 min, tolerância 10 min, integração Telegram do próprio healthchecks). O `watchdog.sh` (`ping_healthcheck`) manda o sinal a cada 5 min só se o `manifest` local responder; Comet travado manda `/fail` na hora; A71 sem energia/internet → o healthchecks avisa no Telegram.
+**Próximas melhorias:** ver `MELHORIAS.md` (medido em 02/11: respostas sem compressão, tela inicial com 65 fileiras = 1,47 MB; hoje são 47 catálogos, 42 na tela inicial, desde 09/11/2026, lista de Interestelar com 1.489 fontes = 878 KB, capa nova 1–1,5 s). **Vigia externo ligado (02/11/2026):** `HEALTHCHECK_URL` no `.env` (healthchecks.io, check `Comet A71`, período 5 min, tolerância 10 min, integração Telegram do próprio healthchecks). O `watchdog.sh` (`ping_healthcheck`) manda o sinal a cada 5 min só se o `manifest` local responder; Comet travado manda `/fail` na hora; A71 sem energia/internet → o healthchecks avisa no Telegram.
 
 **Ideias que ficaram para depois (combinadas com o usuário):** perfis da família (um link por pessoa com histórico próprio; o usuário não quis agora), Letterboxd/MyAnimeList (só se ele usar), filtro por aparelho que trava com arquivo pesado (o app não se identifica; hoje só existe "fora de casa"), selo de áudio de cinema (Atmos/DTS-HD).
 

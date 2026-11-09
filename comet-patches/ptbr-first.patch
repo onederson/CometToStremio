@@ -276,16 +276,16 @@ index 0000000..1fdce15
 +        raise HTTPException(status_code=404, detail="Artwork not found")
 diff --git a/comet/api/endpoints/catalog.py b/comet/api/endpoints/catalog.py
 new file mode 100644
-index 0000000..856f793
+index 0000000..fd8af24
 --- /dev/null
 +++ b/comet/api/endpoints/catalog.py
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,226 @@
 +import urllib.parse
 +from fastapi import APIRouter, Request
 +from fastapi.responses import JSONResponse
 +
 +from comet.core.config_validation import config_check, is_kids_request, is_personal_request
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.services.catalogs import get_catalog
 +
@@ -440,6 +440,10 @@ index 0000000..856f793
 +                content={"metas": []},
 +                headers={"Cache-Control": "public, max-age=600"},
 +            )
++        from comet.services import row_groups as _row_groups
++        if _row_groups.is_group(id):
++            # fileira agrupada: o filtro escolhe o membro; sem filtro, rodízio do dia
++            id, extra_dict = _row_groups.resolve(id, type, extra_dict)
 +        from comet.services import extra_rows as _extra_rows
 +        if _extra_rows.is_extra_catalog(id):
 +            # futebol, sessão da noite, Minha TV, retrospectiva: só no link pessoal (e Nuvio)
@@ -486,8 +490,8 @@ index 0000000..856f793
 +                _p = _m.get("poster") or ""
 +                if "/art/" in _p and "o=1" not in _p and oscar_won(_m.get("id")):
 +                    _m["poster"] = _p + ("&" if "?" in _p else "?") + "o=1"
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("catalog.get_catalog_endpoint", _e)
 +        try:
 +            metas = await _apply_live_covers(metas, id, is_personal)
 +        except Exception as _lc_err:
@@ -504,13 +508,14 @@ index 0000000..856f793
 +        )
 diff --git a/comet/api/endpoints/live_routes.py b/comet/api/endpoints/live_routes.py
 new file mode 100644
-index 0000000..6808008
+index 0000000..1450026
 --- /dev/null
 +++ b/comet/api/endpoints/live_routes.py
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,95 @@
 +"""Rotas sem config: abertura testada de canal ao vivo (e o repasse das rádios)."""
 +from fastapi import APIRouter, Request
 +from fastapi.responses import RedirectResponse, Response
++from comet.core.logger import log_swallowed
 +
 +router = APIRouter()
 +
@@ -561,8 +566,8 @@ index 0000000..6808008
 +                  if bold else ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")):
 +            try:
 +                return ImageFont.truetype(p, sz)
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("live_routes.font", _e)
 +        return ImageFont.load_default()
 +
 +    # ondas de rádio
@@ -590,6 +595,12 @@ index 0000000..6808008
 +    b = io.BytesIO()
 +    img.save(b, "PNG", optimize=True)
 +    return b.getvalue()
++
++
++@router.get("/radio/{station_id}/tv.ts", tags=["Live"])
++async def radio_video(station_id: str, request: Request):
++    from comet.services.radio import relay_radio_video
++    return await relay_radio_video(station_id, request)
 +
 +
 +@router.api_route("/radio/{station_id}", methods=["GET"], tags=["Live"])
@@ -693,7 +704,7 @@ index bce0fec..bce38a9 100644
          request,
 diff --git a/comet/api/endpoints/meta.py b/comet/api/endpoints/meta.py
 new file mode 100644
-index 0000000..210636e
+index 0000000..317b5ae
 --- /dev/null
 +++ b/comet/api/endpoints/meta.py
 @@ -0,0 +1,175 @@
@@ -702,7 +713,7 @@ index 0000000..210636e
 +from fastapi.responses import JSONResponse
 +
 +from comet.core.config_validation import config_check, is_nuvio_request, is_personal_request
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.services.meta_ptbr import get_meta_ptbr
 +
 +router = APIRouter()
@@ -723,8 +734,8 @@ index 0000000..210636e
 +            from comet.core.database import database
 +            rows = await database.fetch_all("SELECT season, episode FROM dub_watch WHERE imdb = :i AND dub_ready = 1", {"i": imdb})
 +            dub_eps = {(int(r["season"]), int(r["episode"])) for r in rows}
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("meta._apply_live_art", _e)
 +        last_ep = {}
 +        for v in vids:
 +            try:
@@ -845,8 +856,8 @@ index 0000000..210636e
 +                        meta["description"] = f"{_line}\n\n{_desc}" if _desc else _line
 +                    if _od and _od.get("imdbRating") not in (None, "N/A"):
 +                        meta["imdbRating"] = _od["imdbRating"]
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("meta.get_meta_endpoint", _e)
 +            try:
 +                meta = await _apply_live_art(meta, type, clean_id.split(":")[0], clean_background=is_nuvio_request(b64config))
 +            except Exception as _la_err:
@@ -1523,10 +1534,10 @@ index 35b1121..b470da6 100644
      return RedirectResponse(download_url, status_code=302)
 diff --git a/comet/api/endpoints/status.py b/comet/api/endpoints/status.py
 new file mode 100644
-index 0000000..3aadae8
+index 0000000..e2626b4
 --- /dev/null
 +++ b/comet/api/endpoints/status.py
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,547 @@
 +from datetime import datetime, timezone, timedelta
 +import hashlib
 +import html
@@ -1542,6 +1553,7 @@ index 0000000..3aadae8
 +from comet.core.database import database
 +from comet.core.breaker import get_state as get_breaker_state
 +from comet.core.logger import (
++    log_swallowed,
 +    get_comet_uptime_seconds,
 +    get_playback_stats,
 +    get_sources_stats,
@@ -1619,8 +1631,8 @@ index 0000000..3aadae8
 +                    parts = line.split()
 +                    kb = int(parts[1])
 +                    swap_free = f"{kb // 1024} MB"
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("status._get_system_memory", _e)
 +    return mem_avail, swap_free
 +
 +
@@ -1634,8 +1646,8 @@ index 0000000..3aadae8
 +                    kb = int(parts[1])
 +                    rss = f"{kb // 1024} MB"
 +                    break
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("status._get_process_rss", _e)
 +    return rss
 +
 +
@@ -2074,7 +2086,7 @@ index 0000000..3aadae8
 +"""
 +    return HTMLResponse(content=content, status_code=200)
 diff --git a/comet/api/endpoints/stream.py b/comet/api/endpoints/stream.py
-index 94f56ae..e8a5ce8 100644
+index 94f56ae..68ca9f9 100644
 --- a/comet/api/endpoints/stream.py
 +++ b/comet/api/endpoints/stream.py
 @@ -1,13 +1,33 @@
@@ -3060,7 +3072,7 @@ index 94f56ae..e8a5ce8 100644
 +        return _build_stream_response(request, {"streams": _xs}, is_empty=(len(_xs) == 0))
 +    if media_type == "tv" and clean_id.startswith("cometlive:"):
 +        from comet.services.live_tv import get_live_tv_stream
-+        live_streams = await get_live_tv_stream(clean_id)
++        live_streams = await get_live_tv_stream(clean_id, nuvio=is_nuvio_request(b64config))
 +        return _build_stream_response(
 +            request, {"streams": live_streams}, is_empty=(len(live_streams) == 0)
 +        )
@@ -3952,7 +3964,7 @@ index 94f56ae..e8a5ce8 100644
 +    return build_status_video_response(["KIDS_BEDTIME"], default_key="KIDS_BEDTIME")
 diff --git a/comet/api/endpoints/subtitles.py b/comet/api/endpoints/subtitles.py
 new file mode 100644
-index 0000000..ffdd3da
+index 0000000..3da429f
 --- /dev/null
 +++ b/comet/api/endpoints/subtitles.py
 @@ -0,0 +1,446 @@
@@ -3969,7 +3981,7 @@ index 0000000..ffdd3da
 +from comet.services.subtitles import is_known_pt_filename
 +from comet.services.filtering import apply_ptbr_detection
 +from comet.core.config_validation import config_check
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.services.subtitle_sync import align_srt_detail
 +from comet.services.sub_translate import ensure_auto_translated
@@ -4055,8 +4067,8 @@ index 0000000..ffdd3da
 +                    rtn_data = parse(filename)
 +                    try:
 +                        apply_ptbr_detection(rtn_data, filename)
-+                    except Exception:
-+                        pass
++                    except Exception as _e:
++                        log_swallowed("subtitles.get_subtitles", _e)
 +                    is_pt = "pt" in (getattr(rtn_data, "languages", None) or ())
 +                except Exception:
 +                    is_pt = False
@@ -4210,8 +4222,8 @@ index 0000000..ffdd3da
 +                        "Cache-Control": "max-age=86400",
 +                    },
 +                )
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles.get_sync_subtitle_file", _e)
 +
 +    target_bytes, ref_bytes = await asyncio.gather(
 +        fetch_subtitle(
@@ -4260,8 +4272,8 @@ index 0000000..ffdd3da
 +            try:
 +                with open(sync_cache_file, "wb") as f:
 +                    f.write(out_bytes)
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("subtitles.get_sync_subtitle_file", _e)
 +            return Response(
 +                content=out_bytes,
 +                media_type="application/x-subrip; charset=utf-8",
@@ -4336,8 +4348,8 @@ index 0000000..ffdd3da
 +                        "Cache-Control": "max-age=86400",
 +                    },
 +                )
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles.get_dual_subtitle_file", _e)
 +
 +    en_bytes = await fetch_subtitle(
 +        provider=provider,
@@ -4684,7 +4696,7 @@ index 44bf701..3722421 100644
  
      if strict_b64config:
 diff --git a/comet/core/logger.py b/comet/core/logger.py
-index 88b8606..796cafe 100644
+index 88b8606..a66f209 100644
 --- a/comet/core/logger.py
 +++ b/comet/core/logger.py
 @@ -179,6 +179,7 @@ def censor_url(url: str):
@@ -4695,7 +4707,7 @@ index 88b8606..796cafe 100644
      api_password_missing = ""
      if "MediaFusion" in scraper_name:
          api_password_missing = " or your API password could be wrong"
-@@ -682,3 +683,143 @@ def log_startup_info(settings):
+@@ -682,3 +683,162 @@ def log_startup_info(settings):
              "COMET",
              "CometNet P2P: False",
          )
@@ -4839,8 +4851,27 @@ index 88b8606..796cafe 100644
 +        "budget_exhausted": budget_exhausted,
 +        "swaps_451": swaps_451,
 +    }
++
++
++# Erro engolido de propósito (fallback): registra em DEBUG no máximo 1x a cada 10 min por (onde, tipo),
++# para o log mostrar o que falhou sem inundar quando o mesmo erro se repete em laço.
++_SWALLOWED: dict[tuple[str, str], float] = {}
++
++
++def log_swallowed(where: str, err: BaseException) -> None:
++    key = (where, type(err).__name__)
++    now = time.time()
++    if now - _SWALLOWED.get(key, 0.0) < 600:
++        return
++    if len(_SWALLOWED) > 2000:
++        _SWALLOWED.clear()
++    _SWALLOWED[key] = now
++    try:
++        logger.debug(f"⚠️ ignorado em {where}: {type(err).__name__}: {str(err)[:200]}")
++    except Exception:
++        pass
 diff --git a/comet/core/models.py b/comet/core/models.py
-index 835a975..51135da 100644
+index 835a975..e54f21d 100644
 --- a/comet/core/models.py
 +++ b/comet/core/models.py
 @@ -60,6 +60,8 @@ _SCRAPER_MODE_FIELDS = (
@@ -4879,7 +4910,7 @@ index 835a975..51135da 100644
      REMOVE_ADULT_CONTENT: bool | None = False
      BACKGROUND_SCRAPER_ENABLED: bool | None = False
      BACKGROUND_SCRAPER_CONCURRENT_WORKERS: int | None = 1
-@@ -317,6 +332,53 @@ class AppSettings(ServerSettings):
+@@ -317,6 +332,54 @@ class AppSettings(ServerSettings):
      HTTP_CACHE_CONFIGURE_TTL: int | None = 86400
      DOWNLOAD_GENERIC_TRACKERS: bool | None = False
      SMART_LANGUAGE_DETECTION: bool | None = False
@@ -4909,6 +4940,7 @@ index 835a975..51135da 100644
 +    CATALOG_LANGUAGE: str = "pt-BR"
 +    CATALOG_ORIGINALS: bool = True
 +    CATALOG_LANDSCAPE: bool = True
++    CATALOG_GROUPS: bool = True  # junta fileiras parecidas (streamings, clima, gêneros) numa só com filtro
 +    PREVIEW_TEST_ROW: bool = False
 +    CATALOG_PROVIDERS: str | list[str] = [
 +        "netflix",
@@ -4933,7 +4965,7 @@ index 835a975..51135da 100644
  
      # CometNet P2P Network Configuration
      COMETNET_ENABLED: bool | None = False
-@@ -653,12 +715,27 @@ class AppSettings(ServerSettings):
+@@ -653,12 +716,27 @@ class AppSettings(ServerSettings):
          "JACKETT_URL",
          "PROWLARR_URL",
          "PUBLIC_BASE_URL",
@@ -5476,24 +5508,84 @@ index 7521a09..54a81d6 100644
 +        return None
 diff --git a/comet/metadata/siblings.py b/comet/metadata/siblings.py
 new file mode 100644
-index 0000000..316c696
+index 0000000..b50a268
 --- /dev/null
 +++ b/comet/metadata/siblings.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,251 @@
 +import asyncio
 +import time
 +import urllib.parse
 +
 +from curl_cffi.requests import AsyncSession
 +
-+from comet.core.logger import logger
++from comet.core.logger import log_swallowed, logger
 +from comet.metadata.manager import MetadataScraper
 +from comet.services.anime import anime_mapper
 +from comet.services.filtering import scrub
 +from comet.utils.http_client import http_client_manager
 +from comet.utils.languages import merge_aliases
 +
++from comet.utils.bounded import trim
++
 +_CACHE_TTL = 86400.0  # 24 hours
++
++# Itens com este prefixo no conjunto bloqueado são títulos de episódio de uma série HOMÔNIMA:
++# release que cita um deles é da outra série (ex.: "ONE.PIECE.S01E01.ROMANCE.DAWN" é o live-action).
++EP_PREFIX = "ep:"
++HDR_MARK = "__hdr__"
++_LAST_EP_YEAR: dict[str, int] = {}  # imdb -> ano do último episódio (preenchido junto com os títulos)
++
++
++def _year(release_info) -> int | None:
++    try:
++        return int(str(release_info or "")[:4])
++    except ValueError:
++        return None
++
++
++async def _cinemeta_episode_names(session: AsyncSession, imdb_id: str) -> dict[str, set[tuple[int, int]]]:
++    """título de episódio (scrub) -> {(temporada, episódio)}"""
++    resp = await session.get(f"https://v3-cinemeta.strem.io/meta/series/{imdb_id}.json", timeout=6.0)
++    if resp.status_code != 200:
++        return {}
++    videos = ((resp.json() or {}).get("meta") or {}).get("videos") or []
++    out: dict[str, set[tuple[int, int]]] = {}
++    last = 0
++    for v in videos:
++        if not isinstance(v, dict) or not (v.get("season") or 0) >= 1:
++            continue
++        last = max(last, _year(v.get("released")) or 0)
++        name = scrub(v.get("name") or v.get("title") or "")
++        if name:
++            out.setdefault(name, set()).add((int(v.get("season") or 0), int(v.get("episode") or 0)))
++    _LAST_EP_YEAR[imdb_id] = last
++    return out
++
++
++async def _twin_episode_phrases(imdb_id: str, twins: list[str]) -> set[str]:
++    """Títulos de episódio da(s) série(s) homônima(s), compridos o bastante para não dar falso positivo.
++
++    "título"            -> bloqueia qualquer release que cite o título (só existe na outra série);
++    "T:E:título"        -> o título existe nas duas: bloqueia só se o release for SxxEyy da outra
++                           série e esse número não for o episódio de mesmo nome da nossa.
++    """
++    async with AsyncSession(impersonate="chrome") as session:
++        own, *others = await asyncio.gather(
++            _cinemeta_episode_names(session, imdb_id),
++            *(_cinemeta_episode_names(session, t) for t in twins),
++        )
++    phrases = set()
++    for names in others:
++        for n, eps in names.items():
++            # genérico demais ("episode 1", "pilot") ou curto: fica de fora
++            if len(n) < 10 or len(n.split()) < 2 or n.startswith("episode"):
++                continue
++            if n not in own:
++                phrases.add(n)
++                continue
++            for se, ep in eps - own[n]:
++                phrases.add(f"{se}:{ep}:{n}")
++    return phrases
 +_cache: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
 +_locks: dict[tuple[str, str], asyncio.Lock] = {}
 +
@@ -5564,7 +5656,11 @@ index 0000000..316c696
 +            return empty
 +
 +        siblings: list[dict] = []
++        twins: list[str] = []  # mesmo nome exato (One Piece anime x live-action, Doctor Who 1963 x 2005)
++        own_year, twin_years = None, []
 +        for meta in metas:
++            if isinstance(meta, dict) and (meta.get("id") or meta.get("imdb_id")) == imdb_id:
++                own_year = _year(meta.get("releaseInfo"))
 +            if not isinstance(meta, dict):
 +                continue
 +            meta_id = meta.get("id") or meta.get("imdb_id")
@@ -5575,6 +5671,9 @@ index 0000000..316c696
 +            if meta_type and meta_type != media_type:
 +                continue
 +            meta_scrub = scrub(meta_name)
++            if media_type == "series" and meta_scrub == base_scrub and len(twins) < 3:
++                twins.append(meta_id)
++                twin_years.append(_year(meta.get("releaseInfo")))
 +            if meta_scrub.startswith(prefix):
 +                siblings.append(
 +                    {"id": meta_id, "name": meta_name, "scrub": meta_scrub}
@@ -5582,12 +5681,30 @@ index 0000000..316c696
 +                if len(siblings) == 6:
 +                    break
 +
-+        if not siblings:
-+            empty = frozenset()
-+            _cache[cache_key] = (now, empty)
-+            return empty
++        twin_phrases: set[str] = set()
++        if twins:
++            try:
++                twin_phrases = await _twin_episode_phrases(imdb_id, twins)
++            except Exception as e:
++                logger.debug(f"homônimos de {imdb_id}: {type(e).__name__}: {e}")
++            # série antiga com homônima nova: Dolby Vision/HDR no nome é da nova
++            if own_year and own_year <= 2012 and any(y and y >= 2016 for y in twin_years):
++                twin_phrases.add(HDR_MARK)
++            # ano no nome do release a partir da estreia da homônima mais nova = é da homônima
++            # só quando a nossa acabou antes (One Piece anime segue no ar: não vale)
++            own_last = _LAST_EP_YEAR.get(imdb_id) or 0
++            newer = [y for y in twin_years if y and own_last and y > own_last]
++            if newer:
++                twin_phrases.add(f"__minyear:{min(newer)}__")
 +
-+        blocked: set[str] = set()
++        if not siblings:
++            result = frozenset(EP_PREFIX + p for p in twin_phrases)
++            _cache[cache_key] = (now, result)
++            if result:
++                logger.log("FILTER", f"🧬 Homônimos de {imdb_id} ({title}): {', '.join(twins)} → {len(result)} títulos de episódio bloqueados")
++            return result
++
++        blocked: set[str] = {EP_PREFIX + p for p in twin_phrases}
 +        for sib in siblings:
 +            blocked.add(sib["scrub"])
 +
@@ -5612,8 +5729,8 @@ index 0000000..316c696
 +                        k_aliases = await anime_mapper.get_aliases(f"kitsu:{kid}")
 +                        if k_aliases:
 +                            aliases = merge_aliases(aliases, k_aliases)
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("siblings._fetch_sibling_aliases", _e)
 +
 +            return aliases if isinstance(aliases, dict) else {}
 +
@@ -5634,6 +5751,9 @@ index 0000000..316c696
 +
 +        result = frozenset(blocked)
 +        _cache[cache_key] = (time.time(), result)
++        trim(_cache, 3000)
++        trim(_locks, 3000)
++        trim(_LAST_EP_YEAR, 3000)
 +
 +        if result:
 +            sibs_str = ", ".join(f"{s['id']} {s['name']}" for s in siblings)
@@ -5904,10 +6024,10 @@ index 29c623d..811476c 100644
              )
 diff --git a/comet/scrapers/brsites.py b/comet/scrapers/brsites.py
 new file mode 100644
-index 0000000..c6c18de
+index 0000000..e735c7f
 --- /dev/null
 +++ b/comet/scrapers/brsites.py
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,343 @@
 +import asyncio
 +import base64
 +import re
@@ -6076,18 +6196,22 @@ index 0000000..c6c18de
 +            else None
 +        )
 +
-+        # 2. Search pages
-+        for q in queries:
++        # 2. Search pages (em paralelo)
++        async def _get_search(q: str) -> tuple[str, str | None]:
 +            search_url = site["search_url"].format(
 +                query=urllib.parse.quote_plus(q)
 +            )
 +            try:
 +                async with self.session.get(search_url, timeout=8) as response:
 +                    if response.status != 200:
-+                        continue
-+                    html = await response.text()
++                        return search_url, None
++                    return search_url, await response.text()
 +            except Exception as e:
 +                log_scraper_error("BRSites", search_url, request.media_id, e)
++                return search_url, None
++
++        for search_url, html in await asyncio.gather(*(_get_search(q) for q in queries)):
++            if not html:
 +                continue
 +
 +            soup = BeautifulSoup(html, "html.parser")
@@ -6150,15 +6274,21 @@ index 0000000..c6c18de
 +
 +            collected_posts.sort(key=post_priority)
 +
-+        # 3. Fetch each post
-+        for post_url in collected_posts[:4]:
++        # 3. Fetch the posts in parallel (antes era um por vez: até 4 x 8 s)
++        async def _get_post(post_url: str) -> str | None:
 +            try:
 +                async with self.session.get(post_url, timeout=8) as response:
 +                    if response.status != 200:
-+                        continue
-+                    post_html = await response.text()
++                        return None
++                    return await response.text()
 +            except Exception as e:
 +                log_scraper_error("BRSites", post_url, request.media_id, e)
++                return None
++
++        post_urls = collected_posts[:4]
++        post_pages = await asyncio.gather(*(_get_post(u) for u in post_urls))
++        for post_url, post_html in zip(post_urls, post_pages):
++            if not post_html:
 +                continue
 +
 +            clean_post_html = post_html.replace("&amp;", "&")
@@ -6874,7 +7004,7 @@ index 0000000..ebeb575
 +    }
 diff --git a/comet/services/anime_filler.py b/comet/services/anime_filler.py
 new file mode 100644
-index 0000000..fd74bc2
+index 0000000..c7b9d17
 --- /dev/null
 +++ b/comet/services/anime_filler.py
 @@ -0,0 +1,171 @@
@@ -6886,7 +7016,7 @@ index 0000000..fd74bc2
 +from bs4 import BeautifulSoup
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +
 +_TABLE_INIT = False
 +_TABLE_LOCK = asyncio.Lock()
@@ -6945,8 +7075,8 @@ index 0000000..fd74bc2
 +                parsed = {int(k): v for k, v in json.loads(raw_data).items()}
 +                _CACHE[slug] = (now, parsed)
 +                return parsed
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("anime_filler.fetch_filler_data_from_slug", _e)
 +
 +    url = f"https://www.animefillerlist.com/shows/{slug}"
 +    headers = {
@@ -7051,7 +7181,7 @@ index 0000000..fd74bc2
 +    return {}
 diff --git a/comet/services/artwork.py b/comet/services/artwork.py
 new file mode 100644
-index 0000000..1e29a23
+index 0000000..53e0bfa
 --- /dev/null
 +++ b/comet/services/artwork.py
 @@ -0,0 +1,996 @@
@@ -7066,7 +7196,7 @@ index 0000000..1e29a23
 +from PIL import Image, ImageChops, ImageDraw, ImageFont
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +
 +FILENAME_REGEX = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|png)$")
 +CACHE_DIR = "/opt/comet/data/img_cache"
@@ -7544,8 +7674,8 @@ index 0000000..1e29a23
 +            )
 +            if row and row["logo_path"]:
 +                logo_path = row["logo_path"]
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.get_provider_logo_bytes", _e)
 +
 +    if not logo_path:
 +        return None
@@ -7561,8 +7691,8 @@ index 0000000..1e29a23
 +                if len(data) > 0:
 +                    _PROVIDER_LOGO_BYTES_CACHE[provider_id] = data
 +                    return data
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.get_provider_logo_bytes", _e)
 +
 +    try:
 +        data = await _fetch_tmdb_image("w92", clean_logo)
@@ -7719,16 +7849,16 @@ index 0000000..1e29a23
 +        try:
 +            with open(cache_path, "rb") as f:
 +                return f.read()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.render_top10", _e)
 +
 +    async with _SEMAPHORE:
 +        if os.path.exists(cache_path):
 +            try:
 +                with open(cache_path, "rb") as f:
 +                    return f.read()
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("artwork.render_top10", _e)
 +
 +        poster_bytes = await _fetch_tmdb_image("w500", clean_poster)
 +        provider_logo_bytes = await get_provider_logo_bytes(provider_id) if provider_id else None
@@ -7766,16 +7896,16 @@ index 0000000..1e29a23
 +        try:
 +            with open(cache_path, "rb") as f:
 +                return f.read()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.render_landscape", _e)
 +
 +    async with _SEMAPHORE:
 +        if os.path.exists(cache_path):
 +            try:
 +                with open(cache_path, "rb") as f:
 +                    return f.read()
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("artwork.render_landscape", _e)
 +
 +        backdrop_bytes = await _fetch_tmdb_image("w780", clean_backdrop)
 +        logo_bytes = None
@@ -7814,16 +7944,16 @@ index 0000000..1e29a23
 +        try:
 +            with open(cache_path, "rb") as f:
 +                return f.read()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.render_poster", _e)
 +
 +    async with _SEMAPHORE:
 +        if os.path.exists(cache_path):
 +            try:
 +                with open(cache_path, "rb") as f:
 +                    return f.read()
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("artwork.render_poster", _e)
 +
 +        poster_bytes = await _fetch_tmdb_image("w500", clean_poster)
 +        provider_logo_bytes = await get_provider_logo_bytes(provider_id) if provider_id else None
@@ -7946,16 +8076,16 @@ index 0000000..1e29a23
 +        try:
 +            with open(cache_path, "rb") as f:
 +                return f.read(), f"image/{ext}"
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("artwork.render_animation", _e)
 +
 +    async with _ANIM_SEMAPHORE:
 +        if os.path.isfile(cache_path):
 +            try:
 +                with open(cache_path, "rb") as f:
 +                    return f.read(), f"image/{ext}"
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("artwork.render_animation", _e)
 +
 +        t0 = time.time()
 +        timeout = aiohttp.ClientTimeout(total=20.0)
@@ -8053,7 +8183,7 @@ index 0000000..1e29a23
 +        return encoded_data, f"image/{ext}"
 diff --git a/comet/services/audio_probe.py b/comet/services/audio_probe.py
 new file mode 100644
-index 0000000..be67dda
+index 0000000..1202f91
 --- /dev/null
 +++ b/comet/services/audio_probe.py
 @@ -0,0 +1,673 @@
@@ -8066,7 +8196,7 @@ index 0000000..be67dda
 +import aiohttp
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.utils.http_client import http_client_manager
 +
 +# Mapping from ISO-639-2 / BCP-47 / language names to 2-letter uppercase codes
@@ -8168,8 +8298,8 @@ index 0000000..be67dda
 +                if line.startswith("MemAvailable:"):
 +                    parts = line.split()
 +                    return float(parts[1]) / 1024.0
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("audio_probe.get_mem_available_mb", _e)
 +    return 1000.0
 +
 +
@@ -8441,8 +8571,8 @@ index 0000000..be67dda
 +                        if u_typ in (b"name", b"\xa9nam"):
 +                            try:
 +                                name = u_data.decode("utf-8", errors="ignore").strip()
-+                            except Exception:
-+                                pass
++                            except Exception as _e:
++                                log_swallowed("audio_probe._parse_mp4_buffer", _e)
 +            if is_sound:
 +                audio_tracks.append({
 +                    "lang": lang or "und",
@@ -8730,264 +8860,27 @@ index 0000000..be67dda
 +        "false_pt": max(no_pt_db, _AUDIO_STATS["false_pt"]),
 +        "failures": _AUDIO_STATS["failures"],
 +    }
-diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
+diff --git a/comet/services/catalog_manifest.py b/comet/services/catalog_manifest.py
 new file mode 100644
-index 0000000..da01ecf
+index 0000000..da7ec7b
 --- /dev/null
-+++ b/comet/services/catalogs.py
-@@ -0,0 +1,4910 @@
-+import asyncio
-+import datetime
-+import json
-+import os
-+import random
-+import re
-+import time
-+import unicodedata
-+import urllib.parse
-+
-+import aiohttp
-+import RTN
-+
-+from comet.core.database import database
-+from comet.core.logger import logger
-+from comet.core.models import settings
-+from comet.metadata.tmdb import TMDBApi
-+from comet.services.artwork import resolve_watch_providers
-+from comet.services.filtering import apply_ptbr_detection, is_cam_release
-+from comet.services.smart_search import parse_query, strip_accents, STOPWORDS, DOMAIN_SYNONYMS, COMMON_PLOTS
++++ b/comet/services/catalog_manifest.py
+@@ -0,0 +1,768 @@
++"""Montagem do manifesto (lista de fileiras) do Comet. Separado de catalogs.py (que só responde as fileiras)."""
++from comet.services.catalogs import (  # noqa: F401
++    MOVIE_GENRE_OPTIONS,
++    ORIGINAL_NETWORKS,
++    PROVIDERS,
++    SAGA_OPTIONS,
++    TV_GENRE_OPTIONS,
++    _get_providers_list,
++    _seasonal,
++    logger,
++    settings,
++)
 +
 +
-+def _build_art_query(badge: str | None = None, provider_id: int | None = None) -> str:
-+    params = []
-+    if badge:
-+        params.append(f"b={badge}")
-+    if provider_id:
-+        params.append(f"p={provider_id}")
-+    return f"?{'&'.join(params)}" if params else ""
-+
-+PROVIDERS = {
-+    "netflix": ("Netflix", 8),
-+    "prime": ("Prime Video", 119),
-+    "disney": ("Disney+", 337),
-+    "max": ("HBO Max", 1899),
-+    "apple": ("Apple TV+", 350),
-+    "paramount": ("Paramount+", 531),
-+    "globoplay": ("Globoplay", 307),
-+    "crunchyroll": ("Crunchyroll", 283),
-+}
-+
-+ORIGINAL_NETWORKS = {
-+    "netflix": 213,
-+    "disney": 2739,
-+    "prime": 1024,
-+    "max": "3186|49",
-+    "apple": 2552,
-+    "paramount": 4330,
-+}
-+
-+MOVIE_GENRE_MAP = {
-+    "Ação": 28,
-+    "Aventura": 12,
-+    "Animação": 16,
-+    "Comédia": 35,
-+    "Crime": 80,
-+    "Documentário": 99,
-+    "Drama": 18,
-+    "Família": 10751,
-+    "Fantasia": 14,
-+    "História": 36,
-+    "Terror": 27,
-+    "Música": 10402,
-+    "Mistério": 9648,
-+    "Romance": 10749,
-+    "Ficção científica": 878,
-+    "Cinema TV": 10770,
-+    "Thriller": 53,
-+    "Guerra": 10752,
-+    "Faroeste": 37,
-+}
-+MOVIE_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(MOVIE_GENRE_MAP.keys())
-+
-+TV_GENRE_MAP = {
-+    "Ação e Aventura": 10759,
-+    "Animação": 16,
-+    "Comédia": 35,
-+    "Crime": 80,
-+    "Documentário": 99,
-+    "Drama": 18,
-+    "Família": 10751,
-+    "Infantil": 10762,
-+    "Mistério": 9648,
-+    "Reality": 10764,
-+    "Ficção científica e Fantasia": 10765,
-+    "Novela": 10766,
-+    "Guerra e Política": 10768,
-+    "Faroeste": 37,
-+}
-+TV_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(TV_GENRE_MAP.keys())
-+
-+IMDB_CACHE_DIR = "/opt/comet/data/catalog_cache"
-+IMDB_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "imdb_map.json")
-+LANDSCAPE_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "landscape_map.json")
-+FIND_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "find_map.json")
-+
-+_IMDB_MAP: dict[str, str] = {}
-+_IMDB_MAP_LOADED = False
-+
-+_LANDSCAPE_MAP: dict[str, str] = {}
-+_LANDSCAPE_MAP_LOADED = False
-+
-+_FIND_MAP: dict[str, dict] = {}
-+_FIND_MAP_LOADED = False
-+
-+_TOP10_IDS_CACHE: dict[str, tuple[float, set[str]]] = {}
-+_TV_LAST_EP_CACHE: dict[int, tuple[float, str | None]] = {}
-+
-+_CATALOG_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
-+_CATALOG_CACHE_MAX = 300
-+_CATALOG_CACHE_TTL = 6 * 3600  # 6 hours
-+
-+_READY_CACHE: dict[str, tuple[float, list[str]]] = {}
-+_SAGA_CACHE: dict[int, tuple[float, dict, list[dict]]] = {}
-+_SAGA_META_CACHE: dict[int, tuple[float, dict]] = {}
-+
-+SAGAS = [
-+    ("Harry Potter", 1241),
-+    ("Velozes e Furiosos", 9485),
-+    ("O Senhor dos Anéis", 119),
-+    ("Star Wars", 10),
-+    ("Jurassic Park", 328),
-+    ("Missão: Impossível", 87359),
-+    ("John Wick", 404609),
-+    ("Toy Story", 10194),
-+    ("Piratas do Caribe", 295),
-+    ("Vingadores", 86311),
-+    ("Matrix", 2344),
-+    ("Shrek", 2150),
-+    ("Jogos Vorazes", 131635),
-+    ("Batman (Nolan)", 263),
-+    ("Rocky", 1575),
-+    ("Indiana Jones", 84),
-+    ("De Volta para o Futuro", 264),
-+    ("Duro de Matar", 1570),
-+    ("O Exterminador do Futuro", 528),
-+    ("Homem-Aranha (MCU)", 531241),
-+]
-+SAGA_MAP = {name: cid for name, cid in SAGAS}
-+SAGA_OPTIONS = [s[0] for s in SAGAS]
-+_MOVIE_GENRE_REVERSE = {v: k for k, v in MOVIE_GENRE_MAP.items()}
-+
-+
-+def _clean_collection_name(raw_name: str) -> str:
-+    cleaned = re.sub(
-+        r"(?i)\s*[-:]?\s*cole[cç][aã]o.*|\s*[-:]?\s*collection.*", "", raw_name
-+    ).strip()
-+    return cleaned or raw_name
-+
-+
-+
-+def _ensure_imdb_map_loaded():
-+    global _IMDB_MAP, _IMDB_MAP_LOADED
-+    if not _IMDB_MAP_LOADED:
-+        if os.path.exists(IMDB_CACHE_FILE):
-+            try:
-+                with open(IMDB_CACHE_FILE, "r", encoding="utf-8") as f:
-+                    data = json.load(f)
-+                    if isinstance(data, dict):
-+                        _IMDB_MAP.update(data)
-+            except Exception as e:
-+                logger.warning(f"Error loading imdb_map.json: {e}")
-+        _IMDB_MAP_LOADED = True
-+
-+
-+def _save_imdb_map():
-+    try:
-+        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
-+        data_to_save = dict(_IMDB_MAP)
-+        tmp_path = f"{IMDB_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
-+        with open(tmp_path, "w", encoding="utf-8") as f:
-+            json.dump(data_to_save, f)
-+        os.replace(tmp_path, IMDB_CACHE_FILE)
-+    except Exception as e:
-+        logger.warning(f"Error saving imdb_map.json: {e}")
-+
-+
-+def _ensure_landscape_map_loaded():
-+    global _LANDSCAPE_MAP, _LANDSCAPE_MAP_LOADED
-+    if not _LANDSCAPE_MAP_LOADED:
-+        if os.path.exists(LANDSCAPE_CACHE_FILE):
-+            try:
-+                with open(LANDSCAPE_CACHE_FILE, "r", encoding="utf-8") as f:
-+                    data = json.load(f)
-+                    if isinstance(data, dict):
-+                        for k, v in data.items():
-+                            if isinstance(v, dict) and "backdrop" in v:
-+                                _LANDSCAPE_MAP[k] = v
-+            except Exception as e:
-+                logger.warning(f"Error loading landscape_map.json: {e}")
-+        _LANDSCAPE_MAP_LOADED = True
-+
-+
-+def _save_landscape_map():
-+    try:
-+        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
-+        data_to_save = dict(_LANDSCAPE_MAP)
-+        tmp_path = f"{LANDSCAPE_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
-+        with open(tmp_path, "w", encoding="utf-8") as f:
-+            json.dump(data_to_save, f)
-+        os.replace(tmp_path, LANDSCAPE_CACHE_FILE)
-+    except Exception as e:
-+        logger.warning(f"Error saving landscape_map.json: {e}")
-+
-+
-+def _ensure_find_map_loaded():
-+    global _FIND_MAP, _FIND_MAP_LOADED
-+    if not _FIND_MAP_LOADED:
-+        if os.path.exists(FIND_CACHE_FILE):
-+            try:
-+                with open(FIND_CACHE_FILE, "r", encoding="utf-8") as f:
-+                    data = json.load(f)
-+                    if isinstance(data, dict):
-+                        _FIND_MAP.update(data)
-+            except Exception as e:
-+                logger.warning(f"Error loading find_map.json: {e}")
-+        _FIND_MAP_LOADED = True
-+
-+
-+def _save_find_map():
-+    try:
-+        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
-+        data_to_save = dict(_FIND_MAP)
-+        tmp_path = f"{FIND_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
-+        with open(tmp_path, "w", encoding="utf-8") as f:
-+            json.dump(data_to_save, f)
-+        os.replace(tmp_path, FIND_CACHE_FILE)
-+    except Exception as e:
-+        logger.warning(f"Error saving find_map.json: {e}")
-+
-+
-+def _get_providers_list() -> list[str]:
-+    raw = getattr(settings, "CATALOG_PROVIDERS", list(PROVIDERS.keys()))
-+    if isinstance(raw, str):
-+        s = raw.strip()
-+        if s.startswith("[") and s.endswith("]"):
-+            try:
-+                parsed = json.loads(s)
-+                if isinstance(parsed, list):
-+                    return [str(p).strip().lower() for p in parsed if str(p).strip()]
-+            except Exception:
-+                pass
-+        return [p.strip().lower() for p in s.split(",") if p.strip()]
-+    elif isinstance(raw, list):
-+        return [str(p).strip().lower() for p in raw if str(p).strip()]
-+    return list(PROVIDERS.keys())
-+
-+
-+from comet.services import seasonal as _seasonal
-+
-+
-+def build_manifest_catalogs(kids: bool = False, is_personal: bool = True) -> list[dict]:
++def build_manifest_catalogs(kids: bool = False, is_personal: bool = True, grouped: bool = True) -> list[dict]:
 +    if kids:
 +        catalogs = [
 +            {
@@ -9720,7 +9613,9 @@ index 0000000..da01ecf
 +            catalogs.extend(_x_end)
 +        except Exception as _x_err:
 +            logger.debug(f"fileiras extras: {_x_err}")
-+    catalogs.extend(_cold)
++    # Datas fora de época não entram no manifesto (antes ficavam no fim: 8 fileiras vazias de sentido).
++    if not getattr(settings, "CATALOG_GROUPS", True):
++        catalogs.extend(_cold)
 +
 +    if is_personal and not kids and getattr(settings, "PREVIEW_TEST_ROW", True):
 +        catalogs.insert(
@@ -9735,7 +9630,274 @@ index 0000000..da01ecf
 +            },
 +        )
 +
++    if grouped and not kids:
++        from comet.services import row_groups as _row_groups
++        catalogs = _row_groups.consolidate(catalogs)
 +    return catalogs
+diff --git a/comet/services/catalogs.py b/comet/services/catalogs.py
+new file mode 100644
+index 0000000..27a894c
+--- /dev/null
++++ b/comet/services/catalogs.py
+@@ -0,0 +1,4170 @@
++import asyncio
++import datetime
++import json
++import os
++import random
++import re
++import time
++import unicodedata
++import urllib.parse
++
++import aiohttp
++import RTN
++
++from comet.core.database import database
++from comet.core.logger import log_swallowed, logger
++from comet.core.models import settings
++from comet.metadata.tmdb import TMDBApi
++from comet.services.artwork import resolve_watch_providers
++from comet.services.filtering import apply_ptbr_detection, is_cam_release
++from comet.services.smart_search import parse_query, strip_accents, STOPWORDS, DOMAIN_SYNONYMS, COMMON_PLOTS
++
++
++def _build_art_query(badge: str | None = None, provider_id: int | None = None) -> str:
++    params = []
++    if badge:
++        params.append(f"b={badge}")
++    if provider_id:
++        params.append(f"p={provider_id}")
++    return f"?{'&'.join(params)}" if params else ""
++
++PROVIDERS = {
++    "netflix": ("Netflix", 8),
++    "prime": ("Prime Video", 119),
++    "disney": ("Disney+", 337),
++    "max": ("HBO Max", 1899),
++    "apple": ("Apple TV+", 350),
++    "paramount": ("Paramount+", 531),
++    "globoplay": ("Globoplay", 307),
++    "crunchyroll": ("Crunchyroll", 283),
++}
++
++ORIGINAL_NETWORKS = {
++    "netflix": 213,
++    "disney": 2739,
++    "prime": 1024,
++    "max": "3186|49",
++    "apple": 2552,
++    "paramount": 4330,
++}
++
++MOVIE_GENRE_MAP = {
++    "Ação": 28,
++    "Aventura": 12,
++    "Animação": 16,
++    "Comédia": 35,
++    "Crime": 80,
++    "Documentário": 99,
++    "Drama": 18,
++    "Família": 10751,
++    "Fantasia": 14,
++    "História": 36,
++    "Terror": 27,
++    "Música": 10402,
++    "Mistério": 9648,
++    "Romance": 10749,
++    "Ficção científica": 878,
++    "Cinema TV": 10770,
++    "Thriller": 53,
++    "Guerra": 10752,
++    "Faroeste": 37,
++}
++MOVIE_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(MOVIE_GENRE_MAP.keys())
++
++TV_GENRE_MAP = {
++    "Ação e Aventura": 10759,
++    "Animação": 16,
++    "Comédia": 35,
++    "Crime": 80,
++    "Documentário": 99,
++    "Drama": 18,
++    "Família": 10751,
++    "Infantil": 10762,
++    "Mistério": 9648,
++    "Reality": 10764,
++    "Ficção científica e Fantasia": 10765,
++    "Novela": 10766,
++    "Guerra e Política": 10768,
++    "Faroeste": 37,
++}
++TV_GENRE_OPTIONS = ["Lançamentos", "Mais bem avaliados"] + list(TV_GENRE_MAP.keys())
++
++IMDB_CACHE_DIR = "/opt/comet/data/catalog_cache"
++IMDB_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "imdb_map.json")
++LANDSCAPE_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "landscape_map.json")
++FIND_CACHE_FILE = os.path.join(IMDB_CACHE_DIR, "find_map.json")
++
++from comet.utils.bounded import trim as _trim
++
++_IMDB_MAP: dict[str, str] = {}
++_IMDB_MAP_LOADED = False
++
++_LANDSCAPE_MAP: dict[str, str] = {}
++_LANDSCAPE_MAP_LOADED = False
++
++_FIND_MAP: dict[str, dict] = {}
++_FIND_MAP_LOADED = False
++
++_TOP10_IDS_CACHE: dict[str, tuple[float, set[str]]] = {}
++_TV_LAST_EP_CACHE: dict[int, tuple[float, str | None]] = {}
++
++_CATALOG_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
++_CATALOG_CACHE_MAX = 300
++_CATALOG_CACHE_TTL = 6 * 3600  # 6 hours
++
++_READY_CACHE: dict[str, tuple[float, list[str]]] = {}
++_SAGA_CACHE: dict[int, tuple[float, dict, list[dict]]] = {}
++_SAGA_META_CACHE: dict[int, tuple[float, dict]] = {}
++
++SAGAS = [
++    ("Harry Potter", 1241),
++    ("Velozes e Furiosos", 9485),
++    ("O Senhor dos Anéis", 119),
++    ("Star Wars", 10),
++    ("Jurassic Park", 328),
++    ("Missão: Impossível", 87359),
++    ("John Wick", 404609),
++    ("Toy Story", 10194),
++    ("Piratas do Caribe", 295),
++    ("Vingadores", 86311),
++    ("Matrix", 2344),
++    ("Shrek", 2150),
++    ("Jogos Vorazes", 131635),
++    ("Batman (Nolan)", 263),
++    ("Rocky", 1575),
++    ("Indiana Jones", 84),
++    ("De Volta para o Futuro", 264),
++    ("Duro de Matar", 1570),
++    ("O Exterminador do Futuro", 528),
++    ("Homem-Aranha (MCU)", 531241),
++]
++SAGA_MAP = {name: cid for name, cid in SAGAS}
++SAGA_OPTIONS = [s[0] for s in SAGAS]
++_MOVIE_GENRE_REVERSE = {v: k for k, v in MOVIE_GENRE_MAP.items()}
++
++
++def _clean_collection_name(raw_name: str) -> str:
++    cleaned = re.sub(
++        r"(?i)\s*[-:]?\s*cole[cç][aã]o.*|\s*[-:]?\s*collection.*", "", raw_name
++    ).strip()
++    return cleaned or raw_name
++
++
++
++def _ensure_imdb_map_loaded():
++    global _IMDB_MAP, _IMDB_MAP_LOADED
++    if not _IMDB_MAP_LOADED:
++        if os.path.exists(IMDB_CACHE_FILE):
++            try:
++                with open(IMDB_CACHE_FILE, "r", encoding="utf-8") as f:
++                    data = json.load(f)
++                    if isinstance(data, dict):
++                        _IMDB_MAP.update(data)
++            except Exception as e:
++                logger.warning(f"Error loading imdb_map.json: {e}")
++        _IMDB_MAP_LOADED = True
++
++
++def _save_imdb_map():
++    try:
++        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
++        data_to_save = dict(_IMDB_MAP)
++        tmp_path = f"{IMDB_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(data_to_save, f)
++        os.replace(tmp_path, IMDB_CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving imdb_map.json: {e}")
++
++
++def _ensure_landscape_map_loaded():
++    global _LANDSCAPE_MAP, _LANDSCAPE_MAP_LOADED
++    if not _LANDSCAPE_MAP_LOADED:
++        if os.path.exists(LANDSCAPE_CACHE_FILE):
++            try:
++                with open(LANDSCAPE_CACHE_FILE, "r", encoding="utf-8") as f:
++                    data = json.load(f)
++                    if isinstance(data, dict):
++                        for k, v in data.items():
++                            if isinstance(v, dict) and "backdrop" in v:
++                                _LANDSCAPE_MAP[k] = v
++            except Exception as e:
++                logger.warning(f"Error loading landscape_map.json: {e}")
++        _LANDSCAPE_MAP_LOADED = True
++
++
++def _save_landscape_map():
++    try:
++        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
++        data_to_save = dict(_LANDSCAPE_MAP)
++        tmp_path = f"{LANDSCAPE_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(data_to_save, f)
++        os.replace(tmp_path, LANDSCAPE_CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving landscape_map.json: {e}")
++
++
++def _ensure_find_map_loaded():
++    global _FIND_MAP, _FIND_MAP_LOADED
++    if not _FIND_MAP_LOADED:
++        if os.path.exists(FIND_CACHE_FILE):
++            try:
++                with open(FIND_CACHE_FILE, "r", encoding="utf-8") as f:
++                    data = json.load(f)
++                    if isinstance(data, dict):
++                        _FIND_MAP.update(data)
++            except Exception as e:
++                logger.warning(f"Error loading find_map.json: {e}")
++        _FIND_MAP_LOADED = True
++
++
++def _save_find_map():
++    try:
++        os.makedirs(IMDB_CACHE_DIR, exist_ok=True)
++        data_to_save = dict(_FIND_MAP)
++        tmp_path = f"{FIND_CACHE_FILE}.tmp.{os.getpid()}.{time.time_ns()}"
++        with open(tmp_path, "w", encoding="utf-8") as f:
++            json.dump(data_to_save, f)
++        os.replace(tmp_path, FIND_CACHE_FILE)
++    except Exception as e:
++        logger.warning(f"Error saving find_map.json: {e}")
++
++
++def _get_providers_list() -> list[str]:
++    raw = getattr(settings, "CATALOG_PROVIDERS", list(PROVIDERS.keys()))
++    if isinstance(raw, str):
++        s = raw.strip()
++        if s.startswith("[") and s.endswith("]"):
++            try:
++                parsed = json.loads(s)
++                if isinstance(parsed, list):
++                    return [str(p).strip().lower() for p in parsed if str(p).strip()]
++            except Exception as _e:
++                log_swallowed("catalogs._get_providers_list", _e)
++        return [p.strip().lower() for p in s.split(",") if p.strip()]
++    elif isinstance(raw, list):
++        return [str(p).strip().lower() for p in raw if str(p).strip()]
++    return list(PROVIDERS.keys())
++
++
++from comet.services import seasonal as _seasonal
++
++
++def build_manifest_catalogs(kids: bool = False, is_personal: bool = True, grouped: bool = True) -> list[dict]:
++    # a montagem do manifesto mora em catalog_manifest.py (import tardio: evita ciclo)
++    from comet.services.catalog_manifest import build_manifest_catalogs as _build
++
++    return _build(kids=kids, is_personal=is_personal, grouped=grouped)
 +
 +
 +def _get_cached_catalog(key: tuple) -> list[dict] | None:
@@ -10089,8 +10251,8 @@ index 0000000..da01ecf
 +                        if isinstance(ext, dict) and ext.get("imdb_id"):
 +                            imdb_id = ext["imdb_id"]
 +                            _IMDB_MAP[cache_key] = imdb_id
-+                    except Exception:
-+                        pass
++                    except Exception as _e:
++                        log_swallowed("catalogs._get_top10_imdb_ids", _e)
 +                if imdb_id and imdb_id.startswith("tt"):
 +                    top_ids.add(imdb_id)
 +                    count += 1
@@ -10822,6 +10984,7 @@ index 0000000..da01ecf
 +        logger.warning(f"Erro na tradução PT->EN: {e}")
 +        trans = text.strip().lower()
 +    _TRANSLATE_CACHE[key] = (trans, time.time())
++    _trim(_TRANSLATE_CACHE, 2000)
 +    return trans
 +
 +_KEYWORD_CACHE: dict[str, int | None] = {}
@@ -10872,6 +11035,7 @@ index 0000000..da01ecf
 +        if kid is None and data["results"]:
 +            kid = data["results"][0].get("id")
 +    _KEYWORD_CACHE[q_norm] = kid
++    _trim(_KEYWORD_CACHE, 2000)
 +    return kid
 +
 +
@@ -13377,8 +13541,8 @@ index 0000000..da01ecf
 +                        diff = (now_utc - dt).total_seconds() / 86400
 +                        if 0 <= diff <= 90:
 +                            series_candidates[mid] = (it.get("name") or "", {})
-+                    except Exception:
-+                        pass
++                    except Exception as _e:
++                        log_swallowed("catalogs._fetch_week_items", _e)
 +            except Exception as e:
 +                logger.warning(f"Erro ao carregar historico para estreias da semana: {e}")
 +
@@ -13434,8 +13598,8 @@ index 0000000..da01ecf
 +                            data = await resp.json()
 +                            meta = data.get("meta", {})
 +                            return mid, meta.get("videos", []), meta
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("catalogs.fetch_series_vids", _e)
 +                return mid, [], {}
 +
 +        vids_res = await asyncio.gather(*[fetch_series_vids(mid) for mid in series_candidates])
@@ -14918,7 +15082,7 @@ index 0000000..a7f7f13
 +            out.append(r)
 +    return out
 diff --git a/comet/services/filtering.py b/comet/services/filtering.py
-index b844e5e..5d084d9 100644
+index b844e5e..da6afce 100644
 --- a/comet/services/filtering.py
 +++ b/comet/services/filtering.py
 @@ -1,6 +1,7 @@
@@ -15041,7 +15205,7 @@ index b844e5e..5d084d9 100644
  
  if settings.RTN_FILTER_DEBUG:
  
-@@ -89,6 +195,15 @@ def scrub(t: str):
+@@ -89,6 +195,21 @@ def scrub(t: str):
      return " ".join(normalize_title(t).split())
  
  
@@ -15054,18 +15218,25 @@ index b844e5e..5d084d9 100644
 +    return max(len(a), len(b)) <= 10 and abs(len(a) - len(b)) <= 1
 +
 +
++_HDR_RE = re.compile(r"(?i)(?<![a-z0-9])(dv|dovi|hdr10\+?|hdr|dolby[ ._-]?vision)(?![a-z0-9])")
++
++
++_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
++
++
  class TitleMatcher:
      """Prepared title/year matcher shared by live and persisted torrents."""
  
-@@ -96,6 +211,7 @@ class TitleMatcher:
+@@ -96,6 +217,8 @@ class TitleMatcher:
          "_matches_cache",
          "aliases",
          "aliases_normalized",
 +        "blocked_titles",
++        "blocked_phrases",
          "max_year",
          "min_year",
          "title",
-@@ -103,17 +219,36 @@ class TitleMatcher:
+@@ -103,17 +226,46 @@ class TitleMatcher:
          "year_end",
      )
  
@@ -15083,9 +15254,19 @@ index b844e5e..5d084d9 100644
          self.title = title
          self.year = year
          self.year_end = year_end
-+        self.blocked_titles = (
-+            frozenset(blocked_titles) if blocked_titles else frozenset()
-+        )
++        _bt = frozenset(blocked_titles) if blocked_titles else frozenset()
++        # "ep:<título>" = episódio de uma série homônima (ver metadata/siblings.py)
++        _ph = []
++        for b in _bt:
++            if not b.startswith("ep:"):
++                continue
++            parts = b[3:].split(":", 2)
++            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
++                _ph.append((f" {parts[2]} ", (int(parts[0]), int(parts[1]))))
++            else:
++                _ph.append((f" {b[3:]} ", None))
++        self.blocked_phrases = tuple(_ph)
++        self.blocked_titles = frozenset(b for b in _bt if not b.startswith("ep:"))
          self.aliases = _normalize_aliases(aliases)
 +        if self.blocked_titles:
 +            filtered_aliases = {}
@@ -15104,12 +15285,34 @@ index b844e5e..5d084d9 100644
          )
  
          self.min_year = 0
-@@ -129,8 +264,12 @@ class TitleMatcher:
+@@ -129,8 +281,34 @@ class TitleMatcher:
                  self.max_year = year + 1
  
      def matches_title(self, torrent_title: str, parsed_title: str) -> bool:
 +        if self.blocked_titles and scrub(parsed_title) in self.blocked_titles:
 +            return False
++        if self.blocked_phrases:
++            _tt = f" {scrub(torrent_title)} "
++            _se = None
++            for p, ep in self.blocked_phrases:
++                if p == " __hdr__ ":
++                    if _HDR_RE.search(torrent_title):
++                        return False
++                    continue
++                if p.startswith(" __minyear:"):
++                    _cut = int(p.strip()[10:-2])
++                    if any(int(y) >= _cut for y in _YEAR_RE.findall(torrent_title)):
++                        return False
++                    continue
++                if p not in _tt:
++                    continue
++                if ep is None:
++                    return False
++                if _se is None:
++                    _m = re.search(r"[Ss](\d{1,2})[ ._-]?[Ee](\d{1,4})", torrent_title)
++                    _se = (int(_m.group(1)), int(_m.group(2))) if _m else ()
++                if _se == ep:
++                    return False
          if exact_alias_match(scrub(parsed_title), self.aliases_normalized):
              return True
 +        if _short_title_mismatch(self.title, parsed_title):
@@ -15117,7 +15320,16 @@ index b844e5e..5d084d9 100644
          return title_match(
              self.title, parsed_title, aliases=self.aliases
          ) or alternate_title_match(torrent_title, self.title, self.aliases)
-@@ -295,10 +434,19 @@ def _do_parse_and_cache(
+@@ -146,7 +324,7 @@ class TitleMatcher:
+         self, torrent_title: str, parsed_title: str, parsed_year: int | None
+     ) -> bool:
+         cache_key = (
+-            torrent_title if "/" in torrent_title else None,
++            torrent_title if ("/" in torrent_title or self.blocked_phrases) else None,
+             parsed_title,
+             parsed_year,
+         )
+@@ -295,10 +473,19 @@ def _do_parse_and_cache(
  
  
  def filter_worker(
@@ -15139,7 +15351,7 @@ index b844e5e..5d084d9 100644
      aliases = matcher.aliases
  
      country_aliases = {}
-@@ -355,6 +503,7 @@ def filter_worker(
+@@ -355,6 +542,7 @@ def filter_worker(
                  )
                  parsed.languages.append(language)
  
@@ -15400,7 +15612,7 @@ index 0000000..6861649
 +    return resp.status, out, body()
 diff --git a/comet/services/football.py b/comet/services/football.py
 new file mode 100644
-index 0000000..771685c
+index 0000000..a2c71e7
 --- /dev/null
 +++ b/comet/services/football.py
 @@ -0,0 +1,650 @@
@@ -15422,7 +15634,7 @@ index 0000000..771685c
 +from fastapi import APIRouter, Response
 +from PIL import Image, ImageDraw
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.services import live_art as la
 +
@@ -15678,8 +15890,8 @@ index 0000000..771685c
 +        if len(v) == 6:
 +            try:
 +                cands.append(la._rgb(v))
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("football.team_color", _e)
 +    for c in cands:  # cor viva: nem branca demais nem preta demais
 +        if 0.08 < _lum(c) < 0.75:
 +            return c
@@ -15802,8 +16014,8 @@ index 0000000..771685c
 +                    try:
 +                        st = datetime.strptime(e["date"].replace("Z", ""), "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
 +                        soon = -3600 < (st - now).total_seconds() < 1200
-+                    except Exception:
-+                        pass
++                    except Exception as _e:
++                        log_swallowed("football.refresh", _e)
 +                if (e["state"] == "in" or soon) and e["id"] in _pair_of:
 +                    pairs.add(_pair_of[e["id"]])
 +        if not pairs:
@@ -18014,7 +18226,7 @@ index 0000000..7654d97
 +    return to_jpeg(img)
 diff --git a/comet/services/live_art_svc.py b/comet/services/live_art_svc.py
 new file mode 100644
-index 0000000..8e75154
+index 0000000..9f1405e
 --- /dev/null
 +++ b/comet/services/live_art_svc.py
 @@ -0,0 +1,398 @@
@@ -18041,7 +18253,7 @@ index 0000000..8e75154
 +import aiohttp
 +from fastapi import APIRouter, HTTPException, Response
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +router = APIRouter(tags=["Stremio"])
@@ -18213,13 +18425,13 @@ index 0000000..8e75154
 +        elif _nom:
 +            _n = int(_nom.group(1))
 +            info["awards"] = f"Indicado a {_n} Oscar" + ("s" if _n > 1 else "")
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("live_art_svc._hero_info", _e)
 +    try:
 +        from comet.services.catalogs import _get_ready_tt_list
 +        info["dub"] = imdb in set(await _get_ready_tt_list("movie" if kind == "movie" else "series"))
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("live_art_svc._hero_info", _e)
 +    info["quality"] = await _best_quality(imdb)
 +    cast = [(c.get("name"), c.get("profile_path")) for c in ((d.get("credits") or {}).get("cast") or [])[:5]]
 +    return {"info": info, "backdrop": _tmdb_img(backdrop_path), "logo": _tmdb_img((logo or {}).get("file_path"), "w500"),
@@ -18418,7 +18630,7 @@ index 0000000..8e75154
 +    return Response(jpg, media_type="image/jpeg", headers=_IMG_HEADERS)
 diff --git a/comet/services/live_tv.py b/comet/services/live_tv.py
 new file mode 100644
-index 0000000..7cdd505
+index 0000000..2b89f27
 --- /dev/null
 +++ b/comet/services/live_tv.py
 @@ -0,0 +1,1122 @@
@@ -18434,7 +18646,7 @@ index 0000000..7cdd505
 +
 +import httpx
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.services.direct_addons import _is_host_blocked_by_house_dns
 +
@@ -18556,8 +18768,8 @@ index 0000000..7cdd505
 +            d = json.load(f)
 +        _pluto_lang = dict(d.get("lang") or {})
 +        _pluto_info_when = float(d.get("when") or 0)
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("live_tv.load_pluto_info", _e)
 +
 +
 +def _save_pluto_info(lang: dict[str, str]):
@@ -18745,8 +18957,8 @@ index 0000000..7cdd505
 +                if line.startswith("MemAvailable:"):
 +                    parts = line.split()
 +                    return int(parts[1]) // 1024
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("live_tv._get_mem_available_mb", _e)
 +    return 1024
 +
 +
@@ -18960,8 +19172,8 @@ index 0000000..7cdd505
 +                        rr = await cl.get(u_j2)
 +                        if rr.status_code == 200:
 +                            l = _audio_lang(rr.text)
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("live_tv.validate_pluto_channels", _e)
 +            if l:
 +                lang[cid] = l
 +            if ok:
@@ -19042,8 +19254,8 @@ index 0000000..7cdd505
 +            try:
 +                if await _is_host_blocked_by_house_dns(host, "iptv"):
 +                    return None
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("live_tv._check", _e)
 +            async with sem:
 +                ok, motivo = await asyncio.to_thread(check_channel_chain, u, 5.0)
 +                if ok:
@@ -19155,8 +19367,8 @@ index 0000000..7cdd505
 +                    next_title = next_t.get("title") or next_t.get("name") or "Programa"
 +                    next_start_str = next_start.astimezone(tz).strftime("%H:%M")
 +                    depois = (next_title, next_start_str)
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("live_tv._format_agora_depois", _e)
 +            break
 +    parts = []
 +    if agora:
@@ -19480,10 +19692,10 @@ index 0000000..7cdd505
 +    return None
 +
 +
-+async def get_live_tv_stream(media_id: str) -> list[dict]:
++async def get_live_tv_stream(media_id: str, nuvio: bool = False) -> list[dict]:
 +    if media_id.startswith("cometlive:radio:"):
 +        from comet.services.radio import get_radio_stream
-+        return await get_radio_stream(media_id, _public_base())
++        return await get_radio_stream(media_id, _public_base(), video=nuvio)
 +    if media_id.startswith("cometlive:pluto:"):
 +        pluto_id = media_id.split(":", 2)[2]
 +        ch = await get_pluto_channel_by_id(pluto_id)
@@ -19746,7 +19958,7 @@ index 0000000..017e3f2
 +    return meta_id.startswith(("cometsaga:o-", "cometsaga:c-", "cometsaga:w-"))
 diff --git a/comet/services/media_info.py b/comet/services/media_info.py
 new file mode 100644
-index 0000000..288252e
+index 0000000..e1e6508
 --- /dev/null
 +++ b/comet/services/media_info.py
 @@ -0,0 +1,184 @@
@@ -19765,7 +19977,7 @@ index 0000000..288252e
 +import aiohttp
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.services import media_probe
 +
 +_READY = False
@@ -19899,8 +20111,8 @@ index 0000000..288252e
 +        for r in rows:
 +            try:
 +                out[(r["info_hash"], r["file_key"])] = json.loads(r["summary"])
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("media_info.get_media_batch", _e)
 +    except Exception as e:
 +        logger.debug(f"get_media_batch: {e}")
 +    return out
@@ -21182,7 +21394,7 @@ index a111c8c..631dd5b 100644
          cached_count = sum(
 diff --git a/comet/services/meta_ptbr.py b/comet/services/meta_ptbr.py
 new file mode 100644
-index 0000000..5c305e2
+index 0000000..d24a751
 --- /dev/null
 +++ b/comet/services/meta_ptbr.py
 @@ -0,0 +1,735 @@
@@ -21192,7 +21404,7 @@ index 0000000..5c305e2
 +import time
 +import aiohttp
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.metadata.tmdb import TMDBApi
 +from comet.services.catalogs import PROVIDERS
 +
@@ -21863,8 +22075,8 @@ index 0000000..5c305e2
 +                                from comet.metadata.manager import MetadataScraper
 +                                scraper = MetadataScraper(session)
 +                                _, aliases = await scraper.fetch_metadata_and_aliases("series", media_id)
-+                            except Exception:
-+                                pass
++                            except Exception as _e:
++                                log_swallowed("meta_ptbr.get_meta_ptbr", _e)
 +
 +                            filler_map = await get_anime_filler_map(
 +                                media_id, base_meta.get("name", ""), aliases, session
@@ -21923,7 +22135,7 @@ index 0000000..5c305e2
 +    return copy.deepcopy(base_meta)
 diff --git a/comet/services/mytv.py b/comet/services/mytv.py
 new file mode 100644
-index 0000000..9974915
+index 0000000..82e9a91
 --- /dev/null
 +++ b/comet/services/mytv.py
 @@ -0,0 +1,481 @@
@@ -21946,7 +22158,7 @@ index 0000000..9974915
 +import aiohttp
 +from fastapi import APIRouter, HTTPException, Response
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +TZ = ZoneInfo("America/Recife")
@@ -22354,8 +22566,8 @@ index 0000000..9974915
 +            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
 +                if resp.status == 200:
 +                    return await resp.read()
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("mytv._fetch_bytes", _e)
 +    return None
 +
 +
@@ -22410,7 +22622,7 @@ index 0000000..9974915
 +        await asyncio.sleep(1800)
 diff --git a/comet/services/nightly.py b/comet/services/nightly.py
 new file mode 100644
-index 0000000..35998de
+index 0000000..87d2952
 --- /dev/null
 +++ b/comet/services/nightly.py
 @@ -0,0 +1,689 @@
@@ -22430,7 +22642,7 @@ index 0000000..35998de
 +from fastapi.responses import JSONResponse
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.services.catalogs import get_catalog
 +from comet.services.prefetch import (
@@ -22465,8 +22677,8 @@ index 0000000..35998de
 +                if line.startswith("MemAvailable:"):
 +                    parts = line.split()
 +                    return float(parts[1]) / 1024.0
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("nightly._get_mem_available_mb", _e)
 +    return 9999.0
 +
 +
@@ -22895,8 +23107,8 @@ index 0000000..35998de
 +                                    diff = (datetime.date.today() - aired_date).days
 +                                    if -1 <= diff <= 14:
 +                                        is_recent = True
-+                                except Exception:
-+                                    pass
++                                except Exception as _e:
++                                    log_swallowed("nightly.run_nightly_cycle", _e)
 +
 +                            if (
 +                                item.get("is_history")
@@ -22999,8 +23211,8 @@ index 0000000..35998de
 +
 +            try:
 +                _CATALOG_CACHE.clear()
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("nightly.run_nightly_cycle", _e)
 +
 +            logger.info(
 +                f"🌙 madrugada: {items_processed} itens, {dub_ready_count} dublados prontos, {notified_count} avisos em {elapsed:.1f}s"
@@ -23105,7 +23317,7 @@ index 0000000..35998de
 +    return JSONResponse(content={"started": True}, status_code=200)
 diff --git a/comet/services/omdb.py b/comet/services/omdb.py
 new file mode 100644
-index 0000000..120584e
+index 0000000..8d81cdd
 --- /dev/null
 +++ b/comet/services/omdb.py
 @@ -0,0 +1,203 @@
@@ -23126,7 +23338,7 @@ index 0000000..120584e
 +import aiohttp
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +_MEM: dict[str, dict] = {}
@@ -23172,8 +23384,8 @@ index 0000000..120584e
 +    _budget["used"] += 1
 +    try:
 +        _BUDGET_FILE.write_text(json.dumps(_budget))
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("omdb._spend", _e)
 +
 +
 +def budget_status() -> dict:
@@ -23198,8 +23410,8 @@ index 0000000..120584e
 +                    d = json.loads(r["data"])
 +                    d["_fetched_at"] = r["fetched_at"]
 +                    _MEM[r["imdb_id"]] = d
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("omdb._ensure_loaded", _e)
 +            logger.info(f"🏆 OMDb: {len(_MEM)} títulos em cache")
 +        except Exception as e:
 +            logger.warning(f"OMDb: cache indisponível: {type(e).__name__}")
@@ -23262,8 +23474,8 @@ index 0000000..120584e
 +            "INSERT OR REPLACE INTO omdb_cache (imdb_id, data, fetched_at) VALUES (:i, :d, :t)",
 +            {"i": imdb_id, "d": json.dumps({k: v for k, v in keep.items() if k != "_fetched_at"}), "t": now},
 +        )
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("omdb.get_omdb", _e)
 +    return keep if keep.get("Response") != "False" else None
 +
 +
@@ -23571,7 +23783,7 @@ index aa43646..722ba5b 100644
          ]
 diff --git a/comet/services/prefetch.py b/comet/services/prefetch.py
 new file mode 100644
-index 0000000..0578131
+index 0000000..e9e666f
 --- /dev/null
 +++ b/comet/services/prefetch.py
 @@ -0,0 +1,377 @@
@@ -23582,7 +23794,7 @@ index 0000000..0578131
 +import aiohttp
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +_RECENT_PREFETCHES: dict[str, float] = {}
@@ -23816,8 +24028,8 @@ index 0000000..0578131
 +                mapped = await anime_mapper.get_imdb_from_kitsu(k_id)
 +                if mapped and mapped.startswith("tt"):
 +                    return mapped
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("prefetch._resolve_imdb_id", _e)
 +            return media_id.split(":")[0] if ":" in media_id else media_id
 +
 +    if info_hash:
@@ -23837,8 +24049,8 @@ index 0000000..0578131
 +                if raw.startswith("tt"):
 +                    return raw.split(":")[0]
 +                return raw
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("prefetch._resolve_imdb_id", _e)
 +
 +    return media_id.split(":")[0] if media_id else None
 +
@@ -23954,10 +24166,10 @@ index 0000000..0578131
 +    task.add_done_callback(_TASKS.discard)
 diff --git a/comet/services/radio.py b/comet/services/radio.py
 new file mode 100644
-index 0000000..b7467e2
+index 0000000..3e83fc1
 --- /dev/null
 +++ b/comet/services/radio.py
-@@ -0,0 +1,1526 @@
+@@ -0,0 +1,1633 @@
 +"""Rádios brasileiras ao vivo para o Comet (Stremio), com Recife/Pernambuco primeiro.
 +
 +Fonte: Radio Browser (https://www.radio-browser.info/).
@@ -23990,10 +24202,14 @@ index 0000000..b7467e2
 +
 +try:
 +    from loguru import logger
++    from comet.core.logger import log_swallowed
 +except Exception:  # pragma: no cover
 +    import logging
 +
 +    logger = logging.getLogger("comet.radio")
++
++    def log_swallowed(where, err):
++        pass
 +
 +# ---------------------------------------------------------------------------
 +# Constantes públicas
@@ -24576,8 +24792,8 @@ index 0000000..b7467e2
 +    def close(self) -> None:
 +        try:
 +            self._w.close()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("radio.close", _e)
 +
 +
 +_SSL_CTX: Optional[ssl.SSLContext] = None
@@ -24591,8 +24807,8 @@ index 0000000..b7467e2
 +            import certifi  # type: ignore
 +
 +            _SSL_CTX.load_verify_locations(certifi.where())
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("radio._ssl_ctx", _e)
 +    return _SSL_CTX
 +
 +
@@ -24921,8 +25137,8 @@ index 0000000..b7467e2
 +                    hosts.append(name)
 +            except Exception:
 +                continue
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("radio._api_servers", _e)
 +    random.shuffle(hosts)
 +    for h in API_SERVERS:
 +        if h not in hosts:
@@ -25152,8 +25368,8 @@ index 0000000..b7467e2
 +            u = _fallback_poster(s.get("name") or "Rádio")
 +            if isinstance(u, str) and u.startswith(("http://", "https://")):
 +                return u
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("radio._poster", _e)
 +    return DEFAULT_RADIO_POSTER
 +
 +
@@ -25301,20 +25517,27 @@ index 0000000..b7467e2
 +        try:
 +            if resp is not None:
 +                resp._w.close()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("radio.now_playing", _e)
 +    if title.lower() in ("", "-", "unknown", "live", "ao vivo") or title.lower() == (s.get("name") or "").lower():
 +        title = ""
 +    _NOW_CACHE[sid] = (time.time(), title)
 +    return title
 +
 +
-+async def get_radio_stream(media_id: str, base: str = "") -> list[dict]:
++async def get_radio_stream(media_id: str, base: str = "", video: bool = False) -> list[dict]:
 +    s = _station_from_id(media_id)
 +    if not s:
 +        return []
 +    desc = " · ".join(x for x in (s.get("name") or "Rádio", _place(s), _quality(s)) if x)
 +    base = (base or "").rstrip("/")
++    if video and base and _ffmpeg_path():
++        # Nuvio: o player espera um quadro de vídeo ("Iniciando vídeo…" eterno com só áudio).
++        # Primeira opção = a rádio com a capa parada como vídeo (gerado no A71 com ffmpeg).
++        tv = await get_radio_stream(media_id, base, video=False)
++        return [{"name": "📻 Ao vivo", "description": desc + "\ncom capa na tela",
++                 "url": f"{base}/radio/{s['id']}/tv.ts", "behaviorHints": {"notWebReady": False}}] + [
++            dict(x, name=f"📻 Ao vivo ({i + 2})") for i, x in enumerate(tv)]
 +    relay = {"name": "📻 Ao vivo", "description": desc + "\nvia servidor",
 +             "url": f"{base}/radio/{s['id']}" + (".m3u8" if s.get("hls") else ""),
 +             "behaviorHints": {"notWebReady": False}} if base else None
@@ -25336,6 +25559,102 @@ index 0000000..b7467e2
 +            out.append({"name": "📻 Ao vivo (2)" if relay else "📻 Ao vivo", "description": desc + ("\ndireto" if direct else "\ndireto (http)"),
 +                        "url": http, "behaviorHints": {"notWebReady": False}})
 +    return out
++
++
++# ---------------------------------------------------------------------------
++# Rádio como vídeo (capa parada + som), para players que exigem vídeo (Nuvio)
++# ---------------------------------------------------------------------------
++_FFMPEG: dict = {"path": None, "checked": False}
++_VIDEO_PROCS: list = []  # processos ffmpeg ativos (no máximo _VIDEO_MAX)
++_VIDEO_MAX = 2
++
++
++def _ffmpeg_path() -> Optional[str]:
++    if not _FFMPEG["checked"]:
++        import shutil
++        _FFMPEG["path"] = shutil.which("ffmpeg")
++        _FFMPEG["checked"] = True
++    return _FFMPEG["path"]
++
++
++def _lower_oom() -> None:
++    # o watchdog protege o Comet e os filhos (-1000); o ffmpeg deve ser o primeiro a morrer
++    try:
++        with open("/proc/self/oom_score_adj", "w") as f:
++            f.write("500")
++    except OSError:
++        pass
++
++
++async def relay_radio_video(station_id: str, request):
++    """GET /radio/{id}/tv.ts: MPEG-TS com a capa da rádio (1 quadro/s) e o áudio em AAC."""
++    from fastapi.responses import Response, StreamingResponse
++
++    s = _by_id.get((station_id or "").split(":")[-1])
++    ff = _ffmpeg_path()
++    if not s or not ff:
++        return Response("indisponível", status_code=404)
++    src = s.get("https_url") or s.get("stream_url") or ""
++    if not src:
++        return Response("rádio sem endereço", status_code=404)
++    cover = f"/tmp/comet_radio_{s['id']}.png"
++    if not os.path.exists(cover):
++        from comet.api.endpoints.live_routes import _draw_radio
++        png = await asyncio.to_thread(_draw_radio, (s.get("name") or "Rádio")[:60], _place(s)[:40])
++        with open(cover, "wb") as f:
++            f.write(png)
++    # limite de processos: o mais antigo cai (a TV trocou de rádio)
++    for p in [p for p in _VIDEO_PROCS if p.returncode is not None]:
++        _VIDEO_PROCS.remove(p)
++    while len(_VIDEO_PROCS) >= _VIDEO_MAX:
++        old = _VIDEO_PROCS.pop(0)
++        try:
++            old.kill()
++        except ProcessLookupError:
++            pass
++    proc = await asyncio.create_subprocess_exec(
++        ff, "-hide_banner", "-loglevel", "error", "-nostdin",
++        "-loop", "1", "-framerate", "1", "-i", cover,
++        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
++        "-user_agent", "Mozilla/5.0", "-i", src,
++        "-map", "0:v", "-map", "1:a",
++        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
++        "-vf", "scale=512:512", "-r", "1", "-g", "2",
++        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
++        "-f", "mpegts", "-muxdelay", "0", "pipe:1",
++        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
++        preexec_fn=_lower_oom,
++    )
++    _VIDEO_PROCS.append(proc)
++    logger.info(f"📻🎬 rádio em vídeo: {s.get('name')} (pid {proc.pid})")
++
++    async def body() -> AsyncIterator[bytes]:
++        try:
++            while True:
++                if request is not None and await request.is_disconnected():
++                    break
++                try:
++                    chunk = await asyncio.wait_for(proc.stdout.read(32768), timeout=30)
++                except asyncio.TimeoutError:
++                    break
++                if not chunk:
++                    break
++                yield chunk
++        finally:
++            if proc.returncode is None:
++                try:
++                    proc.kill()
++                except ProcessLookupError:
++                    pass
++            try:
++                await asyncio.wait_for(proc.wait(), 5)
++            except Exception as _e:
++                log_swallowed("radio.body", _e)
++            if proc in _VIDEO_PROCS:
++                _VIDEO_PROCS.remove(proc)
++
++    return StreamingResponse(body(), media_type="video/mp2t",
++                             headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"})
 +
 +
 +# ---------------------------------------------------------------------------
@@ -25486,7 +25805,7 @@ index 0000000..b7467e2
 +    }
 diff --git a/comet/services/recap.py b/comet/services/recap.py
 new file mode 100644
-index 0000000..233cc0e
+index 0000000..c6ed0c3
 --- /dev/null
 +++ b/comet/services/recap.py
 @@ -0,0 +1,595 @@
@@ -25512,7 +25831,7 @@ index 0000000..233cc0e
 +import aiohttp
 +from fastapi import APIRouter, HTTPException, Response
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +ROWS = [{"type": "movie", "id": "comet_recap", "name": "🎁 Sua retrospectiva"}]
@@ -26043,8 +26362,8 @@ index 0000000..233cc0e
 +        r = await database.fetch_one("SELECT COUNT(*) AS n, MIN(day) AS d FROM recap_plays")
 +        if r and r["n"]:
 +            return [f"🎁 Retrospectiva: {r['n']} plays guardados desde {r['d']}"]
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("recap.status_lines", _e)
 +    return []
 +
 +
@@ -26448,9 +26767,179 @@ index 0000000..f4dc693
 +    desc = meta.get("description") or ""
 +    meta["description"] = "\n".join(lines) + ("\n\n" + desc if desc else "")
 +    return meta, True
+diff --git a/comet/services/row_groups.py b/comet/services/row_groups.py
+new file mode 100644
+index 0000000..40a7877
+--- /dev/null
++++ b/comet/services/row_groups.py
+@@ -0,0 +1,164 @@
++"""Fileiras agrupadas: junta fileiras parecidas numa só, com filtro.
++
++Antes a tela inicial tinha 88 fileiras (7 streamings x 3, 9 de clima, 9 de gênero...).
++Aqui cada grupo vira UMA fileira com o filtro `genre` (no app: o seletor da fileira /
++aba Descobrir). Sem filtro, a fileira mostra um membro diferente a cada dia (rodízio).
++
++As fileiras originais continuam respondendo pelo id antigo (aquecimento, testes, links
++antigos); só deixam de aparecer no manifesto. Desligar: CATALOG_GROUPS=False no .env.
++"""
++from __future__ import annotations
++
++import datetime
++
++from comet.core.models import settings
++
++# id do grupo -> nome da fileira e membros por tipo [(rótulo do filtro, id original)]
++_STATIC_GROUPS: dict[str, dict] = {
++    "comet_moods": {
++        "name": "🎭 Clima do dia",
++        "members": {
++            "movie": [
++                ("😭 Para chorar", "comet_mood_cry"),
++                ("🤯 Plot twist", "comet_mood_twist"),
++                ("😌 Comédia leve", "comet_mood_light"),
++                ("👨‍👩‍👧 Sessão em família", "comet_mood_family"),
++                ("🌙 Suspense à noite", "comet_mood_night"),
++                ("🏆 Oscar de Melhor Filme", "comet_mood_oscar"),
++                ("⭐ Mais bem avaliados", "comet_mood_top"),
++                ("📼 Clássicos dublados", "comet_mood_classicdub"),
++            ],
++        },
++    },
++    "comet_genres": {
++        "name": "🎞️ Gêneros",
++        "members": {
++            "movie": [
++                ("💥 Ação e aventura", "comet_action"),
++                ("😂 Comédias", "comet_comedy"),
++                ("👻 Terror", "comet_horror"),
++                ("🧸 Para a família", "comet_family"),
++                ("🌍 Documentários", "comet_docs"),
++                ("🏆 Aclamados", "comet_top"),
++            ],
++            "series": [
++                ("🕵️ Crime e suspense", "comet_crime"),
++                ("🇰🇷 Doramas", "comet_kdrama"),
++                ("🏆 Aclamados", "comet_top"),
++            ],
++        },
++    },
++}
++
++STREAMS_ID = "comet_streams"
++ORIGS_ID = "comet_origs"
++_STREAMS_NAME = "📺 Nos streamings"
++_ORIGS_NAME = "⭐ Originais dos streamings"
++
++
++def enabled() -> bool:
++    return bool(getattr(settings, "CATALOG_GROUPS", True))
++
++
++def _provider_members(catalogs: list[dict]) -> dict[str, dict[str, list[tuple[str, str]]]]:
++    """Monta os grupos de streaming a partir do que o manifesto já tem (respeita CATALOG_PROVIDERS)."""
++    streams: dict[str, list[tuple[str, str]]] = {}
++    origs: dict[str, list[tuple[str, str]]] = {}
++    for c in catalogs:
++        cid, ctype, name = c.get("id", ""), c.get("type", ""), c.get("name", "")
++        if cid.startswith("comet_orig_"):
++            label = name.replace("⭐ Originais", "").strip() or cid[len("comet_orig_"):]
++            origs.setdefault(ctype, []).append((label, cid))
++    from comet.services.catalogs import PROVIDERS  # import tardio: evita ciclo
++
++    prov_ids = {f"comet_{p}" for p in PROVIDERS}
++    for c in catalogs:
++        cid, ctype = c.get("id", ""), c.get("type", "")
++        if cid in prov_ids:
++            streams.setdefault(ctype, []).append((c.get("name") or cid, cid))
++    return {STREAMS_ID: streams, ORIGS_ID: origs}
++
++
++def _all_groups(catalogs: list[dict] | None = None) -> dict[str, dict]:
++    groups = {k: {"name": v["name"], "members": v["members"]} for k, v in _STATIC_GROUPS.items()}
++    if catalogs is None:
++        catalogs = _manifest_source()
++    dyn = _provider_members(catalogs)
++    groups[STREAMS_ID] = {"name": _STREAMS_NAME, "members": dyn[STREAMS_ID]}
++    groups[ORIGS_ID] = {"name": _ORIGS_NAME, "members": dyn[ORIGS_ID]}
++    return groups
++
++
++_SOURCE_CACHE: dict = {"cats": None}
++
++
++def _manifest_source() -> list[dict]:
++    """Manifesto sem agrupar (para descobrir os membros ao responder um catálogo de grupo)."""
++    if _SOURCE_CACHE["cats"] is None:
++        from comet.services.catalogs import build_manifest_catalogs
++
++        _SOURCE_CACHE["cats"] = build_manifest_catalogs(is_personal=True, grouped=False)
++    return _SOURCE_CACHE["cats"]
++
++
++def consolidate(catalogs: list[dict]) -> list[dict]:
++    """Troca os membros de cada grupo por uma fileira só (na posição do primeiro membro)."""
++    if not enabled():
++        return catalogs
++    _SOURCE_CACHE["cats"] = list(catalogs)
++    groups = _all_groups(catalogs)
++    present = {(c.get("type"), c.get("id")) for c in catalogs}
++    member_of: dict[tuple[str, str], str] = {}
++    live_members: dict[tuple[str, str], list[tuple[str, str]]] = {}
++    for gid, g in groups.items():
++        for mtype, members in g["members"].items():
++            avail = [(lab, mid) for lab, mid in members if (mtype, mid) in present]
++            if len(avail) < 2:
++                continue  # grupo com 1 membro não vale a pena
++            live_members[(mtype, gid)] = avail
++            for _, mid in avail:
++                member_of[(mtype, mid)] = gid
++    out: list[dict] = []
++    placed: set[tuple[str, str]] = set()
++    for c in catalogs:
++        key = (c.get("type"), c.get("id"))
++        gid = member_of.get(key)
++        if not gid:
++            out.append(c)
++            continue
++        gkey = (c.get("type"), gid)
++        if gkey in placed:
++            continue
++        placed.add(gkey)
++        out.append({
++            "type": c.get("type"),
++            "id": gid,
++            "name": groups[gid]["name"],
++            "extra": [
++                {"name": "genre", "options": [lab for lab, _ in live_members[gkey]], "isRequired": False},
++                {"name": "skip", "isRequired": False},
++            ],
++        })
++    return out
++
++
++def is_group(catalog_id: str) -> bool:
++    return catalog_id in _STATIC_GROUPS or catalog_id in (STREAMS_ID, ORIGS_ID)
++
++
++def resolve(catalog_id: str, media_type: str, extra: dict, today: datetime.date | None = None) -> tuple[str, dict]:
++    """(id original, extra sem o filtro do grupo). Sem filtro: rodízio diário entre os membros."""
++    if not is_group(catalog_id):
++        return catalog_id, extra
++    members = (_all_groups().get(catalog_id) or {}).get("members", {}).get(media_type) or []
++    if not members:
++        return catalog_id, extra
++    extra = dict(extra or {})
++    label = extra.pop("genre", None)
++    for lab, mid in members:
++        if lab == label:
++            return mid, extra
++    day = (today or datetime.date.today()).toordinal()
++    # deslocamento por grupo/tipo: fileiras diferentes não giram juntas
++    off = sum(map(ord, catalog_id + media_type))
++    return members[(day + off) % len(members)][1], extra
 diff --git a/comet/services/row_warm.py b/comet/services/row_warm.py
 new file mode 100644
-index 0000000..07c85af
+index 0000000..2d9a3a7
 --- /dev/null
 +++ b/comet/services/row_warm.py
 @@ -0,0 +1,417 @@
@@ -26466,7 +26955,7 @@ index 0000000..07c85af
 +import aiohttp
 +
 +from comet.core.database import database
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +_QUEUE: list[dict[str, Any]] = []
@@ -26493,8 +26982,8 @@ index 0000000..07c85af
 +            for line in f:
 +                if line.startswith("MemAvailable:"):
 +                    return float(line.split()[1]) / 1024.0
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("row_warm._get_mem_available_mb", _e)
 +    return 9999.0
 +
 +
@@ -26642,8 +27131,8 @@ index 0000000..07c85af
 +                    if row and row["season"] is not None and row["episode"] is not None:
 +                        s = int(row["season"])
 +                        e = int(row["episode"])
-+                except Exception:
-+                    pass
++                except Exception as _swallowed_e:
++                    log_swallowed("row_warm.resolve_target_from_catalog_item", _swallowed_e)
 +
 +        if s is None or e is None:
 +            auth_key = getattr(settings, "STREMIO_AUTH_KEY", None)
@@ -26824,8 +27313,8 @@ index 0000000..07c85af
 +                        await _hr.read()
 +        except asyncio.CancelledError:
 +            return
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("row_warm._row_warm_loop", _e)
 +
 +        if in_cache:
 +            _stats["skipped_cache"] += 1
@@ -27590,7 +28079,7 @@ index 0000000..efec780
 +    }
 diff --git a/comet/services/stremio_library.py b/comet/services/stremio_library.py
 new file mode 100644
-index 0000000..cbb321f
+index 0000000..6c1b004
 --- /dev/null
 +++ b/comet/services/stremio_library.py
 @@ -0,0 +1,554 @@
@@ -27609,7 +28098,7 @@ index 0000000..cbb321f
 +
 +import aiohttp
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +from comet.metadata.tmdb import TMDBApi
 +from comet.services.catalogs import (
@@ -27951,8 +28440,8 @@ index 0000000..cbb321f
 +                        res = data.get("results")
 +                        if isinstance(res, list):
 +                            return res
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("stremio_library.fetch_recs", _e)
 +            return []
 +
 +        rec_tasks = [fetch_recs(tid) for tid in valid_tmdb_ids]
@@ -28150,7 +28639,7 @@ index 0000000..cbb321f
 +    return []
 diff --git a/comet/services/sub_translate.py b/comet/services/sub_translate.py
 new file mode 100644
-index 0000000..6855d37
+index 0000000..02f015a
 --- /dev/null
 +++ b/comet/services/sub_translate.py
 @@ -0,0 +1,307 @@
@@ -28162,7 +28651,7 @@ index 0000000..6855d37
 +import urllib.parse
 +from curl_cffi.requests import AsyncSession
 +
-+from comet.core.logger import logger, record_source_error, record_source_success
++from comet.core.logger import logger, record_source_error, record_source_success, log_swallowed
 +from comet.core.models import settings
 +
 +_TRANSLATE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -28421,8 +28910,8 @@ index 0000000..6855d37
 +            if (time.time() - mtime) < DISK_CACHE_TTL:
 +                with open(cache_file, "rb") as f:
 +                    return f.read()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("sub_translate.ensure_auto_translated", _e)
 +
 +    lock = await _get_translate_lock(cache_key_str)
 +    async with lock:
@@ -28432,8 +28921,8 @@ index 0000000..6855d37
 +                if (time.time() - mtime) < DISK_CACHE_TTL:
 +                    with open(cache_file, "rb") as f:
 +                        return f.read()
-+            except Exception:
-+                pass
++            except Exception as _e:
++                log_swallowed("sub_translate.ensure_auto_translated", _e)
 +
 +        sub_bytes = await fetch_subtitle(
 +            provider=provider,
@@ -28657,7 +29146,7 @@ index 0000000..114c872
 +    return res_srt, stats
 diff --git a/comet/services/subtitles.py b/comet/services/subtitles.py
 new file mode 100644
-index 0000000..f249b6a
+index 0000000..c5f7a7a
 --- /dev/null
 +++ b/comet/services/subtitles.py
 @@ -0,0 +1,1276 @@
@@ -28677,7 +29166,7 @@ index 0000000..f249b6a
 +from curl_cffi.requests import AsyncSession
 +
 +from comet.core.database import database
-+from comet.core.logger import logger, record_source_error, record_source_success
++from comet.core.logger import logger, record_source_error, record_source_success, log_swallowed
 +from comet.core.models import settings
 +
 +SUBS_CACHE_DIR = "/opt/comet/data/subs_cache"
@@ -28720,8 +29209,8 @@ index 0000000..f249b6a
 +            if dt.tzinfo is None:
 +                dt = dt.replace(tzinfo=timezone.utc)
 +            return dt.astimezone(timezone.utc)
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles._parse_reset_time", _e)
 +    return None
 +
 +
@@ -28770,8 +29259,8 @@ index 0000000..f249b6a
 +            mtime = os.path.getmtime(cache_file)
 +            if (time.time() - mtime) < DISK_CACHE_TTL:
 +                return True
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles._is_cached", _e)
 +    return False
 +
 +
@@ -29681,8 +30170,8 @@ index 0000000..f249b6a
 +            if (time.time() - mtime) < DISK_CACHE_TTL:
 +                with open(cache_file, "rb") as f:
 +                    return f.read()
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles.fetch_subtitle", _e)
 +
 +    raw_content = None
 +    async with AsyncSession(impersonate="chrome") as session:
@@ -29710,8 +30199,8 @@ index 0000000..f249b6a
 +                res_data = {}
 +                try:
 +                    res_data = r.json()
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("subtitles.fetch_subtitle", _e)
 +                _update_os_quota(r.status_code, res_data)
 +
 +                if r.status_code != 200:
@@ -29759,8 +30248,8 @@ index 0000000..f249b6a
 +    if raw_content.startswith(b"\x1f\x8b"):
 +        try:
 +            raw_content = gzip.decompress(raw_content)
-+        except Exception:
-+            pass
++        except Exception as _e:
++            log_swallowed("subtitles.fetch_subtitle", _e)
 +
 +    sub_bytes = None
 +    sub_ext = ".srt"
@@ -29861,8 +30350,8 @@ index 0000000..f249b6a
 +    try:
 +        with open(cache_file, "wb") as f:
 +            f.write(final_bytes)
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("subtitles.fetch_subtitle", _e)
 +
 +    return final_bytes
 +
@@ -30450,7 +30939,7 @@ index 0000000..7efbb11
 +        await asyncio.sleep(6 * 3600)
 diff --git a/comet/services/telegram_bot.py b/comet/services/telegram_bot.py
 new file mode 100644
-index 0000000..3c3aaae
+index 0000000..d47e0dc
 --- /dev/null
 +++ b/comet/services/telegram_bot.py
 @@ -0,0 +1,470 @@
@@ -30475,7 +30964,7 @@ index 0000000..3c3aaae
 +
 +import aiohttp
 +
-+from comet.core.logger import logger
++from comet.core.logger import logger, log_swallowed
 +from comet.core.models import settings
 +
 +_API = "https://api.telegram.org/bot{token}/{method}"
@@ -30712,8 +31201,8 @@ index 0000000..3c3aaae
 +                    if pt and "⚡" in pt:
 +                        await send_telegram(f"⚡ Pronto pra assistir: {label}\n{pt}")
 +                        return
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("telegram_bot._watch_until_ready", _e)
 +                await asyncio.sleep(300)
 +        await send_telegram(f"⏳ {label} ainda não ficou pronto em 4 h. O Real-Debrid pode estar sem fontes rápidas para ele.")
 +    finally:
@@ -30757,8 +31246,8 @@ index 0000000..3c3aaae
 +    try:
 +        mem = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemAvailable", "SwapFree")}
 +        lines.append(f"🧠 Memória livre: {mem.get('MemAvailable', 0) // 1024} MB · swap livre {mem.get('SwapFree', 0) // 1024} MB")
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("telegram_bot._status_text", _e)
 +    try:
 +        sm = json.loads(Path("/opt/comet/data/smoke_last.json").read_text())
 +        lines.append(f"🧪 Teste automático: {'OK' if sm.get('ok') else 'FALHOU'} ({str(sm.get('ts', ''))[:16].replace('T', ' ')} UTC)")
@@ -30768,8 +31257,8 @@ index 0000000..3c3aaae
 +        from comet.services.prefetch import get_predownload_summary
 +        pd = get_predownload_summary()
 +        lines.append(f"📥 Pré-downloads hoje: {pd['today']}")
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("telegram_bot._status_text", _e)
 +    lines.append(f"👀 Pedidos em acompanhamento: {len(_WATCHING)}")
 +    for mod in _plugin_modules():
 +        fn = getattr(mod, "status_lines", None)
@@ -30789,8 +31278,8 @@ index 0000000..3c3aaae
 +try:
 +    from comet.services.wishlist import HELP_WISHLIST as _HW
 +    _HELP = _HELP + "\n\n" + _HW
-+except Exception:
-+    pass
++except Exception as _e:
++    log_swallowed("telegram_bot.<module>", _e)
 +
 +
 +def _full_help() -> str:
@@ -30845,8 +31334,8 @@ index 0000000..3c3aaae
 +        await send_telegram(m)
 +    try:
 +        _EXPIRY_FILE.write_text(json.dumps({"day": today, "alerts": len(msgs)}))
-+    except Exception:
-+        pass
++    except Exception as _e:
++        log_swallowed("telegram_bot._expiry_check", _e)
 +
 +
 +async def start_telegram_bot() -> None:
@@ -30881,8 +31370,8 @@ index 0000000..3c3aaae
 +                    _spawn(_answer(s, chat, text))
 +                try:
 +                    _OFFSET_FILE.write_text(str(offset))
-+                except Exception:
-+                    pass
++                except Exception as _e:
++                    log_swallowed("telegram_bot.start_telegram_bot", _e)
 +            except asyncio.CancelledError:
 +                raise
 +            except Exception as e:
@@ -30926,10 +31415,10 @@ index 0000000..3c3aaae
 +    await _call(session, "sendMessage", {"chat_id": chat, "text": reply[:4000], "disable_web_page_preview": True})
 diff --git a/comet/services/warmup.py b/comet/services/warmup.py
 new file mode 100644
-index 0000000..57f8e5e
+index 0000000..dc477e6
 --- /dev/null
 +++ b/comet/services/warmup.py
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,106 @@
 +import asyncio
 +import os
 +import time
@@ -30939,6 +31428,8 @@ index 0000000..57f8e5e
 +from comet.core.logger import logger
 +from comet.core.models import settings
 +from comet.services.catalogs import get_catalog
++
++from comet.utils.bounded import trim
 +
 +_WARMED_IDS: dict[str, float] = {}
 +
@@ -31008,6 +31499,7 @@ index 0000000..57f8e5e
 +                logger.warning(f"Pré-aquecimento error on {mtype} {mid}: {type(e).__name__}")
 +
 +            _WARMED_IDS[f"{mtype}:{mid}"] = time.time()
++            trim(_WARMED_IDS, 5000)
 +
 +            try:
 +                await asyncio.sleep(20)
@@ -31358,10 +31850,10 @@ index 0000000..709d6f1
 +    }
 diff --git a/comet/services/wishlist.py b/comet/services/wishlist.py
 new file mode 100644
-index 0000000..95339af
+index 0000000..93c4ba9
 --- /dev/null
 +++ b/comet/services/wishlist.py
-@@ -0,0 +1,599 @@
+@@ -0,0 +1,602 @@
 +"""Lista de desejos dublados + radar de lançamentos (Comet do A71).
 +
 +- Lista de desejos: "me avisa quando sair Duna 3 dublado" → fica esperando; a cada 3 h o serviço confere a
@@ -31430,6 +31922,8 @@ index 0000000..95339af
 +_READY_LOCK = asyncio.Lock()
 +_TASKS: set = set()
 +_last_call = 0.0
++from comet.utils.bounded import trim
++
 +_radar_seen: dict[str, float] = {}
 +_TMDB_IMDB: dict[int, str] = {}   # id TMDB → imdb (evita repetir external_ids todo dia)
 +
@@ -31852,6 +32346,7 @@ index 0000000..95339af
 +    for _, r in due[:RADAR_MAX_PER_RUN]:
 +        await _pace()
 +        _radar_seen[r["imdb"]] = _now()
++        trim(_radar_seen, 5000)
 +        try:
 +            streams = await streams_fn(session, "movie", r["imdb"])
 +        except asyncio.CancelledError:
@@ -31961,6 +32456,37 @@ index 0000000..95339af
 +        except Exception as e:
 +            logger.warning(f"wishlist: check_all falhou: {type(e).__name__}: {e}")
 +        await asyncio.sleep(CHECK_EVERY)
+diff --git a/comet/utils/bounded.py b/comet/utils/bounded.py
+new file mode 100644
+index 0000000..02f9838
+--- /dev/null
++++ b/comet/utils/bounded.py
+@@ -0,0 +1,10 @@
++"""Limite simples para dicionários usados como cache em memória (o Comet fica dias ligado)."""
++
++
++def trim(d: dict, max_items: int) -> None:
++    """Se passou do limite, descarta a metade mais antiga (ordem de inserção)."""
++    n = len(d)
++    if n <= max_items:
++        return
++    for k in list(d)[: n - max_items // 2]:
++        d.pop(k, None)
+diff --git a/comet/utils/formatting.py b/comet/utils/formatting.py
+index fe13b71..1646c30 100644
+--- a/comet/utils/formatting.py
++++ b/comet/utils/formatting.py
+@@ -16,9 +16,7 @@ def normalize_info_hash(info_hash: str) -> str:
+                 "utf-8"
+             )
+         except Exception:
+-            logger.opt(exception=True).debug(
+-                f"Failed to normalize base32 info_hash {info_hash!r} to hex"
+-            )
++            logger.debug(f"Failed to normalize base32 info_hash {info_hash!r} to hex")
+ 
+     if len(info_hash) == 80:
+         try:
 diff --git a/comet/utils/parsing.py b/comet/utils/parsing.py
 index 63f895c..bc3c3c0 100644
 --- a/comet/utils/parsing.py

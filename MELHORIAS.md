@@ -1,6 +1,6 @@
 # Melhorias possíveis para o Comet A71
 
-*Levantamento de 02/11/2026. Os números da Parte 1 foram medidos pelo endereço público (`:7443`), do jeito que o app do Stremio enxerga o addon.*
+*Levantamento de 02/11/2026, com atualizações até 09/11/2026. Os números da Parte 1 foram medidos pelo endereço público (`:7443`), do jeito que o app do Stremio enxerga o addon.*
 
 Legenda:
 - **Impacto:** 🔥🔥🔥 muda o dia a dia · 🔥🔥 bom ganho · 🔥 detalhe.
@@ -10,6 +10,15 @@ Legenda:
 O documento tem duas partes:
 - **★ O salto para o perfeito:** as melhorias que mudam a experiência de verdade, cada uma baseada em algo que medi ou vi acontecer no seu A71.
 - **Partes 0 a 8:** a base (rapidez, interface, bot, segurança), que também vale fazer.
+
+---
+
+## Feito em 09/11/2026
+- **Fileiras agrupadas:** manifesto de 88 para 47 catálogos (42 na tela inicial), com Clima do dia, Gêneros, Nos streamings e Originais; `CATALOG_GROUPS=False` desliga.
+- **Homônimos:** série com o mesmo nome (One Piece anime × live-action, Doctor Who 1963 × 2005) não mistura mais releases; pacotes de temporada sem ano no nome ainda passam.
+- **Velocidade:** BrSites em paralelo (≈9 s para 4–5 s) e MediaFusion com limite de 10 s (`SCRAPER_TIMEOUT_OVERRIDES`).
+- **Nuvio:** rádio abre em vídeo (`/radio/<id>/tv.ts`, ffmpeg); elenco com foto e autoplay do próximo episódio resolvidos no app.
+- **Robustez:** 73 erros engolidos agora vão para o log (`log_swallowed`), caches em memória com limite e banco estável (422 MB, vence em 30 dias).
 
 ---
 
@@ -222,7 +231,7 @@ O protocolo do Stremio permite "botões" (links) na página do título. Hoje qua
 
 | Melhoria | Detalhe | Impacto | Esforço |
 |---|---|---|---|
-| **Vigia externo (healthchecks.io)** ✋ | O A71 manda um "estou vivo" a cada 5 min; se parar, o healthchecks avisa no seu Telegram (passo a passo na Parte 6) | 🔥🔥🔥 | Seu: 5 min · meu: baixo |
+| ~~**Vigia externo (healthchecks.io)**~~ ✅ **feito em 02/11/2026** | O A71 manda um "estou vivo" a cada 5 min; se parar, o healthchecks avisa no seu Telegram (passo a passo na Parte 6) | 🔥🔥🔥 | Feito |
 | **Backup diário** | Banco do Comet (histórico de dublados, notas, cache), `.env` **criptografado** e patch: cópia diária enviada pelo bot só para você (ou para uma pasta do PC) | 🔥🔥🔥 | Baixo |
 | **Saúde do A71** | Temperatura, bateria, espaço livre e memória no `/status` e aviso no Telegram se esquentar demais ou o disco encher | 🔥🔥 | Baixo |
 | **Proteção da porta pública** | Limitar pedidos por IP no Caddy (barra robôs que varrem a internet) e esconder o `/configure` genérico de quem não tem token | 🔥🔥 | Baixo |
@@ -250,7 +259,7 @@ Hoje, em casa, o pedido sai até o roteador e volta para o A71. Funciona, mas d�
 
 Pronto. Fora de casa nada muda, porque lá o AdGuard não é usado.
 
-### 6.2 Vigia externo (healthchecks.io)
+### 6.2 Vigia externo (healthchecks.io) ✅ feito em 02/11/2026 (guia mantido só como registro)
 1. Entre em **https://healthchecks.io** → **Sign Up** (pode entrar com a conta Google). É grátis.
 2. Ele cria um projeto. Clique em **Add Check**:
    - **Name:** `Comet A71`
@@ -278,4 +287,4 @@ No roteador, na regra **a71 comet** (porta 7443), deixe o protocolo em **TCP/UDP
 2. **Em seguida (velocidade da 1ª busca):** resposta rápida + completa depois e cache do debrid só no que importa.
 3. **Interface:** página "Minhas fileiras", dublagem por episódio e resumo de dublagem na série.
 4. **Bot:** lista de desejos, botões, `/novidades` e resumo semanal.
-5. **Tranquilidade:** vigia externo (assim que você me mandar o Ping URL), backup diário, saúde do A71 e proteção da porta.
+5. **Tranquilidade:** vigia externo (feito em 02/11/2026), backup diário, saúde do A71 e proteção da porta.

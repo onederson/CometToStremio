@@ -383,12 +383,51 @@ def t_unit_nuvio_4k_natal() -> tuple[str, str]:
     cats = build_manifest_catalogs(is_personal=True)
     ids = [c["id"] for c in cats]
     t10 = max(i for i, x in enumerate(ids) if x == "comet_top10")
-    assert set(ids) >= {s["id"] for ss in SEASONS for s in ss["lists"]}
+    # desde 09/11/2026 só as datas em época entram no manifesto (fora de época não ocupam fileira)
+    _hot_now = set(hot(_dt.date.today().isoformat()))
+    _all_seasonal = {s["id"] for ss in SEASONS for s in ss["lists"]}
+    assert set(ids) & _all_seasonal == _hot_now, "só as datas em época no manifesto"
     for h in hot(_dt.date.today().isoformat()):
         assert ids.index(h) <= t10 + 4, f"{h} em destaque deveria ficar logo depois do Top 10"
     _, p = _raw_build_tmdb_path_and_params("movie", "comet_xmas_all", None, 1)
     assert p["with_keywords"] == 207317 and p["sort_by"] == "primary_release_date.desc"
     return "PASS", "Nuvio: 4K PT > 1080p PT > melhor original; datas comemorativas sobem perto da data"
+
+
+def t_unit_fileiras_homonimos() -> tuple[str, str]:
+    """09/11/2026: fileiras agrupadas (filtro + rodízio) e filtro de séries homônimas."""
+    import datetime as _dt
+    from comet.services import row_groups
+    from comet.services.filtering import TitleMatcher
+
+    cats = [
+        {"type": "movie", "id": "comet_top10", "name": "Top"},
+        {"type": "movie", "id": "comet_mood_cry", "name": "a"},
+        {"type": "movie", "id": "comet_mood_twist", "name": "b"},
+        {"type": "series", "id": "comet_orig_netflix", "name": "⭐ Originais Netflix"},
+        {"type": "series", "id": "comet_netflix", "name": "Netflix"},
+        {"type": "series", "id": "comet_orig_max", "name": "⭐ Originais HBO Max"},
+        {"type": "series", "id": "comet_max", "name": "HBO Max"},
+    ]
+    out = row_groups.consolidate(cats)
+    ids = [(c["type"], c["id"]) for c in out]
+    assert ids == [("movie", "comet_top10"), ("movie", "comet_moods"), ("series", "comet_origs"),
+                   ("series", "comet_streams")], ids
+    mid, extra = row_groups.resolve("comet_moods", "movie", {"genre": "🤯 Plot twist", "skip": "40"})
+    assert mid == "comet_mood_twist" and extra == {"skip": "40"}, (mid, extra)
+    d1 = row_groups.resolve("comet_moods", "movie", {}, today=_dt.date(2026, 11, 9))[0]
+    d2 = row_groups.resolve("comet_moods", "movie", {}, today=_dt.date(2026, 11, 10))[0]
+    assert d1 != d2 and d1.startswith("comet_mood_"), "rodízio diário"
+
+    blocked = {"ep:the man in the straw hat", "ep:1:1:romance dawn", "ep:__hdr__", "ep:__minyear:2005__"}
+    m = TitleMatcher("One Piece", 1999, None, "series", {}, blocked)
+    assert not m.matches_title("ONE.PIECE.S01E01.ROMANCE.DAWN.1080p.NF.WEB-DL", "One Piece")
+    assert not m.matches_title("One.Piece.S01E02.The.Man.in.the.Straw.Hat.1080p", "One Piece")
+    assert not m.matches_title("One.Piece.S01E01.1080p.WEB-DL.DV.HDR10", "One Piece")
+    assert not m.matches_title("Doctor.Who.2005.S01E01.1080p", "One Piece")
+    assert m.matches_title("[uP] One Piece - 0001 (HDV 1080p x264 AC3 Multi)", "One Piece")
+    assert m.matches_title("One Piece E1000 Romance Dawn Special 1080p", "One Piece"), "mesmo título, outro episódio"
+    return "PASS", "grupos (filtro, rodízio, posição) e homônimos (título de episódio, HDR, ano) OK"
 
 
 def t_unit_source_breaker() -> tuple[str, str]:
@@ -1660,6 +1699,7 @@ def main():
         ("unit_predownload_pick", t_unit_predownload_pick),
         ("unit_episodios_ptbr", t_unit_episodios_ptbr),
         ("unit_nuvio_4k_natal", t_unit_nuvio_4k_natal),
+        ("unit_fileiras_homonimos", t_unit_fileiras_homonimos),
         ("unit_novidades_1108", t_unit_novidades_1108),
     ]
 
