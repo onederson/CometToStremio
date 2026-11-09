@@ -1,5 +1,7 @@
 # HANDOFF: Comet Stremio no Galaxy A71 (para outra IA continuar)
 
+> **🧊 Congelado em 09/11/2026.** O trabalho continua só no Nuvio, na pasta `../NUVIO` (repo `onederson/NuvioComet`). Não mexa no A71 a partir daqui: ele roda a versão do Nuvio. Para voltar ao Stremio, veja a Seção 6 do `HANDOFF.md` do NUVIO (backup em `backups/stremio-20261109/`, tag `stremio-20261109`).
+
 *Última atualização: 09/11/2026 (horário de Brasília)*
 
 Este é o documento de passagem. Ele resume **tudo o que foi feito, o estado real verificado, as regras do projeto, como testar e o que vem a seguir**. O `README.md` (Seção 0 e Mapa de arquivos) tem os detalhes da instalação. A Fase 1 (AdGuard) está em `README adguard contexto.md`.

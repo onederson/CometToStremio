@@ -1,5 +1,7 @@
 # Comet A71: o addon de Stremio da casa (Comet + Real-Debrid + TorBox, PT-BR primeiro)
 
+> **🧊 Congelado em 09/11/2026.** O trabalho continua só no Nuvio, na pasta `../NUVIO` (repo `onederson/NuvioComet`). Não mexa no A71 a partir daqui: ele roda a versão do Nuvio. Para voltar ao Stremio, veja a Seção 6 do `HANDOFF.md` do NUVIO (backup em `backups/stremio-20261109/`, tag `stremio-20261109`).
+
 *Início: 29/10/2026 · Última atualização: 09/11/2026 (horário de Brasília)*
 
 > **🤖 Para outra IA continuar daqui:** leia **`HANDOFF.md`** inteiro antes de rodar qualquer comando (regras, segurança, histórico item a item na Seção 4, onde paramos na Seção 8). O modo de trabalho está em **`CLAUDE.md`** (desde 02/11/2026 o Claude implementa direto, sem delegar ao `agy`). O contexto da Fase 1 (rede, AdGuard, ADB) está resumido nas Seções 1 e 3 do `HANDOFF.md`.

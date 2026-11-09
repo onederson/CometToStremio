@@ -1,5 +1,7 @@
 # Modo de trabalho
 
+> **🧊 Congelado em 09/11/2026.** O trabalho continua só no Nuvio, na pasta `../NUVIO` (repo `onederson/NuvioComet`). Não mexa no A71 a partir daqui: ele roda a versão do Nuvio. Para voltar ao Stremio, veja a Seção 6 do `HANDOFF.md` do NUVIO (backup em `backups/stremio-20261109/`, tag `stremio-20261109`).
+
 **Desde 02/11/2026 o usuário pediu: Claude implementa tudo diretamente.** Não delegar mais ao `agy` (CLI do Antigravity).
 Quando a tarefa tiver partes independentes, Claude pode abrir subagentes (Agent tool) e trabalhar em paralelo; o usuário autorizou o gasto de tokens.
 
